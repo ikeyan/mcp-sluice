@@ -11,8 +11,7 @@
 #   - verify.sh と run-checks.ts が読む rev-parse --local-env-vars の一覧 (canon: facts/git/local-env-vars-and-hook-env)。測った版での出方:
 #     - git 2.43.0: GIT_DIR に存在しないパスを入れても、同じ 15 個を同じ順で出した。測ったのは GIT_DIR だけ。
 #     - git 2.55.0 (macOS): 値を変えずに一覧を出した。
-#     - git 2.32〜2.42: 測っていない。
-#   - 一覧の各行が ^GIT_[A-Z_]+$ (C の locale で照合する) に合わなければ、変数の名前として使わずに落ちる。リポの中の git は、知らない option を名前のまま出して exit 0 で終わる (同じ canon の「知らない option」)。
+#   - 一覧の各行が ^GIT_[A-Z_]+$ (A-Z は ASCII の大文字だけ) に合わなければ落ちる。リポの中の git は、知らない option を名前のまま出して exit 0 で終わる (同じ canon の「知らない option」)。
 # - このファイルの dir の状態ごとの扱い (canon: facts/git/repository-shapes の「スクリプトを置いた dir の位置」):
 #   - 本体の作業ツリーのルート: 回す。
 #   - linked worktree のルート: 回す。hook は common git dir に写す (下の「hook」)。
@@ -22,12 +21,16 @@
 #     - git dir の中。
 #     - bare のリポ。
 #     - safe.directory が要る持ち主の違い。
-# - PATH にあるもの:
-#   - uname・dirname・git・rm・mkdir・ln: どれかが無ければ、OS の判定より前に名前を出して exit 127。
+# - PATH にあるもの。無いものは前もって確かめず、使う所で外れる。無いときは bash が `<名前>: command not found` を stderr に出す (bash と deno は下のとおり):
+#   - bash: 1 行目の env が見つけられず exit 127 (Linux の coreutils の env では `/usr/bin/env: 'bash': No such file or directory`)。
+#   - uname・dirname・git: その行で exit 127 (set -e)。hook に触れる前。
 #     - git が非 0 で終われば、git の終了コードで止まる。除くのは、作業ツリーの判定 (上の「このファイルの dir の状態」) と core.hooksPath の読み (下の「hook」)。
-#   - cmp・install: 無ければ hook を揃えられないとする。
+#   - mkdir・install・ln: hook を写すときだけ使う。無ければ写せないので、hook を揃えられないとする (下の「写せない」)。
+#   - rm: hook を写した後の一時ファイルの消去に使う。消せなければ、hook を揃えられないとし、一時ファイルと消すコマンドを出す。
+#   - cmp: 写す先に通常ファイルの pre-push が在るときだけ使う。無ければ hook を揃えられないとする (下の写す先の表)。
+#   - chmod: 写す先の pre-push が同じ中身で実行可能でないときだけ使う。無ければ hook を揃えられないとする (同じ表)。
+#   - deno: 無ければ、hook を揃えた後の最後の exec が `exec: deno: not found` で exit 127 (canon: facts/shell/bash-exec-missing-command-exit-status)。
 #   - shellcheck: run-checks.ts が確かめる。
-#   - deno: 無ければ、最後の exec が exit 127 で終わる (canon: facts/shell/bash-exec-missing-command-exit-status)。
 # - ネットワークは、deno が依存 (npm) を未取得のときだけ要る。
 # 入力:
 # - 引数: 受けない。渡されたら exit 2。
@@ -88,9 +91,6 @@ fi
 if [ -L "$0" ]; then
   die "$0 は symlink で、その dir はリポでない。リポの verify.sh を直に起動する" 2
 fi
-for tool in uname dirname git rm mkdir ln; do
-  command -v "$tool" >/dev/null || die "$tool が PATH に無い。$tool を PATH に置く" 127
-done
 os=$(uname -s)
 case $os in
 Linux | Darwin) ;;
@@ -100,8 +100,9 @@ if [ "${BASH_VERSINFO[0]}" -lt 3 ] ||
   { [ "${BASH_VERSINFO[0]}" -eq 3 ] && [ "${BASH_VERSINFO[1]}" -lt 2 ]; }; then
   die "bash が 3.2 以降でない ($BASH_VERSION)。bash 3.2 以降で回す"
 fi
+dir=$(dirname -- "$0")
 # dirname が - だけのとき、/. が無いと cd は OLDPWD に移る (canon: facts/shell/cd-operand-inputs)
-CDPATH='' cd -- "$(dirname -- "$0")/."
+CDPATH='' cd -- "$dir/."
 git_version=$(git --version)
 version_re='^git version ([0-9]+)\.([0-9]+)'
 if ! [[ $git_version =~ $version_re ]] || [ "${BASH_REMATCH[1]}" -lt 2 ] ||
@@ -109,13 +110,10 @@ if ! [[ $git_version =~ $version_re ]] || [ "${BASH_REMATCH[1]}" -lt 2 ] ||
   die "git が 2.32 以降でない ($git_version)。git 2.32 以降を PATH の先に置く"
 fi
 local_env=$(git rev-parse --local-env-vars)
-# [[ =~ ]] の範囲 (A-Z) は UTF-8 の locale で ASCII の外の大文字を含む (canon: facts/shell/bash-regex-range-locale) ので、C の locale で照合する
-is_var_name() {
-  local LC_ALL=C re='^GIT_[A-Z_]+$'
-  [[ $1 =~ $re ]]
-}
+# 範囲 (A-Z) は locale で ASCII の外の大文字を含みうるので、文字を並べる (canon: facts/shell/bash-regex-range-locale)
+name_re='^GIT_[ABCDEFGHIJKLMNOPQRSTUVWXYZ_]+$'
 while IFS= read -r v; do
-  is_var_name "$v" ||
+  [[ $v =~ $name_re ]] ||
     die "git rev-parse --local-env-vars の出力に、変数の名前でない行がある ($v)。git の版を確かめる"
   unset "$v"
 done <<<"$local_env"
@@ -238,7 +236,9 @@ place() {
   trap 'rm -f "$tmp"' EXIT
   placed=0
   { mkdir -p "$hooks" && install -m 755 "$src" "$tmp" && ln -n -- "$tmp" "$hook"; } || placed=1
-  rm -f "$tmp"
+  if [ -e "$tmp" ] && ! rm -f "$tmp"; then
+    fix_by "$tmp: 一時ファイルを消せない (理由は上の rm)" "rm -f $(printf %q "$tmp")"
+  fi
   trap - EXIT
   return "$placed"
 }
@@ -262,7 +262,7 @@ case $TMPDIR in
 *,*) die "TMPDIR ($TMPDIR) が , を含む。, を含まないディレクトリを TMPDIR に設定する" ;;
 esac
 export TMPDIR
-# 段の子の deno は別のプロセスで、下の 4 つの flags を受けない (run-checks.ts の先頭の規則)
+# 段の子の deno は別のプロセスで、下の 4 つの flags を受けない (run-checks.ts の先頭の規則。canon: facts/deno/child-process-permissions)
 # Deno.kill で段のプロセスグループに送るには、パスを付けない --allow-run が要る (canon: facts/deno/command-spawn の「Deno.kill」)。パスで絞った --allow-run で通るようになったら、段が起動するもの (git・shellcheck・deno) に絞る。
 flags=(--allow-run)
 # 段の子の環境から変数を消すには、Deno.env.toObject で環境を丸ごと写す。それには変数を絞らない --allow-env が要る (canon: facts/deno/env-to-object-requires-unscoped-allow-env)。

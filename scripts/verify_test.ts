@@ -11,11 +11,14 @@
  *   - 別のリポ (環境変数を向ける先) に hook を置かず、その場所を stdout に出さなかったか。
  *   - deno.lock を書き換えなかったか。
  * - 落ちる行は、示したコマンド (Execute: の後) を実行してから同じ環境で回し直し、exit 0 で hook が写ることも比べる。
- * - 道具の失敗 (install・cmp・chmod・uname・git) は、PATH の先に置いた fake で作る。
+ * - 道具の失敗 (install・cmp・chmod・uname・git) は、PATH の先に置いた fake で作る。道具が無い行は、それを除いた道具の symlink だけの dir を PATH にする。
  * - linked worktree の test: worktree で回すと、hook は common git dir の hooks にだけ写る。
  * - 中断の test: 写している最中に SIGTERM を受けると、一時ファイルを残さない。
  * - TMPDIR の値は、canon: facts/shell/string-input-categories の分類から生成して回す。
- * - git rev-parse --local-env-vars の各行の形は、fake の git が出す行を生成して、[A-Z] が ASCII の外の大文字を含む locale (LC_ALL=en_US.UTF-8。入っていない環境では C に戻り、その次元は確かめられない) で回す。
+ * - git rev-parse --local-env-vars の各行の形は、fake の git が出す行を生成して、[A-Z] が ASCII の外の大文字を含む locale で回す (canon: facts/shell/bash-regex-range-locale)。
+ *   - 回し方: その locale の環境で verify.sh を回す。回す前に、その環境の bash で `[[ É =~ ^[A-Z]$ ]]` が真になることを確かめる。
+ *   - locale: Linux では en_US.UTF-8 を localedef で一時の dir に作り (test の終わりに消す)、LOCPATH で指す。他の OS では系の en_US.UTF-8。
+ *   - 確かめが偽のとき: Linux では、次元を確かめられないので落ちる。他の OS では、その OS の bash ではこの次元が起きないことを stderr に出し、locale を替えずに回す。
  * - 子の環境と symlink の作り方、test が起動したものの寿命と fixture の消し方は、run-checks_test.ts の先頭と同じ。
  */
 import fc from "fast-check";
@@ -229,7 +232,7 @@ async function setSource(dir: string, state: SourceState) {
  * - hooks が無い: null。
  * - 通常ファイル: "file"。
  * - 壊れた symlink: "dangling"。
- * - ディレクトリ: 名前ごとの中身。
+ * - ディレクトリ: 名前ごとの中身。verify.sh の一時ファイルの名前 (`<名前>.verify-<pid>`) は pid を PID にする。
  *   - 通常ファイル: バイトと、実行可能か。mode が 000 なら中身を読まず "mode 000" (上の「読めない」)。
  *   - ディレクトリ: "dir"。
  *   - 壊れた symlink: "dangling"。
@@ -242,9 +245,10 @@ async function readHooks(gitDir: string) {
   try {
     for await (const e of Deno.readDir(hooks)) {
       const path = `${hooks}/${e.name}`;
+      const name = e.name.replace(/\.verify-\d+$/, ".verify-PID");
       try {
         const info = await Deno.stat(path);
-        out[e.name] = info.isDirectory
+        out[name] = info.isDirectory
           ? "dir"
           : !info.isFile
           ? "other"
@@ -256,7 +260,7 @@ async function readHooks(gitDir: string) {
           };
       } catch (err) {
         if (!(err instanceof Deno.errors.NotFound)) throw err;
-        out[e.name] = "dangling";
+        out[name] = "dangling";
       }
     }
   } catch (e) {
@@ -273,10 +277,11 @@ async function readHooks(gitDir: string) {
   return out;
 }
 
-/** verify.sh の起動のしかた。cwd と $0。 */
+/** verify.sh の起動のしかた。cwd と $0。exec なら bash を介さず $0 を直に起動する (1 行目の env が bash を引く)。 */
 interface Invocation {
   cwd: string;
   arg0: string;
+  exec?: true;
 }
 const direct = (dir: string): Invocation => ({
   cwd: dir,
@@ -288,7 +293,7 @@ type EnvChange = Record<string, string | undefined>;
 
 /** verify.sh を回す。 */
 async function verify(
-  { cwd, arg0 }: Invocation,
+  { cwd, arg0, exec }: Invocation,
   change: EnvChange,
   args: string[] = [],
 ) {
@@ -296,13 +301,16 @@ async function verify(
   for (const [name, value] of Object.entries({ ...baseEnv, ...change })) {
     if (value !== undefined) env[name] = value;
   }
-  const r = await spawn("bash", {
-    // -- が無いと、- で始まる $0 を bash が option と読む
-    args: ["--", arg0, ...args],
-    cwd,
-    env,
-    clearEnv: true,
-  }).output();
+  const r =
+    await (exec
+      ? spawn(arg0, { args, cwd, env, clearEnv: true })
+      : spawn("bash", {
+        // -- が無いと、- で始まる $0 を bash が option と読む
+        args: ["--", arg0, ...args],
+        cwd,
+        env,
+        clearEnv: true,
+      })).output();
   return {
     code: r.code,
     stdout: dec.decode(r.stdout),
@@ -335,8 +343,30 @@ const which = async (name: string) => {
   if (!r.success) throw new Error(`${name} が PATH に無い`);
   return dec.decode(r.stdout).trim();
 };
-/** verify.sh が OS の判定より前に、PATH にあることを確かめる道具 (verify.sh の先頭の「PATH にあるもの」)。 */
-const pathTools = ["uname", "dirname", "git", "rm", "mkdir", "ln"];
+/** verify.sh と stub が PATH から引く道具 (verify.sh の先頭の「PATH にあるもの」と、stub の env)。 */
+const pathTools = [
+  "bash",
+  "uname",
+  "dirname",
+  "git",
+  "mkdir",
+  "install",
+  "ln",
+  "rm",
+  "cmp",
+  "chmod",
+  "deno",
+  "env",
+];
+/** dir の .git/partial-bin に、missing を除いた pathTools の symlink を置き、その dir を返す。 */
+const pathWithout = async (dir: string, missing: string) => {
+  const bin = `${dir}/.git/partial-bin`;
+  await Deno.mkdir(bin);
+  for (const name of pathTools) {
+    if (name !== missing) await ln(await which(name), `${bin}/${name}`);
+  }
+  return bin;
+};
 const failing = (name: string) =>
   `#!/bin/sh\necho "${name}: fake の失敗" >&2\nexit 1\n`;
 const permissions = {
@@ -364,7 +394,8 @@ interface Case {
   hooks: Awaited<ReturnType<typeof readHooks>>;
   /** stub が起動されないなら undefined。関数なら、dir を解決したパスから決める。 */
   tmpdir?: string | ((realDir: string) => string);
-  stderr?: string;
+  /** stderr が含むこと (配列なら全部)。 */
+  stderr?: string | string[];
   /** stderr が含まないこと。 */
   stderrLacks?: string;
   /** stderr の Execute: の後のコマンドを実行してから回し直すと、exit 0 で hook が写っていること。 */
@@ -402,25 +433,122 @@ const cases: Case[] = [];
 /** 消しうるコマンドで直すと示した stderr の、理由の末尾からコマンドの先頭まで。 */
 const refusedBy = (reason: string, command: string) =>
   `${reason}。消すものの中身を確かめ、よければ Execute: ${command}`;
+const differentHook = refusedBy(
+  "/pre-push: hooks/pre-push と中身が違う",
+  "rm -f",
+);
+const hooksNotDir = refusedBy("/hooks: ディレクトリでない", "rm -f");
 const copiedHooks = { "pre-push": copiedHook };
 const otherHooks = {
   "pre-push": { bytes: Array.from(other), executable: true },
 };
 /** 写した後に TMPDIR まで進んだ行の、stub の TMPDIR とその他の期待値。 */
 const copied = { code: 0, hooks: copiedHooks, tmpdir: realTmpdir };
+/** bash が PATH に無いコマンドに出す行。 */
+const notFound = (tool: string) => `: ${tool}: command not found`;
+/** 道具が無いときの外れ方 (verify.sh の先頭の「PATH にあるもの」)。state は、その道具を使う写す先の状態。 */
+const missingTools: (
+  & { tool: string; state: HookState }
+  & Omit<Case, "name" | "prepare" | "env">
+)[] = [
+  ...["uname", "dirname", "git"].map((tool) => ({
+    tool,
+    state: "無い" as const,
+    code: 127,
+    hooks: {},
+    stderr: notFound(tool),
+  })),
+  {
+    tool: "mkdir",
+    state: "hooks が無い",
+    code: 1,
+    hooks: null,
+    tmpdir: realTmpdir,
+    stderr: [
+      notFound("mkdir"),
+      "/pre-push: hooks/pre-push を写せない (理由は上)。Execute: mkdir -p",
+    ],
+    fix: true,
+  },
+  ...["install", "ln"].map((tool) => ({
+    tool,
+    state: "無い" as const,
+    code: 1,
+    hooks: {},
+    tmpdir: realTmpdir,
+    stderr: [
+      notFound(tool),
+      "/pre-push: hooks/pre-push を写せない (理由は上)。Execute: mkdir -p",
+    ],
+    fix: true as const,
+  })),
+  {
+    tool: "rm",
+    state: "無い",
+    code: 1,
+    hooks: { ...copiedHooks, "pre-push.verify-PID": copiedHook },
+    tmpdir: realTmpdir,
+    stderr: [
+      notFound("rm"),
+      "/pre-push.verify-",
+      ": 一時ファイルを消せない (理由は上の rm)。Execute: rm -f",
+    ],
+    fix: true,
+  },
+  {
+    tool: "cmp",
+    state: "同じ",
+    code: 1,
+    hooks: copiedHooks,
+    tmpdir: realTmpdir,
+    stderr: [
+      notFound("cmp"),
+      "/pre-push: cmp が PATH に無く、hooks/pre-push と比べられない。cmp を入れてから回し直す",
+    ],
+  },
+  {
+    tool: "chmod",
+    state: "同じで実行可能でない",
+    code: 1,
+    hooks: { "pre-push": { ...copiedHook, executable: false } },
+    tmpdir: realTmpdir,
+    stderr: [
+      notFound("chmod"),
+      "/pre-push: 実行可能にできない (理由は上の chmod)。Execute: chmod +x",
+    ],
+    fix: true,
+  },
+  // hook は deno の exec より前に揃える
+  {
+    tool: "deno",
+    state: "無い",
+    code: 127,
+    hooks: copiedHooks,
+    stderr: "exec: deno: not found",
+  },
+  {
+    tool: "bash",
+    state: "無い",
+    invoke: (dir) => Promise.resolve({ ...direct(dir), exec: true }),
+    code: 127,
+    hooks: {},
+    // env の文言は OS で違う (Linux の coreutils は 'bash'、macOS は bash)
+    stderr: ["bash", ": No such file or directory"],
+  },
+];
 const states: [HookState, number, Case["hooks"], string?][] = [
   ["hooks が無い", 0, copiedHooks],
   [
     "hooks が通常ファイル",
     1,
     "file",
-    refusedBy("/hooks: ディレクトリでない", "rm -f"),
+    hooksNotDir,
   ],
   [
     "hooks が壊れた symlink",
     1,
     "dangling",
-    refusedBy("/hooks: ディレクトリでない", "rm -f"),
+    hooksNotDir,
   ],
   ["hooks がディレクトリへの symlink", 0, copiedHooks],
   ["無い", 0, copiedHooks],
@@ -435,7 +563,7 @@ const states: [HookState, number, Case["hooks"], string?][] = [
     "違う中身への symlink",
     1,
     otherHooks,
-    refusedBy("/pre-push: hooks/pre-push と中身が違う", "rm -f"),
+    differentHook,
   ],
   ["同じ", 0, copiedHooks],
   ["同じで実行可能でない", 0, copiedHooks],
@@ -443,7 +571,7 @@ const states: [HookState, number, Case["hooks"], string?][] = [
     "違う",
     1,
     otherHooks,
-    refusedBy("/pre-push: hooks/pre-push と中身が違う", "rm -f"),
+    differentHook,
   ],
   [
     "読めない",
@@ -673,19 +801,8 @@ cases.push(
     code: 1,
     hooks: { "pre-push": { bytes: Array.from(other), executable: false } },
     tmpdir: realTmpdir,
-    stderr: refusedBy("/pre-push: hooks/pre-push と中身が違う", "rm -f"),
+    stderr: differentHook,
     fix: true,
-  },
-  {
-    name: "cmp が PATH に無い",
-    prepare: (dir) => setHook(dir, "同じ"),
-    // bash は PATH に無いコマンドを 127 にする。fake はその終わり方だけを写す
-    fakes: { cmp: "#!/bin/sh\nexit 127\n" },
-    code: 1,
-    hooks: copiedHooks,
-    tmpdir: realTmpdir,
-    stderr:
-      "/pre-push: cmp が PATH に無く、hooks/pre-push と比べられない。cmp を入れてから回し直す",
   },
   {
     name: "chmod +x が落ちる",
@@ -760,6 +877,20 @@ cases.push(
     stderr:
       "verify.sh: git rev-parse --local-env-vars の出力に、変数の名前でない行がある (--local-env-vars)",
   },
+  ...[
+    "--version",
+    "rev-parse --local-env-vars",
+    "rev-parse --path-format=absolute --git-common-dir",
+  ].map((call) => ({
+    name: `git ${call} が非 0 で終わる`,
+    fakes: {
+      git:
+        `#!/bin/sh\n[ "$*" = "${call}" ] && { echo 'git: fake の失敗' >&2; exit 5; }\nexec '${realGit}' "$@"\n`,
+    },
+    code: 5,
+    hooks: null,
+    stderr: "git: fake の失敗",
+  })),
   {
     name: "git --version の形が読めない",
     fakes: {
@@ -821,35 +952,15 @@ cases.push(
     hooks: copiedHooks,
     stderr: "が , を含む",
   },
-  ...pathTools.map((missing): Case => ({
-    name: `${missing} が PATH に無い`,
+  ...missingTools.map(({ tool, state, ...rest }): Case => ({
+    name: `${tool} が PATH に無い`,
     prepare: async (dir) => {
-      const bin = `${dir}/.git/partial-bin`;
-      await Deno.mkdir(bin);
-      for (const name of ["bash", "cmp", "install", "deno", ...pathTools]) {
-        if (name !== missing) await ln(await which(name), `${bin}/${name}`);
-      }
+      await setHook(dir, state);
+      await pathWithout(dir, tool);
     },
     env: (_, dir) => ({ PATH: `${dir}/.git/partial-bin` }),
-    code: 127,
-    hooks: null,
-    stderr: `verify.sh: ${missing} が PATH に無い`,
+    ...rest,
   })),
-  {
-    // hook は deno の exec より前に揃える
-    name: "deno が PATH に無い",
-    prepare: async (dir) => {
-      const bin = `${dir}/.git/no-deno-bin`;
-      await Deno.mkdir(bin);
-      for (const name of ["bash", "cmp", "install", ...pathTools]) {
-        await ln(await which(name), `${bin}/${name}`);
-      }
-    },
-    env: (_, dir) => ({ PATH: `${dir}/.git/no-deno-bin` }),
-    code: 127,
-    hooks: copiedHooks,
-    stderr: "deno: not found",
-  },
   {
     name: "deno.lock が deno.json と食い違えば落ちる",
     prepare: async (dir) => {
@@ -912,7 +1023,7 @@ const runCase = (c: Case): Promise<string[]> =>
         strayStdout: r.stdout.includes(elsewhere),
         report: reportOf(r.stdout),
         lockUnchanged: await Deno.readTextFile(`${dir}/deno.lock`) === lock,
-        stderr: c.stderr === undefined || r.stderr.includes(c.stderr),
+        stderr: [c.stderr ?? []].flat().every((s) => r.stderr.includes(s)),
         stderrLacks: c.stderrLacks === undefined ||
           !r.stderr.includes(c.stderrLacks),
         fixed: c.fix &&
@@ -960,81 +1071,118 @@ Deno.test("verify.sh の hook の状態と環境", async () => {
   deepStrictEqual((await Promise.all(cases.map(runCase))).flat(), []);
 });
 
+/** [A-Z] が ASCII の外の大文字を含む locale の変数 (このファイルの先頭の「locale」)。Linux では dir に locale を作る。 */
+async function wideRangeLocale(dir: string): Promise<Record<string, string>> {
+  const linux = Deno.build.os === "linux";
+  const env: Record<string, string> = linux
+    ? { LOCPATH: dir, LC_ALL: "en_US.UTF-8" }
+    : { LC_ALL: "en_US.UTF-8" };
+  if (linux) {
+    const r = await spawn("localedef", {
+      args: ["-i", "en_US", "-f", "UTF-8", `${dir}/en_US.UTF-8`],
+      env: baseEnv,
+      clearEnv: true,
+    }).output();
+    if (!r.success) {
+      throw new Error(`localedef が exit ${r.code}\n${dec.decode(r.stderr)}`);
+    }
+  }
+  const probe = await spawn("bash", {
+    args: ["-c", "[[ É =~ ^[A-Z]$ ]]"],
+    env: { ...baseEnv, ...env },
+    clearEnv: true,
+  }).output();
+  if (probe.success) return env;
+  if (linux) {
+    throw new Error(
+      "localedef で作った en_US.UTF-8 で [[ É =~ ^[A-Z]$ ]] が偽。[A-Z] が ASCII の外を含む locale の次元を確かめられない",
+    );
+  }
+  console.error(
+    `${Deno.build.os} の bash では、en_US.UTF-8 の [A-Z] が É を含まない (この次元が起きない)。locale を替えずに回す`,
+  );
+  return {};
+}
+
 Deno.test("git rev-parse --local-env-vars の各行が ^GIT_[A-Z_]+$ に合うときだけ受ける", async () => {
   // 次元: 大文字・小文字・数字・-・空白・\r・ASCII の外 (canon: facts/shell/string-input-categories)、空の行、GIT_ だけの行。ASCII の外の大文字は、[A-Z] が受ける locale の文字 (canon: facts/shell/bash-regex-range-locale)
-  const fake =
-    `#!/bin/sh\n[ "$*" = "rev-parse --local-env-vars" ] && { cat "\${FAKE_LINES?FAKE_LINES が無い}"; exit 0; }\nexec '${realGit}' "$@"\n`;
-  /** fake の git が lines を出したときの、期待との違い。 */
-  const runLines = (lines: string[]) => {
-    // verify.sh は $(...) で受け (末尾の改行を落とす)、<<< で行に割る (空の出力は 1 つの空の行)
-    const read = lines.join("\n").replace(/\n+$/, "").split("\n");
-    return runCase({
-      name: `--local-env-vars が ${JSON.stringify(lines)}`,
-      // 改行を含む値を環境変数で渡すと、stub が読む env の出力の行が増える
-      prepare: (dir) =>
-        Deno.writeTextFile(`${dir}/.git/lines`, lines.join("\n")),
-      fakes: { git: fake },
-      env: (_, dir) => ({
-        FAKE_LINES: `${dir}/.git/lines`,
-        LC_ALL: "en_US.UTF-8",
-      }),
-      ...(read.every((l) => /^GIT_[A-Z_]+$/.test(l)) ? copied : {
-        code: 1,
-        hooks: null,
-        stderr:
-          "verify.sh: git rev-parse --local-env-vars の出力に、変数の名前でない行がある (",
-      }),
-    });
-  };
-  const rows = [
-    ["GIT_DIR", "GIT_WORK_TREE"],
-    ["GIT__"],
-    [""],
-    ["GIT_"],
-    ["GIT_DIR", "", "GIT_PREFIX"],
-    ["GIT_DIR", ""],
-    ["GIT_DIR\r"],
-    ["git_dir"],
-    ["GIT_dir"],
-    ["GIT_1"],
-    ["GIT_A-B"],
-    ["GIT_A B"],
-    [" GIT_DIR"],
-    ["GIT_é"],
-    ["GIT_ｚ"],
-    ["GIT_É"],
-    ["GIT_Ｇ"],
-  ];
-  deepStrictEqual((await Promise.all(rows.map(runLines))).flat(), []);
-  const line = fc.oneof(
-    fc.constantFrom("", "GIT_", "GIT_DIR", "git_dir", "--local-env-vars"),
-    fc.array(
-      fc.constantFrom(
-        "A",
-        "Z",
-        "_",
-        "a",
-        "z",
-        "0",
-        "9",
-        "-",
-        " ",
-        "\r",
-        "é",
-        "ｚ",
-        "É",
-        "Ｇ",
+  await withTempDir(async (localeDir) => {
+    const locale = await wideRangeLocale(localeDir);
+    const fake =
+      `#!/bin/sh\n[ "$*" = "rev-parse --local-env-vars" ] && { cat "\${FAKE_LINES?FAKE_LINES が無い}"; exit 0; }\nexec '${realGit}' "$@"\n`;
+    /** fake の git が lines を出したときの、期待との違い。 */
+    const runLines = (lines: string[]) => {
+      // verify.sh は $(...) で受け (末尾の改行を落とす)、<<< で行に割る (空の出力は 1 つの空の行)
+      const read = lines.join("\n").replace(/\n+$/, "").split("\n");
+      return runCase({
+        name: `--local-env-vars が ${JSON.stringify(lines)}`,
+        // 改行を含む値を環境変数で渡すと、stub が読む env の出力の行が増える
+        prepare: (dir) =>
+          Deno.writeTextFile(`${dir}/.git/lines`, lines.join("\n")),
+        fakes: { git: fake },
+        env: (_, dir) => ({ FAKE_LINES: `${dir}/.git/lines`, ...locale }),
+        ...(read.every((l) => /^GIT_[A-Z_]+$/.test(l)) ? copied : {
+          code: 1,
+          hooks: null,
+          stderr:
+            "verify.sh: git rev-parse --local-env-vars の出力に、変数の名前でない行がある (",
+        }),
+      });
+    };
+    const rows = [
+      ["GIT_DIR", "GIT_WORK_TREE"],
+      ["GIT__"],
+      [""],
+      ["GIT_"],
+      ["GIT_DIR", "", "GIT_PREFIX"],
+      ["GIT_DIR", ""],
+      ["GIT_DIR\r"],
+      ["git_dir"],
+      ["GIT_dir"],
+      ["GIT_1"],
+      ["GIT_A-B"],
+      ["GIT_A B"],
+      [" GIT_DIR"],
+      ["GIT_é"],
+      ["GIT_ｚ"],
+      ["GIT_É"],
+      ["GIT_Ä"],
+      ["GIT_À"],
+      ["GIT_Ｇ"],
+    ];
+    deepStrictEqual((await Promise.all(rows.map(runLines))).flat(), []);
+    const line = fc.oneof(
+      fc.constantFrom("", "GIT_", "GIT_DIR", "git_dir", "--local-env-vars"),
+      fc.array(
+        fc.constantFrom(
+          "A",
+          "Z",
+          "_",
+          "a",
+          "z",
+          "0",
+          "9",
+          "-",
+          " ",
+          "\r",
+          "é",
+          "ｚ",
+          "É",
+          "Ä",
+          "À",
+          "Ｇ",
+        ),
+        { minLength: 1, maxLength: 4 },
+      ).map((cs) => `GIT_${cs.join("")}`),
+    );
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(line, { minLength: 1, maxLength: 3 }),
+        async (lines) => deepStrictEqual(await runLines(lines), []),
       ),
-      { minLength: 1, maxLength: 4 },
-    ).map((cs) => `GIT_${cs.join("")}`),
-  );
-  await fc.assert(
-    fc.asyncProperty(
-      fc.array(line, { minLength: 1, maxLength: 3 }),
-      async (lines) => deepStrictEqual(await runLines(lines), []),
-    ),
-    { numRuns: 10, includeErrorInReport: true },
-  );
+      { numRuns: 10, includeErrorInReport: true },
+    );
+  });
 });
 
 Deno.test("TMPDIR の値の文字", async () => {
