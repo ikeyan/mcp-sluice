@@ -18,9 +18,15 @@
  * - 確かめ方: 規則の各行の例を使い捨てのブランチの .md に置いて push し、GitHub の描画でリンクを辿る。
  * - 対象:
  *   - Markdown のリンク・画像 (参照スタイルを含む)。
- *   - 生の HTML のタグの `href`・`src`。
- *   - 生の HTML のタグの、他の URL の属性 (下の uncheckableAttributes。canon: facts/html/url-valued-attributes): 検査できないので違反。属性の名前は大文字小文字を区別しない。
- * - スキーム (`http:`・`mailto:` など) か `//` で始まるものは外部として見ない。
+ *   - 生の HTML のタグの、値が URL の属性 (canon: facts/html/url-valued-attributes の一覧と値の形)。属性の名前は大文字小文字を区別しない。属性の類と値の類ごとの扱い:
+ *
+ *     | 属性の類 | 外部のスキーム (`http:`・`mailto:` など) | `//` で始まる | 空 | fragment だけ (`#x`) | リポ内に在る | リポ内に無い |
+ *     | --- | --- | --- | --- | --- | --- | --- |
+ *     | `href`・`src` と、他の単一の URL の属性 (urlAttributes) | 見ない | 見ない | ファイル自身 (違反でない) | ファイル自身の anchor | 通る (anchor は下の規則) | 違反 |
+ *     | URL の列か、値の形を canon で確かめていない属性 (uncheckableAttributes) | 違反 | 違反 | 見ない | 違反 | 違反 | 違反 |
+ *     | 他 | 見ない | 見ない | 見ない | 見ない | 見ない | 見ない |
+ *
+ * - 下の規則は、Markdown のリンク・画像と単一の URL の属性の値に当てる。スキームか `//` で始まるものは外部として見ない。
  * - 最初の `#` の後が anchor。その前の最初の `?` の後は query で、見ない。
  * - パス:
  *   - `/` で割ってから、segment ごとに %-decode する。`%2F` は区切りにならない。
@@ -55,7 +61,7 @@ const markdownFiles = Deno.args.filter((f) => f.endsWith(".md"));
 /** segment の列の鍵は JSON にする (segment は decode した `/` や NUL を含みうるので)。 */
 const key = (segments: string[]) => JSON.stringify(segments);
 /** リンク先として在るもの: 引数のファイルと、その親ディレクトリ (ルートを含む) の鍵。 */
-const known = new Set(
+const linkTargets = new Set(
   Deno.args.flatMap((f) => {
     const segments = f.split("/");
     return segments.map((_, i) => key(segments.slice(0, i + 1)))
@@ -114,11 +120,8 @@ const anchorsOf = (tokens: Token[]): Set<string> => {
   tokens.forEach((token, i) => {
     if (token.type !== "heading_open") return;
     const text = (tokens[i + 1].children ?? [])
-      // テキストの子トークンの選び方は canon: facts/github/heading-anchor-ids。markdown-it は \_ などの backslash escape を text_special にする
-      .filter((c) =>
-        c.type === "text" || c.type === "text_special" ||
-        c.type === "code_inline"
-      )
+      // テキストの子トークンの選び方は canon: facts/github/heading-anchor-ids。backslash escape と entity も parse() の後は text になる (canon: facts/markdown-it/parse-token-shapes の「backslash escape と entity の token」)
+      .filter((c) => c.type === "text" || c.type === "code_inline")
       .map((c) => c.content)
       .join("");
     anchors.add(slugger.slug(text));
@@ -132,27 +135,32 @@ const openTag =
 const attribute =
   /\s+([A-Za-z_:][A-Za-z0-9_.:-]*)(?:\s*=\s*([^\s"'=<>`]+|'[^']*'|"[^"]*"))?/g;
 
-/** href・src 以外の、値が URL (か URL の列) の属性 (canon: facts/html/url-valued-attributes)。小文字で持つ。 */
-const uncheckableAttributes = new Set([
+/** 値が単一の URL の属性 (canon: facts/html/url-valued-attributes の「値の形」)。小文字で持つ。 */
+const urlAttributes = new Set([
   "action",
-  "archive",
   "background",
   "cite",
-  "classid",
   "codebase",
   "data",
   "formaction",
-  "imagesrcset",
+  "href",
   "itemid",
-  "itemtype",
   "longdesc",
   "lowsrc",
   "manifest",
-  "ping",
   "poster",
+  "src",
+  "usemap",
+]);
+/** 値が URL の列か、値の形を canon で確かめていない属性 (同じ canon)。小文字で持つ。 */
+const uncheckableAttributes = new Set([
+  "archive",
+  "classid",
+  "imagesrcset",
+  "itemtype",
+  "ping",
   "profile",
   "srcset",
-  "usemap",
   "xlink:href",
 ]);
 
@@ -160,7 +168,7 @@ type Target = { url: string } | {
   uncheckable: { name: string; value: string };
 };
 
-/** 生の HTML の href・src の値 (引用符を外し、文字参照を戻したもの) と、他の URL の属性の名前と値。 */
+/** 生の HTML の、urlAttributes の値 (引用符を外し、文字参照を戻したもの) と、uncheckableAttributes の空でない値と名前。 */
 const htmlTargets = (html: string): Target[] =>
   // コメントの中は描画されないので見ない
   [...html.replace(/<!--[\s\S]*?-->/g, "").matchAll(openTag)].flatMap((
@@ -172,8 +180,9 @@ const htmlTargets = (html: string): Target[] =>
         /&[#A-Za-z0-9]+;/g,
         (ref) => md.utils.unescapeAll(ref),
       );
-      if (/^(?:href|src)$/i.test(name)) return [{ url: value }];
-      if (uncheckableAttributes.has(name.toLowerCase())) {
+      const lower = name.toLowerCase();
+      if (urlAttributes.has(lower)) return [{ url: value }];
+      if (uncheckableAttributes.has(lower) && value !== "") {
         return [{ uncheckable: { name, value } }];
       }
       return [];
@@ -206,7 +215,7 @@ const malformed =
   "不正な %-エンコード。正しい %XX の列にする (% そのものは %25)";
 
 /** %-decode できなければ undefined。 */
-const decode = (s: string): string | undefined => {
+const percentDecode = (s: string): string | undefined => {
   try {
     return decodeURIComponent(s);
   } catch {
@@ -215,14 +224,14 @@ const decode = (s: string): string | undefined => {
 };
 
 /**
- * リンクのパスを辿った、リポのルートからの segment。
- * - new URL() で解決しない: WHATWG の URL はルートより上へ出る `..` を `/` に丸めるので、リポの外への脱出を検出できない。
- * - node:path の posix.normalize も使わない: decode した segment の `/` (%2F) を区切りとして畳むので、segment ごとに畳む。
+ * リンクのパスを辿った、リポのルートからの segment。リンクのパスは segment ごとに畳んで解決する。
+ * - new URL() は、ルートより上へ出る `..` を黙って捨てる (`../../x` は `/x`。canon: facts/url/dot-dot-above-root-dropped) ので、リポの外への脱出を検出できない。
+ * - node:path の posix.normalize は、decode した segment の `/` (%2F) を区切りとして畳む。
  */
 const resolve = (dir: string[], path: string): Resolved => {
   const out = path.startsWith("/") ? [] : [...dir];
   for (const raw of path.split("/")) {
-    const segment = decode(raw);
+    const segment = percentDecode(raw);
     if (segment === undefined) return { problem: malformed };
     if (segment === "" || segment === ".") continue;
     if (segment !== "..") out.push(segment);
@@ -255,7 +264,7 @@ for (const { file, parsed } of markdown.values()) {
       const { name, value } = target.uncheckable;
       report(
         file,
-        `${name} の参照先は検査できない。リポ内のファイルを指すなら href か src で書く — ${name}=${value}`,
+        `${name} の参照先は検査できない (値が URL の列か、値の形を確かめていない属性)。リポ内のファイルを指すなら Markdown のリンク・画像で書き、この属性を外す — ${name}=${value}`,
       );
       continue;
     }
@@ -272,7 +281,7 @@ for (const { file, parsed } of markdown.values()) {
       continue;
     }
     const at = key(resolved.segments);
-    if (!known.has(at)) {
+    if (!linkTargets.has(at)) {
       report(
         file,
         `リンク先が無い。git が知るファイルかディレクトリを指す — ${url}`,
@@ -280,7 +289,7 @@ for (const { file, parsed } of markdown.values()) {
       continue;
     }
     if (rawAnchor === "") continue;
-    const anchor = decode(rawAnchor);
+    const anchor = percentDecode(rawAnchor);
     if (anchor === undefined) {
       report(file, `${malformed} — ${url}`);
       continue;

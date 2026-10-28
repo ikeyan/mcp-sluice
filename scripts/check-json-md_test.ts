@@ -67,6 +67,82 @@ const assignable = (got: string[], want: string[], prefix: boolean) => {
 };
 
 const heading = "# x\n\n## a\n\n## a\n";
+/** uncheckableAttributes の違反の、属性の名前の後から値の前まで。 */
+const uncheckable =
+  "の参照先は検査できない (値が URL の列か、値の形を確かめていない属性)。リポ内のファイルを指すなら Markdown のリンク・画像で書き、この属性を外す";
+
+/** 属性の類 (canon: facts/html/url-valued-attributes の一覧と「値の形」)。大文字の綴りを各類に 1 つ。他の類は代表の 1 つ。 */
+const attributeClasses: [string[], "url" | "uncheckable" | "other"][] = [
+  [
+    [
+      "href",
+      "src",
+      "action",
+      "background",
+      "cite",
+      "codebase",
+      "data",
+      "formaction",
+      "itemid",
+      "longdesc",
+      "lowsrc",
+      "manifest",
+      "poster",
+      "usemap",
+      "CITE",
+    ],
+    "url",
+  ],
+  [
+    [
+      "archive",
+      "classid",
+      "imagesrcset",
+      "itemtype",
+      "ping",
+      "profile",
+      "srcset",
+      "xlink:href",
+      "SRCSET",
+    ],
+    "uncheckable",
+  ],
+  [["title"], "other"],
+];
+/** 値の類。a.md は見出し a を持ち、b.md は在り、gone.md は無い。 */
+const attributeValues = [
+  "https://example.com/x.md",
+  "//example.com/x.md",
+  "",
+  "#a",
+  "b.md",
+  "gone.md",
+];
+/** 属性ごとの行: 値の類の全部を属性の値に置き、類ごとの違反の行と比べる。 */
+const attributeCases = attributeClasses.flatMap(([names, kind]) =>
+  names.map((name) => ({
+    name: `属性 ${name} (${kind}) と値の類`,
+    files: {
+      "b.md": "",
+      "a.md": [
+        "# a",
+        "",
+        ...attributeValues.map((v) => `<span ${name}="${v}">x</span>`),
+        "",
+      ].join("\n"),
+    },
+    code: kind === "other" ? 0 : 1,
+    stderr: kind === "url"
+      ? [
+        "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — gone.md",
+      ]
+      : kind === "uncheckable"
+      ? attributeValues.filter((v) => v !== "").map((v) =>
+        `a.md: ${name} ${uncheckable} — ${name}=${v}`
+      )
+      : [],
+  }))
+);
 const cases: {
   name: string;
   files: Record<string, string | Uint8Array | null>;
@@ -198,7 +274,7 @@ const cases: {
     ],
   },
   {
-    name: "生の HTML の href・src と、他の URL の属性",
+    name: "生の HTML の href・src",
     files: {
       "b.md": heading,
       "img/ok.png": "",
@@ -211,8 +287,6 @@ const cases: {
         "",
         '<picture><source srcset="img/ok.png 2x"><img src="img/ok.png"></picture>',
         "",
-        '<video POSTER="img/ok.png"></video> <object data="b.md"></object> <q cite="https://example.com/">c</q> <img longdesc="b.md" usemap="#m" alt="x">',
-        "",
       ].join("\n"),
     },
     code: 1,
@@ -221,12 +295,7 @@ const cases: {
       "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — missing.md",
       "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — upper.md",
       "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md?a=1&b=2#nope",
-      "a.md: srcset の参照先は検査できない。リポ内のファイルを指すなら href か src で書く — srcset=img/ok.png 2x",
-      "a.md: POSTER の参照先は検査できない。リポ内のファイルを指すなら href か src で書く — POSTER=img/ok.png",
-      "a.md: data の参照先は検査できない。リポ内のファイルを指すなら href か src で書く — data=b.md",
-      "a.md: cite の参照先は検査できない。リポ内のファイルを指すなら href か src で書く — cite=https://example.com/",
-      "a.md: longdesc の参照先は検査できない。リポ内のファイルを指すなら href か src で書く — longdesc=b.md",
-      "a.md: usemap の参照先は検査できない。リポ内のファイルを指すなら href か src で書く — usemap=#m",
+      `a.md: srcset ${uncheckable} — srcset=img/ok.png 2x`,
     ],
   },
   {
@@ -369,6 +438,7 @@ const cases: {
       "bom.json: JSON として読めない。構文を直す — ",
     ],
   },
+  ...attributeCases,
   ...[[], ["/a.md"], ["a//b.md"], ["./a.md"], ["a/../b.md"], [""], ["a/"]].map((
     args,
   ) => ({
