@@ -198,7 +198,7 @@ const cases: {
     ],
   },
   {
-    name: "生の HTML の href・src・srcset",
+    name: "生の HTML の href・src と、他の URL の属性",
     files: {
       "b.md": heading,
       "img/ok.png": "",
@@ -211,6 +211,8 @@ const cases: {
         "",
         '<picture><source srcset="img/ok.png 2x"><img src="img/ok.png"></picture>',
         "",
+        '<video POSTER="img/ok.png"></video> <object data="b.md"></object> <q cite="https://example.com/">c</q> <img longdesc="b.md" usemap="#m" alt="x">',
+        "",
       ].join("\n"),
     },
     code: 1,
@@ -219,7 +221,12 @@ const cases: {
       "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — missing.md",
       "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — upper.md",
       "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md?a=1&b=2#nope",
-      "a.md: srcset のリンク先は検査できない。リポ内のファイルを指すなら src にする — srcset=img/ok.png 2x",
+      "a.md: srcset の参照先は検査できない。リポ内のファイルを指すなら href か src で書く — srcset=img/ok.png 2x",
+      "a.md: POSTER の参照先は検査できない。リポ内のファイルを指すなら href か src で書く — POSTER=img/ok.png",
+      "a.md: data の参照先は検査できない。リポ内のファイルを指すなら href か src で書く — data=b.md",
+      "a.md: cite の参照先は検査できない。リポ内のファイルを指すなら href か src で書く — cite=https://example.com/",
+      "a.md: longdesc の参照先は検査できない。リポ内のファイルを指すなら href か src で書く — longdesc=b.md",
+      "a.md: usemap の参照先は検査できない。リポ内のファイルを指すなら href か src で書く — usemap=#m",
     ],
   },
   {
@@ -351,6 +358,12 @@ const cases: {
       "bad.json: UTF-8 として不正。UTF-8 で保存し直す — ",
       "bad.md: UTF-8 として不正。UTF-8 で保存し直す — ",
     ],
+  },
+  {
+    name: "拡張子は大文字小文字を区別する (.JSON・.MD は検査しない)",
+    files: { "BAD.JSON": "{", "BAD.MD": "[x](gone.md)\n" },
+    code: 0,
+    stderr: [],
   },
   {
     name: "JSON の構文と BOM",

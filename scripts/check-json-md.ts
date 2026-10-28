@@ -19,7 +19,7 @@
  * - 対象:
  *   - Markdown のリンク・画像 (参照スタイルを含む)。
  *   - 生の HTML のタグの `href`・`src`。
- *   - 生の HTML のタグの `srcset`: 検査できないので違反。
+ *   - 生の HTML のタグの、他の URL の属性 (下の uncheckableAttributes。canon: facts/html/url-valued-attributes): 検査できないので違反。属性の名前は大文字小文字を区別しない。
  * - スキーム (`http:`・`mailto:` など) か `//` で始まるものは外部として見ない。
  * - 最初の `#` の後が anchor。その前の最初の `?` の後は query で、見ない。
  * - パス:
@@ -54,11 +54,12 @@ const markdownFiles = Deno.args.filter((f) => f.endsWith(".md"));
 
 /** segment の列の鍵は JSON にする (segment は decode した `/` や NUL を含みうるので)。 */
 const key = (segments: string[]) => JSON.stringify(segments);
-const knownFiles = new Set(Deno.args.map((f) => key(f.split("/"))));
-const knownDirs = new Set(
+/** リンク先として在るもの: 引数のファイルと、その親ディレクトリ (ルートを含む) の鍵。 */
+const known = new Set(
   Deno.args.flatMap((f) => {
     const segments = f.split("/");
-    return segments.map((_, i) => key(segments.slice(0, i)));
+    return segments.map((_, i) => key(segments.slice(0, i + 1)))
+      .concat(key([]));
   }),
 );
 
@@ -68,6 +69,7 @@ const report = (file: string, message: string) =>
 const messageOf = (e: unknown) => e instanceof Error ? e.message : String(e);
 
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+/** 読めて UTF-8 なら文字列。読めなければ違反を記録して undefined を返す。 */
 const readOrReport = async (file: string): Promise<string | undefined> => {
   let bytes: Uint8Array;
   try {
@@ -124,16 +126,43 @@ const anchorsOf = (tokens: Token[]): Set<string> => {
   return anchors;
 };
 
-// CommonMark 0.31.2 の Raw HTML の open tag と attribute の構文 (markdown-it が html_block・html_inline にするもの。canon: facts/markdown-it/parse-token-shapes)
+// 生の HTML の属性を正規表現で読むのは、markdown-it が html_block・html_inline に生の文字列しか持たせないため (canon: facts/markdown-it/parse-token-shapes)。構文は CommonMark 0.31.2 の Raw HTML の open tag と attribute
 const openTag =
   /<[A-Za-z][A-Za-z0-9-]*((?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*)\s*\/?>/g;
 const attribute =
   /\s+([A-Za-z_:][A-Za-z0-9_.:-]*)(?:\s*=\s*([^\s"'=<>`]+|'[^']*'|"[^"]*"))?/g;
 
-type Target = { url: string } | { uncheckable: string };
+/** href・src 以外の、値が URL (か URL の列) の属性 (canon: facts/html/url-valued-attributes)。小文字で持つ。 */
+const uncheckableAttributes = new Set([
+  "action",
+  "archive",
+  "background",
+  "cite",
+  "classid",
+  "codebase",
+  "data",
+  "formaction",
+  "imagesrcset",
+  "itemid",
+  "itemtype",
+  "longdesc",
+  "lowsrc",
+  "manifest",
+  "ping",
+  "poster",
+  "profile",
+  "srcset",
+  "usemap",
+  "xlink:href",
+]);
 
-/** 生の HTML の href・src の値 (引用符を外し、文字参照を戻したもの) と、srcset の値。コメントの中は描画されないので見ない。 */
+type Target = { url: string } | {
+  uncheckable: { name: string; value: string };
+};
+
+/** 生の HTML の href・src の値 (引用符を外し、文字参照を戻したもの) と、他の URL の属性の名前と値。 */
 const htmlTargets = (html: string): Target[] =>
+  // コメントの中は描画されないので見ない
   [...html.replace(/<!--[\s\S]*?-->/g, "").matchAll(openTag)].flatMap((
     [, attrs],
   ) =>
@@ -144,7 +173,9 @@ const htmlTargets = (html: string): Target[] =>
         (ref) => md.utils.unescapeAll(ref),
       );
       if (/^(?:href|src)$/i.test(name)) return [{ url: value }];
-      if (/^srcset$/i.test(name)) return [{ uncheckable: `${name}=${value}` }];
+      if (uncheckableAttributes.has(name.toLowerCase())) {
+        return [{ uncheckable: { name, value } }];
+      }
       return [];
     })
   );
@@ -174,16 +205,25 @@ type Resolved = { segments: string[] } | { problem: string };
 const malformed =
   "不正な %-エンコード。正しい %XX の列にする (% そのものは %25)";
 
-/** リンクのパスを辿った、リポのルートからの segment。 */
+/** %-decode できなければ undefined。 */
+const decode = (s: string): string | undefined => {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * リンクのパスを辿った、リポのルートからの segment。
+ * - new URL() で解決しない: WHATWG の URL はルートより上へ出る `..` を `/` に丸めるので、リポの外への脱出を検出できない。
+ * - node:path の posix.normalize も使わない: decode した segment の `/` (%2F) を区切りとして畳むので、segment ごとに畳む。
+ */
 const resolve = (dir: string[], path: string): Resolved => {
   const out = path.startsWith("/") ? [] : [...dir];
   for (const raw of path.split("/")) {
-    let segment: string;
-    try {
-      segment = decodeURIComponent(raw);
-    } catch {
-      return { problem: malformed };
-    }
+    const segment = decode(raw);
+    if (segment === undefined) return { problem: malformed };
     if (segment === "" || segment === ".") continue;
     if (segment !== "..") out.push(segment);
     else if (out.pop() === undefined) {
@@ -191,15 +231,6 @@ const resolve = (dir: string[], path: string): Resolved => {
     }
   }
   return { segments: out };
-};
-
-/** decode できなければ undefined。 */
-const decodeAnchor = (s: string): string | undefined => {
-  try {
-    return decodeURIComponent(s);
-  } catch {
-    return undefined;
-  }
 };
 
 /** .md の引数ごとの、名前と、parse したトークンと見出しの anchor (読めなければ undefined)。鍵は key。 */
@@ -221,9 +252,10 @@ for (const { file, parsed } of markdown.values()) {
   const dir = file.split("/").slice(0, -1);
   for (const target of targetsOf(parsed.tokens)) {
     if ("uncheckable" in target) {
+      const { name, value } = target.uncheckable;
       report(
         file,
-        `srcset のリンク先は検査できない。リポ内のファイルを指すなら src にする — ${target.uncheckable}`,
+        `${name} の参照先は検査できない。リポ内のファイルを指すなら href か src で書く — ${name}=${value}`,
       );
       continue;
     }
@@ -240,7 +272,7 @@ for (const { file, parsed } of markdown.values()) {
       continue;
     }
     const at = key(resolved.segments);
-    if (!knownFiles.has(at) && !knownDirs.has(at)) {
+    if (!known.has(at)) {
       report(
         file,
         `リンク先が無い。git が知るファイルかディレクトリを指す — ${url}`,
@@ -248,7 +280,7 @@ for (const { file, parsed } of markdown.values()) {
       continue;
     }
     if (rawAnchor === "") continue;
-    const anchor = decodeAnchor(rawAnchor);
+    const anchor = decode(rawAnchor);
     if (anchor === undefined) {
       report(file, `${malformed} — ${url}`);
       continue;
