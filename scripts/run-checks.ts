@@ -60,12 +60,14 @@
  * - 引数は 1 つで、verify.sh が hook を揃えた結果。外れていれば理由を出して exit 2。
  *   - 0: 揃えた。
  *   - 1: 揃えられなかった (理由は verify.sh が出した)。段は回し、最後に exit 1。
- * - 環境変数 TMPDIR: verify.sh が symlink を解決した絶対パスを渡す。空なら理由を出して exit 2。
+ * - 環境変数 TMPDIR: verify.sh が絶対パスにした値を受ける。未設定・空・書けない値なら、deno test の段の TMPDIR を作れないので段の前で exit 1 (test が無ければ使わない)。
  * - cwd はリポのルート。読むファイルは deno.json だけ。書くのは TMPDIR の下だけ。許可は verify.sh が渡す。
  * - 環境はそのまま段の子に渡す。差し替えるのは次だけ:
  *   - git (git()): git の場所を決める変数 (git rev-parse --local-env-vars の一覧。canon: facts/git/local-env-vars-and-hook-env) を消す。git は cwd のリポを見る。一覧は、どの環境でも同じものを出す (canon の同じページ) ので、このプロセスの環境のまま聞く。聞けなければ理由を出して exit 1。
- *   - deno (deno()): 検査の結果を変える変数 (canon: facts/deno/environment-and-config-inputs の「結果を変える」) を消し、DENO_NO_PACKAGE_JSON=1 を渡す。同じ canon の「取得だけを変える」「出力の形だけ」の変数は残す。
- *     - deno test の段は、さらに TMPDIR を差し替える。
+ *   - deno (deno()):
+ *     - 消すもの: 検査の結果を変える変数 (canon: facts/deno/environment-and-config-inputs の「結果を変える」)。
+ *     - 残すもの: 同じ canon の「取得だけを変える」「出力の形だけ」の変数。
+ *     - 渡すもの: DENO_NO_PACKAGE_JSON=1。deno test の段は、さらに TMPDIR を段の TMPDIR にする。
  *     - リポの祖先に、このリポを workspace の member に含む deno.json があると、deno はその設定を読む。flag で止められず、検出もしない (同じ canon の「設定ファイル」)。
  *   - shellcheck (shellcheck()。段と版の確かめ): SHELLCHECK_OPTS を消し、`--norc` を付ける。
  *     - shellcheck は引数の他に SHELLCHECK_OPTS と .shellcheckrc を読み (canon: facts/shellcheck/environment-and-config-inputs)、利用者の指定で手元と CI の結果が分かれる。
@@ -74,14 +76,22 @@
  *   - deno: 2.<denoMinor>.<patch> で、patch が denoPatches (下の定数) のどれか。denoPatches は、このファイルが引く canon の事実と recommended の lint を測った版だけを持つ。このプロセスを動かす deno を見る (段の子も同じ PATH で引く)。
  *   - shellcheck: shellcheckVersion だけ。版で出す指摘が違う (canon: facts/shellcheck/sc2015-version-difference)。
  *   - git: verify.sh の事前条件 (verify.sh が確かめる)。
- *   - 版を足す・上げるときは、次を済ませてから定数に足す:
+ *   - 版を足す・上げるときは、次を済ませてから、その道具の版の定数 (deno は denoMinor・denoPatches、shellcheck は shellcheckVersion) を変える:
  *     1. 次を新しい版で測り直す。このファイルが引く canon の事実と、deno info --json の形 (下の「deno.json の imports」)。
- *     2. deno lint の recommended に増えた規則の指摘を直す。
- *     3. 同じ commit で .github/workflows/verify.yml の版を、この定数に入るものにする。
+ *     2. deno: deno lint の recommended に増えた規則の指摘を直す。
+ *     3. 同じ commit で .github/workflows/verify.yml を合わせる。deno は deno-version を denoPatches に入る版にする。shellcheck は SHELLCHECK_VERSION と、取る tar.xz の sha256 を shellcheckVersion の版のものにする。
  * - 名前: git が知る項目を -z で受ける (canon: facts/git/path-output-quoting)。
  *   - 追跡された項目は `git ls-files -s -t --cached` で種類も受け、次の全部を満たすものだけを処理する (canon: facts/git/repository-shapes の「作業ツリーの項目」)。
  *     - 項目が `<tag> <mode> <object> <stage>\t<名前>` の形 (tag は 1 文字、mode は 6 桁の 8 進、stage は 0〜3)。
- *     - 通常ファイル (mode 100644・100755)。symlink (120000) は、deno がリンク先 (ディレクトリならその中の git の知らない .ts) まで検査する。gitlink (160000) はサブモジュールで、検査する対象でない。他の mode は想定外。
+ *     - 通常ファイル (mode 100644・100755)。mode ごとの扱い:
+ *
+ *       | mode | 扱い (直し方) |
+ *       | --- | --- |
+ *       | 100644・100755 | 処理する |
+ *       | 120000 (symlink) | 段の前で落ちる。deno がリンク先 (ディレクトリならその中の git の知らない .ts) まで検査するため (通常ファイルにするか git rm --cached する) |
+ *       | 160000 (gitlink) | 段の前で落ちる。サブモジュールで、検査する対象でない (git rm --cached する) |
+ *       | 他 | 段の前で落ちる。想定外 (git の版を確かめる) |
+ *
  *     - skip-worktree でない (tag が S でない)。作業ツリーから消えていても `--deleted` に出ない。
  *     - 解決していない merge の項目でない (stage が 0)。
  *   - 未追跡の項目は `git ls-files --others --exclude-standard` で名前だけを受ける。種類は受けないので、下の名前の述語だけで決める (未追跡の symlink は通る)。
@@ -94,13 +104,14 @@
  * - 名前の渡し方:
  *   - shellcheck・git・deno (check-json-md.ts を除く): 名前に `./` を前置する。先頭の `-` (option)・`!` (deno の除外)・`npm:` など (deno の URL) が名前として読まれる。deno check は `--` の後の名前を無視して cwd 全体を検査する (canon: facts/deno/check-double-dash)。
  *   - check-json-md.ts: 名前を全部、そのまま渡す (canon: facts/deno/run-args-passthrough)。
- * - 拡張子: 名前の末尾 (大文字小文字を区別する。`.SH`・`.TS` は対象でない) で対象を決める。
+ * - 拡張子: 名前の末尾 (大文字小文字を区別する) で対象を決める。
  *   - shellcheck は `*.sh`、deno は `*.ts` (test は `*_test.ts`)。対象が無い段は通す (shellcheck は引数が無いと落ちる。canon: facts/shellcheck/no-files-argument)。
+ *   - 大文字小文字だけが違う拡張子 (`.SH`・`.Ts` など) の名前は、処理できない項目として段の前で落ちる。検査せずに通さないため。
  *   - 追跡された実行ファイル (mode 100755) で、検査の段が無い名前 (`*.sh`・`*.ts` でない) は、処理できない項目として段の前で落ちる。拡張子の無い shell を検査せずに通さないため。
  *   - 例外は hooks/pre-push で、名前は git が決め、agent-sync が置く。検査は配る側 (ikeyan/agent-files の verify) が受け持つ。
  * - deno lint は recommended の規則で回し、cwd の deno.json の lint 設定を読む (canon: facts/deno/lint-file-args-and-rules)。
  * - deno test の許可:
- *   - write: 段の TMPDIR だけ (canon: facts/deno/make-temp-dir-permissions)。test は Deno.symlink を使えない (run-checks_test.ts の先頭)。
+ *   - write: 段の TMPDIR だけ (canon: facts/deno/make-temp-dir-permissions)。
  *   - read・env・run: 絞らない。test は次をする:
  *     - リポのファイル (verify.sh・hooks/pre-push など) を読む。
  *     - 環境を丸ごと子に渡す。
@@ -144,10 +155,6 @@ if (Deno.args.length !== 1 || (state !== "0" && state !== "1")) {
   Deno.exit(2);
 }
 const tmpdir = Deno.env.get("TMPDIR");
-if (!tmpdir) {
-  console.error(`${self}: TMPDIR が空。./verify.sh から起動する`);
-  Deno.exit(2);
-}
 
 interface Run {
   code: number;
@@ -169,7 +176,6 @@ const pass = (message: string): Run => ({
 const messageOf = (e: unknown) => e instanceof Error ? e.message : String(e);
 const describe = (e: unknown) =>
   e instanceof Error ? e.stack ?? String(e) : String(e);
-/** 子が非 0 で終わったことと、その stderr。 */
 const exited = (command: string, r: Run) =>
   `${command} が exit ${r.code}。下のエラーを直す\n${dec.decode(r.err)}`;
 
@@ -323,7 +329,11 @@ async function exec(
   outputs.catch(() => {});
   let emptied: Promise<void> | undefined;
   // 中断の経路と exec の finally の両方が呼ぶので、2 回目以降は同じ Promise を返す
-  const empty = () => emptied ??= emptyGroup(child, outputs);
+  const empty = () =>
+    emptied ??= emptyGroup(child, outputs).then(() => {
+      // 空にできたときだけ記録を消す。空にできなければ残し、中断の経路からも報告する
+      groups.delete(child.pid);
+    });
   groups.set(child.pid, empty);
   try {
     const { code } = await child.status;
@@ -338,20 +348,28 @@ async function exec(
       err: concat([
         err,
         enc.encode(
-          `${self}: ${cmd} の出力の pipe が、グループを空にしてから ${graceMs} ms の内に閉じない。グループを抜けた子孫が pipe を持って残っている。ps -eo pid,ppid,pgid,args で探して止め、その子孫がグループを抜けないようにする\n`,
+          `${self}: ${cmd} の出力の pipe が、${cmd} が終わっても閉じない (${graceMs} ms 待った)。pipe を持つプロセスを ps -eo pid,ppid,pgid,args で探して止める\n`,
         ),
       ]),
     };
   } finally {
-    // 空にできなければ記録を残し、中断の経路からも報告する
     await empty();
-    groups.delete(child.pid);
   }
 }
 
 /** git の場所を決める変数 (上の「入力と環境の定義域」)。 */
 const localEnvVars = await (async () => {
-  const r = await exec("git", ["rev-parse", "--local-env-vars"]);
+  let r: Run;
+  try {
+    r = await exec("git", ["rev-parse", "--local-env-vars"]);
+  } catch (e) {
+    console.error(
+      `${self}: git rev-parse --local-env-vars を起動できない。git を PATH に置く — ${
+        messageOf(e)
+      }\n検査の段は回していない`,
+    );
+    Deno.exit(1);
+  }
   if (r.code !== 0) {
     console.error(
       `${self}: ${
@@ -403,6 +421,12 @@ const splitNul = (b: Uint8Array): Uint8Array[] => {
 /** 段より前の確かめの、外れたものの理由。 */
 type Problems = string[];
 
+/** 検査の段の対象の拡張子 (上の「拡張子」)。 */
+const exts = { sh: ".sh", ts: ".ts" } as const;
+const checkedExts: string[] = Object.values(exts);
+const hasCheckedExt = (f: string) => checkedExts.some((e) => f.endsWith(e));
+const extList = checkedExts.join("・");
+
 /** git が知る項目のうち処理するものの名前と、処理できない項目の理由。 */
 async function gitFiles(): Promise<{ files: string[]; problems: Problems }> {
   const [cached, others] = await Promise.all([
@@ -435,8 +459,10 @@ async function gitFiles(): Promise<{ files: string[]; problems: Problems }> {
           ? `名前が、deno が glob として展開する * か ? を含む。${rename}`
           : f.endsWith("/")
           ? "未追跡の入れ子のリポジトリ (/ で終わる)。消すか .gitignore に足す"
-          : executable && !/\.(?:sh|ts)$/.test(f) && f !== "hooks/pre-push"
-          ? "検査の段が無い名前 (.sh・.ts でない) の実行ファイル。shell なら .sh と名付け、他は git update-index --chmod=-x する"
+          : !hasCheckedExt(f) && hasCheckedExt(f.toLowerCase())
+          ? `拡張子が ${extList} と大文字小文字だけ違う。検査の段は大文字小文字を区別するので、${extList} にする`
+          : executable && !hasCheckedExt(f) && f !== "hooks/pre-push"
+          ? `検査の段が無い名前 (${extList} でない) の実行ファイル。shell なら .sh と名付け、他は git update-index --chmod=-x する`
           : undefined;
         if (reason === undefined) files.push(f);
       } catch (e) {
@@ -456,7 +482,7 @@ async function gitFiles(): Promise<{ files: string[]; problems: Problems }> {
     if (head === null) {
       accept(
         tab < 0 ? entry : entry.subarray(tab + 1),
-        "git ls-files -s -t の項目の形でない。git の版を確かめる (git 2.43.0 で測った形)",
+        "git ls-files -s -t の項目の形でない。git の版を確かめる",
         false,
       );
       continue;
@@ -523,8 +549,11 @@ const shellcheck = (args: string[]) =>
   exec("shellcheck", ["--norc", ...args], { unset: ["SHELLCHECK_OPTS"] });
 const shellcheckInstall = [
   `shellcheck ${shellcheckVersion} を PATH の先に置き、shellcheck --version で確かめる。置き方は次のどれか:`,
-  `- release の tar.xz: https://github.com/koalaman/shellcheck/releases/tag/v${shellcheckVersion} から OS と CPU に合う shellcheck-v${shellcheckVersion}.<os>.<arch>.tar.xz を取り、展開した shellcheck を PATH の先のディレクトリ (~/.local/bin など) に置く。Linux の x86_64 の手順と sha256 は .github/workflows/verify.yml にある。`,
-  `- Homebrew (macOS で、その版が ${shellcheckVersion} のとき): brew install shellcheck。`,
+  "- release の tar.xz:",
+  `  1. https://github.com/koalaman/shellcheck/releases/tag/v${shellcheckVersion} から、OS と CPU に合う shellcheck-v${shellcheckVersion}.<os>.<arch>.tar.xz を取る。`,
+  "  2. Linux の x86_64 なら、.github/workflows/verify.yml の sha256 と合うことを確かめる (sha256sum -c)。",
+  "  3. 展開した shellcheck を PATH の先のディレクトリ (~/.local/bin など) に置く。",
+  `- Homebrew: macOS で、brew info shellcheck の版が ${shellcheckVersion} のときだけ。brew install shellcheck。`,
 ].join("\n");
 async function shellcheckProbe(): Promise<Problems> {
   const problem = (message: string): Problems => [
@@ -568,7 +597,7 @@ await interruption;
 const files = listing.files;
 const withExt = (ext: string) => files.filter((f) => f.endsWith(ext));
 const dotSlash = (f: string) => `./${f}`;
-const ts = withExt(".ts");
+const ts = withExt(exts.ts);
 const tests = ts.filter((f) => f.endsWith("_test.ts"));
 const preProblems = [...listing.problems, ...others.flat()];
 if (preProblems.length === 0 && tests.length) {
@@ -582,7 +611,9 @@ if (preProblems.length === 0 && tests.length) {
     };
   } catch (e) {
     preProblems.push(
-      `deno test の段の TMPDIR を ${tmpdir} の下に作れない。書けるディレクトリを TMPDIR に設定する — ${
+      `deno test の段の TMPDIR を、TMPDIR (${
+        tmpdir ?? "未設定"
+      }) の下に作れない。書けるディレクトリを TMPDIR に設定する — ${
         messageOf(e)
       }`,
     );
@@ -611,9 +642,17 @@ const denoFiles = (args: string[], targets: string[], tmp?: string) =>
 
 /** deno.json の imports の各キーが、.ts の import の指定子から使われていること。 */
 async function importKeys(): Promise<Run> {
-  const keys = Object.keys(
-    JSON.parse(await Deno.readTextFile("deno.json")).imports ?? {},
-  );
+  const { imports = {} } = JSON.parse(await Deno.readTextFile("deno.json"));
+  if (
+    typeof imports !== "object" || imports === null || Array.isArray(imports)
+  ) {
+    return fail(
+      `deno.json: imports がオブジェクトでない。指定子から依存への対応のオブジェクトにする — ${
+        JSON.stringify(imports)
+      }`,
+    );
+  }
+  const keys = Object.keys(imports);
   const infos = await Promise.all(ts.map(async (f) => ({
     f,
     r: await denoFiles([
@@ -641,7 +680,7 @@ async function importKeys(): Promise<Run> {
   }
   if (problems.length) {
     problems.push(
-      "deno.json: 指定子の一覧が欠けるので、imports の未使用の判定はしていない。上を直してから回す",
+      "deno.json: imports の未使用の判定をしていない。上を直してから回す",
     );
     return fail(problems.join("\n"));
   }
@@ -687,7 +726,7 @@ async function denoTest(): Promise<Run> {
 }
 
 const steps: [string, () => Promise<Run>][] = [
-  ["shellcheck", () => onFiles(withExt(".sh"), shellcheck)],
+  ["shellcheck", () => onFiles(withExt(exts.sh), shellcheck)],
   ["deno fmt", () => denoFiles(["fmt", "--check"], ts)],
   ["deno lint", () => denoFiles(["lint"], ts)],
   ["deno check", () => denoFiles(["check"], ts)],
@@ -705,6 +744,8 @@ const steps: [string, () => Promise<Run>][] = [
   ],
 ];
 
+/** 段が通ったか。出力の先と終了コードの両方がこれで決まる。 */
+const passed = (r: Run) => r.code === 0;
 const results = await Promise.all(
   steps.map(async ([name, run]) => ({
     name,
@@ -731,7 +772,7 @@ const write = (
 const out = (data: Uint8Array) => write("stdout", Deno.stdout, data);
 const err = (data: Uint8Array) => write("stderr", Deno.stderr, data);
 for (const r of results) {
-  if (r.code === 0) {
+  if (passed(r)) {
     out(enc.encode(`== ${r.name}: 通った\n`));
     out(r.out);
     err(r.err);
@@ -743,7 +784,5 @@ for (const r of results) {
 }
 for (const message of writeErrors) err(enc.encode(`${self}: ${message}\n`));
 Deno.exit(
-  state === "1" || writeErrors.size > 0 || results.some((r) => r.code !== 0)
-    ? 1
-    : 0,
+  state === "1" || writeErrors.size > 0 || !results.every(passed) ? 1 : 0,
 );
