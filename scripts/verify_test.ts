@@ -157,7 +157,7 @@ async function makeRepo(dir: string) {
 }
 
 /** dir の fixture を commit し、wt に linked worktree を作る。 */
-async function addWorktree(dir: string, wt: string) {
+async function commitAndAddWorktree(dir: string, wt: string) {
   await git(dir, "add", "-A");
   await git(
     dir,
@@ -422,12 +422,14 @@ interface Case {
   code: number;
   /** 回した後の hooks の中身。 */
   hooks: Awaited<ReturnType<typeof readHooks>>;
-  /** stub が起動されないなら undefined。関数なら、dir を解決したパスから決める。 */
-  tmpdir?: string | ((realDir: string) => string);
-  /** stub が報告する git dir の、dir を解決したパスの後。既定は /.git。 */
-  gitDir?: string;
-  /** stderr が含むこと (配列なら全部)。 */
-  stderr?: string | string[];
+  /** stub が起動されるなら、その報告の期待 (起動されないなら undefined)。関数は、dir を解決したパスから決める。 */
+  stub?: {
+    tmpdir: string | ((realDir: string) => string);
+    /** 既定は ${realDir}/.git。 */
+    gitDir?: (realDir: string) => string;
+  };
+  /** stderr が含むこと (配列なら全部)。関数は、fixture のリポの dir から決める。 */
+  stderr?: string | string[] | ((dir: string) => string | string[]);
   /** stderr が含まないこと。 */
   stderrLacks?: string;
   /** stderr の Execute: の後のコマンドを実行してから回し直すと、exit 0 で hook が写っていること。 */
@@ -475,7 +477,7 @@ const otherHooks = {
   "pre-push": { bytes: Array.from(other), executable: true },
 };
 /** 写した後に TMPDIR まで進んだ行の、stub の TMPDIR とその他の期待値。 */
-const copied = { code: 0, hooks: copiedHooks, tmpdir: realTmpdir };
+const copied = { code: 0, hooks: copiedHooks, stub: { tmpdir: realTmpdir } };
 /** bash が PATH に無いコマンドに出す行。 */
 const notFound = (tool: string) => `: ${tool}: command not found`;
 /** 写す途中の一時ファイルの rm -f が落ちたときの stderr の、一時ファイルの後からコマンドの先頭まで。 */
@@ -501,7 +503,7 @@ const missingTools: (
     state: "hooks が無い",
     code: 1,
     hooks: null,
-    tmpdir: realTmpdir,
+    stub: { tmpdir: realTmpdir },
     stderr: [notFound("mkdir"), cannotCopy],
     fix: true,
   },
@@ -510,7 +512,7 @@ const missingTools: (
     state: "無い" as const,
     code: 1,
     hooks: {},
-    tmpdir: realTmpdir,
+    stub: { tmpdir: realTmpdir },
     stderr: [notFound(tool), cannotCopy],
     fix: true as const,
   })),
@@ -519,7 +521,7 @@ const missingTools: (
     state: "無い",
     code: 1,
     hooks: { ...copiedHooks, "pre-push.verify-PID": copiedHook },
-    tmpdir: realTmpdir,
+    stub: { tmpdir: realTmpdir },
     stderr: [
       notFound("rm"),
       "/pre-push.verify-",
@@ -533,7 +535,7 @@ const missingTools: (
     state: "無い",
     code: 1,
     hooks: {},
-    tmpdir: realTmpdir,
+    stub: { tmpdir: realTmpdir },
     stderr: [
       notFound("rm"),
       notFound("install"),
@@ -546,7 +548,7 @@ const missingTools: (
     state: "同じ",
     code: 1,
     hooks: copiedHooks,
-    tmpdir: realTmpdir,
+    stub: { tmpdir: realTmpdir },
     stderr: [
       notFound("cmp"),
       "/pre-push: cmp が PATH に無く、hooks/pre-push と比べられない。cmp を入れてから回し直す",
@@ -557,7 +559,7 @@ const missingTools: (
     state: "同じで実行可能でない",
     code: 1,
     hooks: { "pre-push": { ...copiedHook, executable: false } },
-    tmpdir: realTmpdir,
+    stub: { tmpdir: realTmpdir },
     stderr: [
       notFound("chmod"),
       "/pre-push: 実行可能にできない (理由は上の chmod)。Execute: chmod +x",
@@ -573,7 +575,7 @@ const missingTools: (
     state,
     code: 0,
     hooks: copiedHooks,
-    tmpdir: realTmpdir,
+    stub: { tmpdir: realTmpdir },
   })),
   // hook は deno の exec より前に揃える
   {
@@ -670,7 +672,7 @@ for (const [state, code, hooks, stderr] of states) {
       : {}),
     code,
     hooks,
-    tmpdir: realTmpdir,
+    stub: { tmpdir: realTmpdir },
     stderr,
     ...(code === 0 ? {} : { fix: true }),
   });
@@ -702,7 +704,7 @@ for (const [source, stderr] of sourceStates) {
       },
       code: 1,
       hooks,
-      tmpdir: realTmpdir,
+      stub: { tmpdir: realTmpdir },
       stderr,
       stderrLacks: "rm ",
       fix: true,
@@ -721,6 +723,28 @@ for (const name of localEnv) {
   });
 }
 const hooksPathFile = "[core]\n\thooksPath = elsewhere\n";
+/** dir の worktree の scope に core.hooksPath を書く。 */
+async function setWorktreeHooksPath(dir: string) {
+  await git(dir, "config", "extensions.worktreeConfig", "true");
+  await git(dir, "config", "--worktree", "core.hooksPath", "elsewhere");
+}
+/** linked worktree の test の worktree の名前。 */
+const linkedName = "wt";
+/** bash の printf %q で quote した s (verify.sh が示すコマンドの中のパスの形)。 */
+const shellQuoted = (s: string) => {
+  const r = new Deno.Command("bash", {
+    args: ["-c", 'printf %q "$1"', "bash", s],
+    env: baseEnv,
+    clearEnv: true,
+  }).outputSync();
+  if (!r.success) throw new Error(dec.decode(r.stderr));
+  return dec.decode(r.stdout);
+};
+/** core.hooksPath を読めないときの stderr の行。detail は理由の後から Execute: の前まで。 */
+const unreadableHooksPath = (detail: string) => (dir: string) =>
+  `core.hooksPath が設定されているかを読めない ${detail}。Execute: cd ${
+    shellQuoted(dir)
+  } && ./verify.sh\n`;
 const realGit = await which("git");
 const realInstall = await which("install");
 /** core.hooksPath が設定されていても hook は写し、落ちて unset のコマンドを示す行。 */
@@ -735,34 +759,40 @@ cases.push(
   },
   {
     name: "core.hooksPath を worktree の scope に書いた",
-    prepare: async (dir) => {
-      await git(dir, "config", "extensions.worktreeConfig", "true");
-      await git(dir, "config", "--worktree", "core.hooksPath", "elsewhere");
-    },
+    prepare: setWorktreeHooksPath,
     ...hooksPathSet,
     stderr:
       "core.hooksPath が設定されている (worktree file:.git/config.worktree elsewhere)。",
   },
   {
-    // linked worktree の cwd からは、local・worktree の出どころが絶対パスで出る (canon: facts/git/config-sources-and-scopes の「--show-origin の出力の形」)。示すコマンドを fixture のリポで実行しても両方が消えること (fix) で、絶対パスで指すことを確かめる
+    // linked worktree の cwd からは、local・worktree の出どころが絶対パスで出る (canon: facts/git/config-sources-and-scopes の「--show-origin の出力の形」)。示す unset のコマンドを、そのパスで全体まで照合する
     name:
       "linked worktree で、core.hooksPath を local と worktree の scope に書いた",
     invoke: async (dir, e) => {
-      const wt = `${e}/wt`;
-      await addWorktree(dir, wt);
+      const wt = `${e}/${linkedName}`;
+      await commitAndAddWorktree(dir, wt);
       await git(wt, "config", "core.hooksPath", "elsewhere");
-      await git(wt, "config", "extensions.worktreeConfig", "true");
-      await git(wt, "config", "--worktree", "core.hooksPath", "elsewhere");
+      await setWorktreeHooksPath(wt);
       return viaBash(wt);
     },
     ...hooksPathSet,
-    gitDir: "/.git/worktrees/wt",
-    stderr: [
-      "/.git/config elsewhere; worktree file:/",
-      "/.git/worktrees/wt/config.worktree elsewhere)。消す。",
-      "Execute: git config --file /",
-      "/.git/config --unset-all core.hooksPath && git config --file /",
-    ],
+    stub: {
+      tmpdir: realTmpdir,
+      gitDir: (realDir) => `${realDir}/.git/worktrees/${linkedName}`,
+    },
+    stderr: (dir) => {
+      const real = Deno.realPathSync(dir);
+      const local = `${real}/.git/config`;
+      const worktree = `${real}/.git/worktrees/${linkedName}/config.worktree`;
+      const unset = (file: string) =>
+        `git config --file ${shellQuoted(file)} --unset-all core.hooksPath`;
+      return `${
+        refusedBy(
+          `core.hooksPath が設定されている (local file:${local} elsewhere; worktree file:${worktree} elsewhere)。消す`,
+          `${unset(local)} && ${unset(worktree)}`,
+        )
+      }\n`;
+    },
   },
   {
     name: "core.hooksPath を GIT_CONFIG_SYSTEM のファイルに書いた",
@@ -821,10 +851,27 @@ cases.push(
     },
     code: 1,
     hooks: copiedHooks,
-    tmpdir: realTmpdir,
-    stderr:
-      "core.hooksPath が設定されているかを読めない (git config が exit 3。理由は上の git)",
+    stub: { tmpdir: realTmpdir },
+    stderr: unreadableHooksPath(
+      "(git config が exit 3)。理由は上の git。直してから",
+    ),
   },
+  // 読み取りの子が途中で死に、exit の項目が来ない。切れる所は、3 つ組の途中 (scope の後・origin の後) と、3 つ組の後 (exit の項目の前)
+  ...[
+    ["scope の後", "local\\0"],
+    ["origin の後", "local\\0file:.git/config\\0"],
+    ["exit の項目の前", "local\\0file:.git/config\\0elsewhere\\0"],
+  ].map(([where, items]) => ({
+    name: `git config の出力が ${where}で切れる`,
+    fakes: {
+      git:
+        `#!/bin/sh\n[ "$1" = config ] && { printf '${items}'; kill -KILL "$PPID"; exit 0; }\nexec '${realGit}' "$@"\n`,
+    },
+    code: 1,
+    hooks: copiedHooks,
+    stub: { tmpdir: realTmpdir },
+    stderr: unreadableHooksPath("(読み取りが途中で終わった)"),
+  })),
   {
     name: "git の作業ツリーでない",
     prepare: (dir) => Deno.remove(`${dir}/.git`, { recursive: true }),
@@ -862,7 +909,7 @@ cases.push(
     fakes: { install: failing("install") },
     code: 1,
     hooks: {},
-    tmpdir: realTmpdir,
+    stub: { tmpdir: realTmpdir },
     stderr: cannotCopy,
     fix: true,
   },
@@ -877,7 +924,7 @@ cases.push(
     },
     code: 1,
     hooks: { "pre-push": { bytes: Array.from(other), executable: false } },
-    tmpdir: realTmpdir,
+    stub: { tmpdir: realTmpdir },
     stderr: differentHook,
     fix: true,
   },
@@ -887,7 +934,7 @@ cases.push(
     fakes: { chmod: failing("chmod") },
     code: 1,
     hooks: { "pre-push": { ...copiedHook, executable: false } },
-    tmpdir: realTmpdir,
+    stub: { tmpdir: realTmpdir },
     stderr:
       "/pre-push: 実行可能にできない (理由は上の chmod)。Execute: chmod +x",
     fix: true,
@@ -989,7 +1036,7 @@ cases.push(
     name: `TMPDIR が${name}なら /tmp を解決したもの`,
     env: () => ({ TMPDIR: value }),
     ...copied,
-    tmpdir: realTmp,
+    stub: { tmpdir: realTmp },
   })),
   {
     name: "TMPDIR が symlink",
@@ -1093,6 +1140,9 @@ const runCase = (c: Case): Promise<string[]> =>
       const lock = await Deno.readTextFile(`${dir}/deno.lock`);
       const invocation = await c.invoke?.(dir, elsewhere) ?? viaBash(dir);
       const r = await verify(invocation, env, c.args);
+      const wantStderr = typeof c.stderr === "function"
+        ? c.stderr(dir)
+        : c.stderr;
       const got = {
         code: r.code,
         hooks: await readHooks(`${dir}/.git`),
@@ -1100,23 +1150,24 @@ const runCase = (c: Case): Promise<string[]> =>
         strayStdout: r.stdout.includes(elsewhere),
         report: reportOf(r.stdout),
         lockUnchanged: await Deno.readTextFile(`${dir}/deno.lock`) === lock,
-        stderr: [c.stderr ?? []].flat().every((s) => r.stderr.includes(s)),
+        stderr: [wantStderr ?? []].flat().every((s) => r.stderr.includes(s)),
         stderrLacks: c.stderrLacks === undefined ||
           !r.stderr.includes(c.stderrLacks),
         fixed: c.fix &&
           await fixAndRerun(invocation, dir, env, r.stderr),
       };
+      const realDir = await Deno.realPath(dir);
       const want = {
         code: c.code,
         hooks: c.hooks,
         strayHooks: null,
         strayStdout: false,
-        report: c.tmpdir === undefined ? undefined : {
-          gitDir: `${await Deno.realPath(dir)}${c.gitDir ?? "/.git"}`,
+        report: c.stub === undefined ? undefined : {
+          gitDir: c.stub.gitDir?.(realDir) ?? `${realDir}/.git`,
           gitVars: [],
-          tmpdir: typeof c.tmpdir === "string"
-            ? c.tmpdir
-            : c.tmpdir(await Deno.realPath(dir)),
+          tmpdir: typeof c.stub.tmpdir === "string"
+            ? c.stub.tmpdir
+            : c.stub.tmpdir(realDir),
           permissions,
         },
         lockUnchanged: true,
@@ -1377,7 +1428,7 @@ Deno.test("TMPDIR の値の文字", async () => {
       prepare: (dir) => Deno.mkdir(`${dir}/.git/${name}`),
       env: (_, dir) => ({ TMPDIR: `${dir}/.git/${name}` }),
       ...copied,
-      tmpdir: (realDir) => `${realDir}/.git/${name}`,
+      stub: { tmpdir: (realDir) => `${realDir}/.git/${name}` },
     });
   // 各文字を 1 つずつ
   deepStrictEqual(
@@ -1406,19 +1457,19 @@ Deno.test("linked worktree で回すと、hook は common git dir の hooks に�
   await withTempDir((dir) =>
     withTempDir(async (outside) => {
       await makeRepo(dir);
-      await addWorktree(dir, `${outside}/wt`);
-      const r = await verify(viaBash(`${outside}/wt`), {});
+      await commitAndAddWorktree(dir, `${outside}/${linkedName}`);
+      const r = await verify(viaBash(`${outside}/${linkedName}`), {});
       const real = await Deno.realPath(dir);
       deepStrictEqual(
         {
           code: r.code,
           gitDir: reportOf(r.stdout)?.gitDir,
           common: await readHooks(`${dir}/.git`),
-          linked: await readHooks(`${dir}/.git/worktrees/wt`),
+          linked: await readHooks(`${dir}/.git/worktrees/${linkedName}`),
         },
         {
           code: 0,
-          gitDir: `${real}/.git/worktrees/wt`,
+          gitDir: `${real}/.git/worktrees/${linkedName}`,
           common: { "pre-push": copiedHook },
           linked: null,
         },

@@ -11,6 +11,7 @@
 #   - 次は git 2.43.0 で測った (git 2.32〜2.42: 測っていない)。
 #     - hook の判定が読む config -z --show-origin の並び (canon: facts/git/config-sources-and-scopes)。
 #     - run-checks.ts が読む ls-files -s -t の形 (canon: facts/git/repository-shapes)。
+#     - git が、写す途中の一時ファイル (下の「置き方」) を hook として呼ばないこと (canon: facts/git/hook-found-by-exact-name)。測ったのは Linux の git 2.43.0 だけで、macOS・Windows・core.hooksPath は測っていない。
 #   - verify.sh と run-checks.ts が読む rev-parse --local-env-vars の一覧 (canon: facts/git/local-env-vars-and-hook-env)。測った版での出方:
 #     - git 2.43.0: GIT_DIR に存在しないパスを入れても、同じ 15 個を同じ順で出した。測ったのは GIT_DIR だけ。
 #     - git 2.55.0 (macOS): 値を変えずに一覧を出した。
@@ -57,14 +58,14 @@
 # - 揃えられないとき: 理由と、その状態で実行すれば直るコマンド (絶対パス) を stderr に出す。消すコマンドには、消すものの中身を確かめるよう添える。
 # - core.hooksPath が (どの scope でも) 設定されていれば、揃えられないとする。写す先は既定の置き場のままで、下の表どおりに写す。
 #   - 既定の置き場を指していても同じ。git rev-parse --git-path は hooks の symlink を解決したパスを出し、既定の置き場と比べられない (canon: facts/git/rev-parse-absolute-path-resolves-symlinks)。
-#   - git config --get-all の終了コード (canon: facts/git/config-sources-and-scopes の「--get・--get-all の終了コード」): 0 は設定あり、1 は設定なし、他は読めないので揃えられないとする。
+#   - git config --get-all の終了コード (canon: facts/git/config-sources-and-scopes の「--get・--get-all の終了コード」): 0 は設定あり、1 は設定なし、他は読めないので揃えられないとする。終了コードを渡す exit の項目が来ない (読み取りの子が途中で終わった) ときも、読めないので揃えられないとする。
 #   - 出どころは file だけ (command scope の変数は上で消した。canon の同じページの「--show-origin の出力の形」)。file でなければ想定外として exit 1。
 #   - 示すコマンドは、出どころのファイルごとの git config --file <絶対パス> --unset-all core.hooksPath。
 # - 置き方: 一時ファイルに写し、ln -n で写す先に置く。
 #   - ln は写す先に何か在れば置かずに失敗する。ディレクトリだけはその中に作るので、置く前の分類で拒否する (canon: facts/shell/ln-hard-link-existing-destination)。
 #   - 置けなければ、もう一度下の写す先の表で分類する。分類の後に置かれたものも、その行の扱いになる。
 #   - 同じ common dir で並行に走る verify.sh にも、書きかけは見えない。
-#   - SIGKILL では EXIT trap が回らず、一時ファイル $hook.verify-$$ (写す先の pre-push の名前に .verify-<pid> を足したもの) が残りうる (canon: facts/shell/bash-exit-trap-skipped-on-sigkill)。git はこれを hook として呼ばない (canon: facts/git/hook-found-by-exact-name)。
+#   - SIGKILL では EXIT trap が回らず、一時ファイル $hook.verify-$$ (写す先の pre-push の名前に .verify-<pid> を足したもの) が残りうる (canon: facts/shell/bash-exit-trap-skipped-on-sigkill)。git はこれを hook として呼ばない (上の「git 2.43.0 で測った」の項)。
 # - 写す元 (作業ツリーの hooks/pre-push) の状態ごとの扱いと、示すコマンド。写す先を扱う前に分類し、写す先へ進まないものは写す先に触れない:
 #   - 通常ファイル (それへの symlink を含む) で、読める: 下の写す先の表へ進む。
 #   - 通常ファイル (それへの symlink を含む) で、読めない: 落ちる。chmod u+r。
@@ -157,7 +158,9 @@ hook=$hooks/pre-push
 hooks_path_shown=
 unset_cmd=
 config_exit=
-# git config -z の出力は (scope, origin, value) の 3 つ組の列 (canon: facts/git/config-sources-and-scopes の「--show-origin の出力の形」)
+# 読む項目の文法 (git config -z の出力の形は canon: facts/git/config-sources-and-scopes の「--show-origin の出力の形」):
+# - (scope, origin, value) の 3 つ組の 0 個以上の列と、最後の exit <git の終了コード> の項目 1 つ。
+# - exit の項目が無いまま EOF (子が途中で死んだ・3 つ組の途中で切れた) なら、config_exit は空のまま下の case の '' の枝に届く。
 while IFS= read -r -d '' scope; do
   case $scope in
   exit\ *)
@@ -165,8 +168,8 @@ while IFS= read -r -d '' scope; do
     break
     ;;
   esac
-  IFS= read -r -d '' origin
-  IFS= read -r -d '' value
+  IFS= read -r -d '' origin || break
+  IFS= read -r -d '' value || break
   hooks_path_shown="${hooks_path_shown:+$hooks_path_shown; }$scope $origin $value"
   case $origin in
   file:/*) file=${origin#file:} ;;
@@ -183,14 +186,15 @@ done < <(
   status=0
   # -z でないと、origin のパスの特殊な文字が C の quote で出る (canon: facts/git/config-sources-and-scopes の「--show-origin の出力の形」)
   git config -z --show-origin --show-scope --get-all core.hooksPath || status=$?
-  # 子が書けたときは、git の終了コードを exit の項目で渡す
   printf 'exit %s\0' "$status"
 )
+unreadable="core.hooksPath が設定されているかを読めない"
+rerun="cd $(printf %q "$PWD") && ./verify.sh"
 case $config_exit in
 0) refuse "core.hooksPath が設定されている ($hooks_path_shown)。消す" "$unset_cmd" ;;
 1) ;;
-'') fail "core.hooksPath が設定されているかを読めない (読み取りが途中で終わった)。回し直す" ;;
-*) fail "core.hooksPath が設定されているかを読めない (git config が exit $config_exit。理由は上の git)。直してから回し直す" ;;
+'') fix_by "$unreadable (読み取りが途中で終わった)" "$rerun" ;;
+*) fix_by "$unreadable (git config が exit $config_exit)。理由は上の git。直してから" "$rerun" ;;
 esac
 
 src=$PWD/hooks/pre-push
