@@ -1,7 +1,7 @@
 /**
  * check-json-md.ts を子として、TMPDIR の下の一時ディレクトリの fixture に回す。
  * - 表の各行: fixture のファイルと引数に対し、終了コードと stderr の違反の行 (順を問わない集合) が一致すること。
- * - 性質: 生成した相対パスへのリンクについて、報告が、最初の # と、その前の最初の ? で割り、パスを segment ごとに decode して辿るモデルと一致すること。
+ * - 性質: 生成した相対パスへのリンクについて、報告が、最初の # と、その前の最初の ? で割り、パスを segment ごとに decode して辿り、anchor を decode するモデルと一致すること。
  */
 import fc from "fast-check";
 import { deepStrictEqual } from "node:assert/strict";
@@ -143,7 +143,7 @@ const cases: {
     code: 1,
     stderr: [
       "a.md: 不正な %-エンコード — 100%zz.md",
-      "a.md: anchor が見出しに無い — b.md#%E3",
+      "a.md: 不正な %-エンコード — b.md#%E3",
     ],
   },
   {
@@ -270,6 +270,15 @@ const cases: {
     ],
   },
   {
+    name: "frontmatter: 閉じの --- でファイルが終わる",
+    files: {
+      "b.md": "---\ntitle: x\n---",
+      "a.md": "[l](b.md#title-x)\n",
+    },
+    code: 1,
+    stderr: ["a.md: anchor が見出しに無い — b.md#title-x"],
+  },
+  {
     name: "frontmatter: CRLF",
     files: {
       "b.md": "---\r\ntitle: x\r\n---\r\n# Real\r\n",
@@ -279,7 +288,6 @@ const cases: {
     stderr: ["a.md: anchor が見出しに無い — b.md#title-x"],
   },
   {
-    // markdown-it は \_ を text_special の _ にする (canon: facts/github/heading-anchor-ids の子トークンの選び方)
     name: "見出しの id: backslash escape",
     files: {
       "b.md": "## a\\_b\n",
@@ -301,11 +309,14 @@ const cases: {
     ],
   },
   {
-    name: "JSON の構文",
-    files: { "ok.json": "{}", "bad.json": "{" },
+    name: "JSON の構文と BOM",
+    files: { "ok.json": "{}", "bad.json": "{", "bom.json": "\uFEFF{}" },
     code: 1,
     prefix: true,
-    stderr: ["bad.json: JSON として読めない — "],
+    stderr: [
+      "bad.json: JSON として読めない — ",
+      "bom.json: JSON として読めない — ",
+    ],
   },
   ...[[], ["/a.md"], ["a//b.md"], ["./a.md"], ["a/../b.md"], [""], ["a/"]].map((
     args,
@@ -334,6 +345,7 @@ Deno.test("check-json-md.ts の表", async () => {
 const known = ["a/b/x.md", "a/n.md", "a b/n.md"];
 
 const labels = {
+  malformed: "不正な %-エンコード",
   outside: "リポの外を指す",
   missing: "リンク先が無い",
   anchor: "anchor が見出しに無い",
@@ -345,13 +357,6 @@ const model = (url: string): keyof typeof labels | undefined => {
   if (url.startsWith("//")) return undefined;
   const hash = url.indexOf("#");
   const raw = hash < 0 ? "" : url.slice(hash + 1);
-  const anchor = (() => {
-    try {
-      return decodeURIComponent(raw);
-    } catch {
-      return raw;
-    }
-  })();
   const path = (hash < 0 ? url : url.slice(0, hash)).split("?")[0];
   const out = path === ""
     ? ["a", "b", "x.md"]
@@ -360,7 +365,12 @@ const model = (url: string): keyof typeof labels | undefined => {
     : ["a", "b"];
   if (path !== "") {
     for (const segment of path.split("/")) {
-      const s = decodeURIComponent(segment);
+      let s: string;
+      try {
+        s = decodeURIComponent(segment);
+      } catch {
+        return "malformed";
+      }
       if (s === "" || s === ".") continue;
       if (s !== "..") out.push(s);
       else if (out.pop() === undefined) return "outside";
@@ -373,12 +383,18 @@ const model = (url: string): keyof typeof labels | undefined => {
       out.every((s, i) => s === segments[i]);
   });
   if (!exists) return "missing";
-  if (anchor === "") return undefined;
+  if (raw === "") return undefined;
+  let anchor: string;
+  try {
+    anchor = decodeURIComponent(raw);
+  } catch {
+    return "malformed";
+  }
   if (!isFile) return /^L\d+(?:-L\d+)?$/.test(anchor) ? undefined : "notMd";
   return "anchor";
 };
 
-Deno.test("リンクの報告は、# と ? で割って segment ごとに decode して辿るモデルと一致する", async () => {
+Deno.test("リンクの報告は、# と ? で割り、segment ごとに decode して辿り、anchor を decode するモデルと一致する", async () => {
   const path = fc.array(
     fc.constantFrom(
       ".",
@@ -400,6 +416,8 @@ Deno.test("リンクの報告は、# と ? で割って segment ごとに decode
       "?q",
       "x.md?q#y",
       "%23",
+      "%E3",
+      "#%E3",
     ),
     { minLength: 1, maxLength: 6 },
   ).map((s) => s.join("/"));

@@ -3,15 +3,15 @@
  *
  * 使い方: リポのルートを cwd にして `deno run --frozen-lockfile --allow-read=. <このファイル> <path>...`。
  * - <path> は git が知るファイルの全部。それぞれリポのルートからの相対パス。
- *   - `.json` で終わるもの: 構文を検査する。
- *   - `.md` で終わるもの: リンクと anchor を検査する。
+ *   - `.json` で終わるもの: 構文を検査する。BOM で始まるものは JSON として読めない違反になる (deno 自身も BOM 付きの deno.json を拒否する)。
+ *   - `.md` で終わるもの: リンクと anchor を検査する。各ファイルは 1 回だけ読み、そのファイル自身の検査と、そこへのリンクの anchor の検査に使う。
  *   - 全部: リンク先が在るかの判定に使う。
  * - 次のときは何も検査せず exit 2:
  *   - 引数が無い。
  *   - どれかが正規の相対パスでない (先頭の `/`、空・`.`・`..` の segment)。
  * - 違反があれば stderr に出して exit 1。無ければ件数を stdout に出して exit 0。
  *
- * リンク (GitHub が追跡されたファイルを描画するときの解決に合わせる。ただし未確認の前提で、canon に事実が無く、下の規則は GitHub で確かめていない):
+ * リンク (GitHub が追跡されたファイルを描画するときの解決に合わせる。ただし未確認の前提で、canon に事実が無く、下の規則は GitHub で確かめていない。確かめ方: 規則の各行の例を使い捨てのブランチの .md に置いて push し、GitHub の描画でリンクを辿る):
  * - 対象:
  *   - Markdown のリンク・画像 (参照スタイルを含む)。
  *   - 生の HTML のタグの `href`・`src`。
@@ -23,10 +23,10 @@
  *   - `/` で始まればリポのルートから、他はファイルのディレクトリから辿る。`.` と空の segment は飛ばし、`..` で 1 つ戻る。ルートより上へ戻るものは「リポの外を指す」違反。
  *   - パスが空ならファイル自身。
  * - 辿った先が、引数のどれかと segment ごとに綴り (大文字小文字を含む) まで一致するか、どれかの親ディレクトリ (ルートを含む) でなければ「リンク先が無い」違反。
- * - anchor (空なら見ない。%-decode できなければそのままの綴りで比べる):
+ * - anchor (空なら見ない。%-decode できなければ「不正な %-エンコード」違反):
  *   - 辿った先が `.md` のファイル: その見出しの id のどれかと一致すること。id は github-slugger の規則で作る (canon: facts/github/heading-anchor-ids)。
  *   - 他: GitHub の行の anchor (`L10`・`L10-L20`) だけを受ける。他は検査できないので違反。
- * - ファイルを読めなければ (無い、を含む)、そのファイル自身の違反 (`<file>: 読めない — <原因の文言>`) にする。読めないリンク先への anchor は見ない (リンク先は引数にあるので、リンク先自身の違反として出る)。
+ * - ファイルを読めなければ (無い、を含む)、そのファイル自身の違反 (`<file>: 読めない — <原因の文言>`) にする。読めない .md への anchor は見ない。
  */
 import GithubSlugger from "github-slugger";
 import MarkdownIt from "markdown-it";
@@ -90,14 +90,14 @@ const parse = (markdown: string): Token[] =>
     {},
   );
 
-/** 見出しの anchor。テキストの子トークンの選び方は canon: facts/github/heading-anchor-ids。 */
-const anchorsOf = (markdown: string): Set<string> => {
-  const tokens = parse(markdown);
+/** 見出しの anchor。 */
+const anchorsOf = (tokens: Token[]): Set<string> => {
   const slugger = new GithubSlugger();
   const anchors = new Set<string>();
   tokens.forEach((token, i) => {
     if (token.type !== "heading_open") return;
     const text = (tokens[i + 1].children ?? [])
+      // テキストの子トークンの選び方は canon: facts/github/heading-anchor-ids。markdown-it は \_ などの backslash escape を text_special にする
       .filter((c) =>
         c.type === "text" || c.type === "text_special" ||
         c.type === "code_inline"
@@ -135,7 +135,7 @@ const htmlTargets = (html: string): Target[] =>
   );
 
 /** リンクと画像の参照先 (参照スタイルのリンクも解決済みで出てくる) と、生の HTML の参照先。 */
-const targetsOf = (markdown: string): Target[] => {
+const targetsOf = (tokens: Token[]): Target[] => {
   const out: Target[] = [];
   const walk = (tokens: Token[]) => {
     for (const token of tokens) {
@@ -151,7 +151,7 @@ const targetsOf = (markdown: string): Target[] => {
       if (token.children) walk(token.children);
     }
   };
-  walk(parse(markdown));
+  walk(tokens);
   return out;
 };
 
@@ -174,31 +174,33 @@ const resolve = (dir: string[], path: string): Resolved => {
   return { segments: out };
 };
 
-const decodeAnchor = (s: string): string => {
+/** decode できなければ undefined。 */
+const decodeAnchor = (s: string): string | undefined => {
   try {
     return decodeURIComponent(s);
   } catch {
-    return s;
+    return undefined;
   }
 };
 
-/** path の見出しの anchor。読めなければ undefined (読めないことは path 自身の違反として出る)。 */
-const anchorCache = new Map<string, Set<string> | undefined>();
-const anchorsFor = async (path: string): Promise<Set<string> | undefined> => {
-  if (!anchorCache.has(path)) {
-    anchorCache.set(
-      path,
-      await Deno.readTextFile(path).then(anchorsOf, () => undefined),
-    );
-  }
-  return anchorCache.get(path);
-};
-
+/** .md の引数ごとの、parse したトークンと見出しの anchor。読めなければ undefined。 */
+const markdown = new Map<
+  string,
+  { tokens: Token[]; anchors: Set<string> } | undefined
+>();
 for (const file of markdownFiles) {
   const text = await readOrReport(file);
-  if (text === undefined) continue;
+  const tokens = text === undefined ? undefined : parse(text);
+  markdown.set(
+    file,
+    tokens === undefined ? undefined : { tokens, anchors: anchorsOf(tokens) },
+  );
+}
+
+for (const [file, read] of markdown) {
+  if (read === undefined) continue;
   const dir = file.split("/").slice(0, -1);
-  for (const target of targetsOf(text)) {
+  for (const target of targetsOf(read.tokens)) {
     if ("uncheckable" in target) {
       report(
         file,
@@ -209,7 +211,7 @@ for (const file of markdownFiles) {
     const { url } = target;
     if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(url)) continue;
     const hash = url.indexOf("#");
-    const anchor = hash < 0 ? "" : decodeAnchor(url.slice(hash + 1));
+    const rawAnchor = hash < 0 ? "" : url.slice(hash + 1);
     const path = (hash < 0 ? url : url.slice(0, hash)).split("?")[0];
     const resolved: Resolved = path === ""
       ? { segments: file.split("/") }
@@ -223,7 +225,12 @@ for (const file of markdownFiles) {
       report(file, `リンク先が無い — ${url}`);
       continue;
     }
-    if (anchor === "") continue;
+    if (rawAnchor === "") continue;
+    const anchor = decodeAnchor(rawAnchor);
+    if (anchor === undefined) {
+      report(file, `不正な %-エンコード — ${url}`);
+      continue;
+    }
     const joined = resolved.segments.join("/");
     if (!isFile || !joined.endsWith(".md")) {
       if (!/^L\d+(?:-L\d+)?$/.test(anchor)) {
@@ -231,7 +238,7 @@ for (const file of markdownFiles) {
       }
       continue;
     }
-    const anchors = await anchorsFor(joined);
+    const anchors = markdown.get(joined)?.anchors;
     if (anchors !== undefined && !anchors.has(anchor)) {
       report(file, `anchor が見出しに無い — ${url}`);
     }
