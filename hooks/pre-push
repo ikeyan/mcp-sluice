@@ -1,0 +1,26 @@
+#!/bin/sh
+# push を、git push のコマンドに PUSH_OK=1 を付けたときだけ通す。付け方は pr-workflow の push の手順 (レビュアーなどの push を止めるため)。
+# 許可を push のコマンドの環境変数で受け取るので、push が中断されても許可が残らない (canon: facts/git/pre-push-hook-inherits-push-env)。export すると以後の全ての push が通る。
+# git が呼ぶのは verify.sh が $GIT_COMMON_DIR/hooks (全 worktree で共有) に写した写しで、このファイルではない。githooks(5) の pre-push: push の前に呼ばれ、非 0 で終わると git push は何も push せずに止まる。
+# hook が走る場所の定義域 (canon: facts/git/local-env-vars-and-hook-env。hook の cwd は push を打った場所によらず作業ツリーのルート):
+#   - main worktree、サブディレクトリから打った push: そのルートの hooks/pre-push.local を探す。
+#   - linked worktree、そのサブディレクトリから打った push: その worktree のルートの hooks/pre-push.local を探す。
+#   - bare リポジトリ、作業ツリーの .git の中から打った push: 作業ツリーのルートを得られないので、止まる。
+# 許可の後、作業ツリーに hooks/pre-push.local があれば、同じ引数と stdin でそれに替わる (実行可能な通常のファイルでなければ落ちる)。リポ固有の検査の置き場で、このファイルは agent-sync で配るので書き足さない。
+set -eu
+[ "${PUSH_OK:-}" = 1 ] || {
+  echo "pre-push: PUSH_OK=1 が無い。push は pr-workflow の手順で行う (PUSH_OK=1 git push ...)" >&2
+  exit 1
+}
+top=$(git rev-parse --show-toplevel) || {
+  echo "pre-push: 作業ツリーのルートを得られない (bare リポジトリか .git の中から?) ので hooks/pre-push.local を探せない。作業ツリーから push する" >&2
+  exit 1
+}
+local_hook=$top/hooks/pre-push.local
+if [ -e "$local_hook" ] || [ -L "$local_hook" ]; then
+  { [ -f "$local_hook" ] && [ -x "$local_hook" ]; } || {
+    echo "pre-push: $local_hook が実行可能な通常のファイルでない。chmod +x するか、消す" >&2
+    exit 1
+  }
+  exec "$local_hook" "$@"
+fi
