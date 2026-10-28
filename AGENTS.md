@@ -45,13 +45,30 @@
 - clone したら、まず `./verify.sh` を 1 回回す。pre-push の hook (`PUSH_OK=1` の判定) は、このとき入る。
 - 単一検証コマンドは `./verify.sh`。CI も同じものを回す。
 - 規則の本文は次のファイルの先頭にある。変えるときはそこを直す:
-  - `verify.sh`: hook の状態ごとの扱い、消す環境変数、TMPDIR、事前条件。
-  - `scripts/run-checks.ts`: 検査の段と対象、名前の扱い、段の子の環境、lint の規則、imports の判定、出力の順と終了コード、中断、版の範囲とその上げ方。
+  - `verify.sh`:
+    - 事前条件と入力 (引数・`$0`・消す環境変数)。
+    - hook の状態ごとの扱い。
+    - TMPDIR の値ごとの扱い。
+  - `scripts/run-checks.ts`:
+    - 検査の段と対象。
+    - git が知る項目の種類と名前の扱い。
+    - 段の子の環境。
+    - lint の規則。
+    - imports の判定。
+    - 出力の順と終了コード。
+    - 中断。
+    - 版の範囲とその上げ方。
   - `scripts/check-json-md.ts`: リンクと anchor の解決。
 - 各検査が見るもの:
-  - 段より前: git が知るファイルの名前、作業ツリーに無い追跡ファイル、deno と shellcheck の版。
+  - 段より前:
+    - git が知る項目の種類と名前。
+    - 作業ツリーに無い追跡ファイル。
+    - deno と shellcheck の版。
   - `shellcheck`: このリポが持つ `*.sh`。
-  - `deno fmt --check`・`deno lint`・`deno check`: git が知る `.ts`。
+  - 次の 3 つは git が知る `.ts`:
+    - `deno fmt --check`
+    - `deno lint`
+    - `deno check`
   - `deno test`: git が知る `*_test.ts`。
   - `deno.json` の `imports`: 各キーが `.ts` の import 指定子から使われていること。このリポの `.ts` が export を持つようになったら、未使用の export・module の検査を足す。
   - `scripts/check-json-md.ts`: `.json` の構文と、`.md` のリポ内リンク・anchor。
@@ -69,7 +86,10 @@
 - 製品・テスト・開発用のスクリプトは TypeScript (Deno) で書く。
 - shell は次だけ:
   - `verify.sh`: 入口と、pre-push の hook の写し。
-  - agent-sync が置くもの (`hooks/pre-push`・`.agent-sync/sync.sh`・`.claude/skills/pr-workflow/` の shell)。
+  - agent-sync が置くもの:
+    - `hooks/pre-push`
+    - `.agent-sync/sync.sh`
+    - `.claude/skills/pr-workflow/` の shell
   - `.github/workflows/verify.yml` の `run`: CI の shellcheck の入手 (sha256 の確かめを含む) と、`./verify.sh` の起動。
 - deno で hook を写すには、run-checks.ts の許可に common git dir への write が要る。hook の写しを `verify.sh` に置くのは、この許可を足さないため。
 
@@ -81,7 +101,11 @@
 ## 文書の言語
 
 - 利用者向けの文書 (README・`docs/` の利用者向けのもの): 英語。
-- 開発者向けの文書 (AGENTS.md・`docs/design.md`・`retrospectives/`・`review-perspectives/`): 日本語。
+- 開発者向けの文書: 日本語。
+  - AGENTS.md
+  - `docs/design.md`
+  - `retrospectives/`
+  - `review-perspectives/`
 
 ## コメントの書き方
 

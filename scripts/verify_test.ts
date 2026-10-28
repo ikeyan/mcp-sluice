@@ -313,7 +313,7 @@ interface Case {
   fix?: true;
 }
 
-/** --local-env-vars のそれぞれを elsewhere へ向ける値。一覧に足された変数は、ここに無いので落ちる。 */
+/** --local-env-vars のそれぞれを elsewhere へ向ける値。一覧に変数が増えたら、ここに足す。 */
 const pointElsewhere: Record<string, (e: string) => Record<string, string>> = {
   GIT_ALTERNATE_OBJECT_DIRECTORIES: (e) => ({
     GIT_ALTERNATE_OBJECT_DIRECTORIES: `${e}/.git/objects`,
