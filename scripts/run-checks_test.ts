@@ -127,6 +127,9 @@ const withRepo = <T>(
     return await fn(dir);
   });
 
+/** fake の shell の中で、環境変数 name の値に展開し、無ければ落ちる式。 */
+const requireVar = (name: string) => `\${${name}:?${name} が無い}`;
+
 /** verify.sh が `deno run` の後、scripts/run-checks.ts の前に置く引数。 */
 const verifyFlags = await withTempDir(async (dir) => {
   await run("git", ["init", "-q", "--template=", dir]);
@@ -136,7 +139,7 @@ const verifyFlags = await withTempDir(async (dir) => {
   await Deno.mkdir(`${dir}/bin`);
   await Deno.writeTextFile(
     `${dir}/bin/deno`,
-    `#!/bin/sh\nprintf '%s\\0' "$@" > "\${FAKE_ARGS:?FAKE_ARGS が無い}"\n`,
+    `#!/bin/sh\nprintf '%s\\0' "$@" > "${requireVar("FAKE_ARGS")}"\n`,
     { mode: 0o755 },
   );
   await spawn("bash", {
@@ -164,20 +167,16 @@ const verifyFlags = await withTempDir(async (dir) => {
 /** env の undefined の変数は消す。 */
 type EnvChange = Record<string, string | undefined>;
 
-/** run-checks.ts を起動する deno の引数。flags の既定は verify.sh と同じもの。 */
-const checksArgs = (state: string, flags = verifyFlags) => [
+/** run-checks.ts を起動する deno の引数。許可は verify.sh と同じもの。 */
+const checksArgs = (state: string) => [
   "run",
-  ...flags,
+  ...verifyFlags,
   `${root}/scripts/run-checks.ts`,
   state,
 ];
 
-const spawnChecks = (
-  dir: string,
-  state: string,
-  change: EnvChange = {},
-  flags = verifyFlags,
-) => {
+/** fixture のリポ dir で run-checks.ts を回す子の環境。TMPDIR は fixtureTmp。 */
+const checksEnv = (dir: string, change: EnvChange) => {
   const env: Record<string, string> = {};
   for (
     const [name, value] of Object.entries({
@@ -188,27 +187,28 @@ const spawnChecks = (
   ) {
     if (value !== undefined) env[name] = value;
   }
-  return spawn("deno", {
-    args: checksArgs(state, flags),
-    cwd: dir,
-    env,
-    clearEnv: true,
-  });
+  return env;
 };
 
-async function runChecks(
-  dir: string,
-  state: string,
-  env: EnvChange = {},
-  flags = verifyFlags,
-) {
-  const r = await spawnChecks(dir, state, env, flags).output();
+const spawnChecks = (dir: string, state: string, change: EnvChange = {}) =>
+  spawn("deno", {
+    args: checksArgs(state),
+    cwd: dir,
+    env: checksEnv(dir, change),
+    clearEnv: true,
+  });
+
+const outputOf = async (child: Deno.ChildProcess) => {
+  const r = await child.output();
   return {
     code: r.code,
     stdout: dec.decode(r.stdout),
     stderr: dec.decode(r.stderr),
   };
-}
+};
+
+const runChecks = (dir: string, state: string, env: EnvChange = {}) =>
+  outputOf(spawnChecks(dir, state, env));
 
 /** git・deno・sleep と、fakes (名前 → 中身) だけを置いた PATH の dir を作る。PATH をこの dir だけにすると、shellcheck は fakes に置いたときだけ在る。 */
 async function fakePath(dir: string, fakes: Record<string, string>) {
@@ -222,6 +222,13 @@ async function fakePath(dir: string, fakes: Record<string, string>) {
   }
   return bin;
 }
+
+/** fake の git: lines を回してから、本物の git に引数を渡す。 */
+const gitScript = (lines: string[]) =>
+  ["#!/bin/sh", ...lines, `exec "${which("git")}" "$@"`].join("\n");
+/** git だけを gitScript(lines) にした PATH (他は子の PATH から引く)。 */
+const fakeGit = async (dir: string, lines: string[]) =>
+  `${await fakePath(dir, { git: gitScript(lines) })}:${baseEnv.PATH}`;
 
 const bad = "#!/bin/sh\necho $1\n";
 /** 指摘の無い .ts と、通る test。 */
@@ -333,19 +340,24 @@ Deno.test("引数・TMPDIR・出力の経路と順", async () => {
         r.stderr,
       );
     }),
-    // 未設定の行は、deno が既定の一時の場所に作れる許可 (絞らない --allow-write) でも落ちること
     ...[
-      { name: "空", value: "", flags: verifyFlags },
+      { name: "空", run: (dir: string) => runChecks(dir, "0", { TMPDIR: "" }) },
       {
         name: "未設定",
-        value: undefined,
-        flags: verifyFlags.map((f) =>
-          f.startsWith("--allow-write=") ? "--allow-write" : f
-        ),
+        // deno が既定の一時の場所に作れる許可 (絞らない --allow-write) でも落ちること
+        run: (dir: string) =>
+          outputOf(spawn("deno", {
+            args: checksArgs("0").map((f) =>
+              f.startsWith("--allow-write=") ? "--allow-write" : f
+            ),
+            cwd: dir,
+            env: checksEnv(dir, { TMPDIR: undefined }),
+            clearEnv: true,
+          })),
       },
-    ].map(({ name, value, flags }) =>
+    ].map(({ name, run }) =>
       withRepo({ "a_test.ts": passingTest }, async (dir) => {
-        const r = await runChecks(dir, "0", { TMPDIR: value }, flags);
+        const r = await run(dir);
         expect(
           `TMPDIR が${name}なら、deno test の段の TMPDIR を作らずに段の前で落ちる`,
           r.code === 1 && !r.stdout.includes("==") &&
@@ -510,10 +522,12 @@ Deno.test("deno の子の環境", async () => {
     const bin = await fakePath(dir, {
       deno: [
         "#!/bin/sh",
-        'case " $* " in *" ${FAKE_SELF:?FAKE_SELF が無い} "*) ;; *)',
+        `case " $* " in *" ${requireVar("FAKE_SELF")} "*) ;; *)`,
         `  { echo "$1"; for v in DENO_NO_PACKAGE_JSON ${
           resultVars.join(" ")
-        }; do printenv "$v" || echo "$v=-"; done; } > "\${FAKE_CALLS:?FAKE_CALLS が無い}/$$" ;;`,
+        }; do printenv "$v" || echo "$v=-"; done; } > "${
+          requireVar("FAKE_CALLS")
+        }/$$" ;;`,
         "esac",
         `exec "${which("deno")}" "$@"`,
       ].join("\n"),
@@ -700,7 +714,7 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
         );
       })
     ),
-    ...['"x"', "[]", "null"].map((config) =>
+    ...nonObjects.map((config) =>
       withRepo({ "deno.json": config }, async (dir) => {
         const r = await runChecks(dir, "0");
         expect(
@@ -712,7 +726,7 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
         );
       })
     ),
-    ...['"x"', "[]", "null"].map((imports) =>
+    ...nonObjects.map((imports) =>
       withRepo({ "deno.json": `{"imports": ${imports}}` }, async (dir) => {
         const r = await runChecks(dir, "0");
         expect(
@@ -748,6 +762,8 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
 const identity = ["-c", "user.name=t", "-c", "user.email=t@example.com"];
 /** 使うキーを 1 つ持つ deno.json。 */
 const importsX = '{"imports": {"x": "./x.ts"}}';
+/** オブジェクトでない JSON の値。 */
+const nonObjects = ['"x"', "[]", "null"];
 
 const install = "releases/tag/v0.11.0";
 const probes: [string, Record<string, string>, string][] = [
@@ -835,13 +851,9 @@ Deno.test("段より前の確かめ: shellcheck の版、git ls-files、項目�
     ...gitCalls.map(([args, shown]) =>
       withRepo({}, async (dir) => {
         const r = await runChecks(dir, "0", {
-          PATH: `${await fakePath(dir, {
-            git: [
-              "#!/bin/sh",
-              `[ "$*" = "${args}" ] && { echo boom >&2; exit 3; }`,
-              `exec "${which("git")}" "$@"`,
-            ].join("\n"),
-          })}:${baseEnv.PATH}`,
+          PATH: await fakeGit(dir, [
+            `[ "$*" = "${args}" ] && { echo boom >&2; exit 3; }`,
+          ]),
         });
         expect(
           `${shown} が非 0`,
@@ -855,15 +867,11 @@ Deno.test("段より前の確かめ: shellcheck の版、git ls-files、項目�
       const g = `${dir}/.git`;
       // 孫は TERM を無視し、出力の pipe を持たずにグループに残る
       const r = await runChecks(dir, "0", {
-        PATH: `${await fakePath(dir, {
-          git: [
-            "#!/bin/sh",
-            `[ "$*" = "ls-files -z --others --exclude-standard" ] && { (trap '' TERM; sleep 3; ${
-              mark("survived")
-            }) >/dev/null 2>&1 & echo boom >&2; exit 3; }`,
-            `exec "${which("git")}" "$@"`,
-          ].join("\n"),
-        })}:${baseEnv.PATH}`,
+        PATH: await fakeGit(dir, [
+          `[ "$*" = "ls-files -z --others --exclude-standard" ] && { (trap '' TERM; sleep 3; ${
+            mark("survived")
+          }) >/dev/null 2>&1 & echo boom >&2; exit 3; }`,
+        ]),
         FAKE_MARKS: g,
       });
       await sleep(3500);
@@ -876,22 +884,14 @@ Deno.test("段より前の確かめ: shellcheck の版、git ls-files、項目�
       );
     }),
     withRepo({}, async (dir) => {
+      // interpreter がディレクトリの script は、起動が PermissionDenied で投げる (canon: facts/deno/command-spawn-error-classes)
       const r = await runChecks(dir, "0", {
-        PATH: `${await fakePath(dir, {
-          git: [
-            "#!/bin/sh",
-            // --local-env-vars を知らない git が、リポの中で option の名前をそのまま出す形 (canon: facts/git/local-env-vars-and-hook-env の「知らない option」)
-            `[ "$*" = "rev-parse --local-env-vars" ] && { echo --local-env-vars; exit 0; }`,
-            `exec "${which("git")}" "$@"`,
-          ].join("\n"),
-        })}:${baseEnv.PATH}`,
+        PATH: await fakePath(dir, { git: "#!/\n" }),
       });
       expect(
-        "git rev-parse --local-env-vars が変数の名前でない行を出す",
-        unstaged(r) &&
-          r.stderr.includes(
-            "git rev-parse --local-env-vars の出力に、変数の名前でない行がある (--local-env-vars)",
-          ),
+        "git を起動できない (NotFound 以外)",
+        unstaged(r) && r.stderr.includes("PermissionDenied") &&
+          !r.stderr.includes("git を PATH に置く"),
         r.stdout + r.stderr,
       );
     }),
@@ -915,15 +915,11 @@ Deno.test("段より前の確かめ: shellcheck の版、git ls-files、項目�
         "notab.ts",
       ];
       const r = await runChecks(dir, "0", {
-        PATH: `${await fakePath(dir, {
-          git: [
-            "#!/bin/sh",
-            `[ "$*" = "ls-files -z -s -t --cached" ] && { printf '${
-              entries.map((e) => `${e}\\0`).join("")
-            }'; exit 0; }`,
-            `exec "${which("git")}" "$@"`,
-          ].join("\n"),
-        })}:${baseEnv.PATH}`,
+        PATH: await fakeGit(dir, [
+          `[ "$*" = "ls-files -z -s -t --cached" ] && { printf '${
+            entries.map((e) => `${e}\\0`).join("")
+          }'; exit 0; }`,
+        ]),
       });
       expect(
         "git ls-files -s -t の項目の形と mode",
@@ -1053,64 +1049,100 @@ const extColumns = { "100644": "t644", "100755": "t755", "未追跡": "u" };
 type ExtColumn = keyof typeof extColumns;
 /** 表のセルの扱い: その段で検査する・段の前で落ちる・検査しない。 */
 type ExtOutcome = "checked" | "listed" | "ignored";
-/** 表の行。名前は列の置き場の下に置く (root なら置き場を付けない)。checked は、段の出力にその名前の検査が出ているか。 */
+type ExtCells = Partial<Record<ExtColumn, ExtOutcome>>;
+/** どの列でも、その段で検査する。 */
+const checkedEverywhere: ExtCells = {
+  "100644": "checked",
+  "100755": "checked",
+  "未追跡": "checked",
+};
+/** 実行可能なら段の前で落ち、他はその段で検査する。 */
+const checkedUnlessExecutable: ExtCells = {
+  "100644": "checked",
+  "100755": "listed",
+  "未追跡": "checked",
+};
+/** 実行可能なら段の前で落ち、他は検査しない。 */
+const ignoredUnlessExecutable: ExtCells = {
+  "100644": "ignored",
+  "100755": "listed",
+  "未追跡": "ignored",
+};
+/** 拡張子 ext の大文字小文字の組み合わせのうち、全部が小文字のものを除いた全部。 */
+const caseVariants = (ext: string): string[] =>
+  [...ext].reduce<string[]>(
+    (heads, c) =>
+      heads.flatMap((h) =>
+        c.toLowerCase() === c.toUpperCase()
+          ? [h + c]
+          : [h + c.toLowerCase(), h + c.toUpperCase()]
+      ),
+    [""],
+  ).filter((v) => v !== ext);
+/** 表の行。 */
 const extRows: {
+  /** 表の行の類。 */
   kind: string;
+  /** 置く名前。列の置き場の下に置く (root なら置き場を付けない)。 */
   name: string;
   content: string;
-  cells: Partial<Record<ExtColumn, ExtOutcome>>;
+  cells: ExtCells;
   root?: true;
+  /** 段の出力に、path の検査が出ているか。 */
   checked?: (stderr: string, path: string) => boolean;
 }[] = [
   {
     kind: "検査する拡張子 .sh",
     name: "a.sh",
     content: bad,
-    cells: { "100644": "checked", "100755": "checked", "未追跡": "checked" },
+    cells: checkedEverywhere,
     checked: (e, path) => e.includes(`In ./${path} line 2`),
   },
   {
     kind: "検査する拡張子 .ts",
     name: "a.ts",
     content: "export const a=1;\n",
-    cells: { "100644": "checked", "100755": "checked", "未追跡": "checked" },
+    cells: checkedEverywhere,
     checked: (e, path) => sectionOf(e, "deno fmt").includes(path),
   },
   {
     kind: "検査する拡張子 .json",
     name: "a.json",
     content: "{",
-    cells: { "100644": "checked", "100755": "listed", "未追跡": "checked" },
+    cells: checkedUnlessExecutable,
     checked: (e, path) => e.includes(`${path}: JSON として読めない`),
   },
   {
     kind: "検査する拡張子 .md",
     name: "a.md",
     content: "[x](gone.md)\n",
-    cells: { "100644": "checked", "100755": "listed", "未追跡": "checked" },
+    cells: checkedUnlessExecutable,
     checked: (e, path) => e.includes(`${path}: リンク先が無い`),
   },
-  ...["b.SH", "b.Ts", "b.JSON", "b.Md"].map((name) => ({
-    kind: `大文字小文字だけ違う ${name}`,
-    name,
-    content: "",
-    cells: {
-      "100644": "listed",
-      "100755": "listed",
-      "未追跡": "listed",
-    } as const,
-  })),
+  // 名前は組み合わせごとに分ける (大文字小文字を区別しない fs で、同じ dir の b.sH と b.SH は 1 つになる)
+  ...[".sh", ".ts", ".json", ".md"].flatMap((ext) =>
+    caseVariants(ext).map((variant, i) => ({
+      kind: `大文字小文字だけ違う ${variant}`,
+      name: `b${i}${variant}`,
+      content: "",
+      cells: {
+        "100644": "listed",
+        "100755": "listed",
+        "未追跡": "listed",
+      } as const,
+    }))
+  ),
   {
     kind: "他の拡張子",
     name: "c.txt",
     content: "",
-    cells: { "100644": "ignored", "100755": "listed", "未追跡": "ignored" },
+    cells: ignoredUnlessExecutable,
   },
   {
     kind: "拡張子なし",
     name: "c",
     content: "",
-    cells: { "100644": "ignored", "100755": "listed", "未追跡": "ignored" },
+    cells: ignoredUnlessExecutable,
   },
   {
     kind: "拡張子なし (hooks/pre-push)",
@@ -1361,8 +1393,7 @@ const signalCodes: [Deno.Signal, number][] = [
 /** TERM を無視する先頭に送る列。2 回目のシグナルは何もしない。 */
 const termThenOthers: Deno.Signal[][] = [["SIGTERM"], ["SIGTERM", "SIGINT"]];
 /** fake が FAKE_MARKS (環境変数) の下に印のファイル name を書く shell の文。 */
-const mark = (name: string) =>
-  `echo > "\${FAKE_MARKS:?FAKE_MARKS が無い}/${name}"`;
+const mark = (name: string) => `echo > "${requireVar("FAKE_MARKS")}/${name}"`;
 
 Deno.test("中断: 段のグループを空にし、128 + シグナルの番号で終わる", async () => {
   const { failures, expect } = collector();
@@ -1436,13 +1467,11 @@ Deno.test("中断: 段のグループを空にし、128 + シグナルの番号�
       withRepo({}, async (dir) => {
         const g = `${dir}/.git`;
         const bin = await fakePath(dir, {
-          git: [
-            "#!/bin/sh",
+          git: gitScript([
             `if [ "$*" = "${args}" ]; then ${mark("started")}; sleep 4; ${
               mark("survived")
             }; exit 0; fi`,
-            `exec "${which("git")}" "$@"`,
-          ].join("\n"),
+          ]),
           shellcheck: `#!/bin/sh\n${version}\n`,
         });
         const child = spawnChecks(dir, "0", { PATH: bin, FAKE_MARKS: g });
