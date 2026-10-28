@@ -2,7 +2,7 @@
 
 mcp-sluice は、複数の子 MCP サーバーを 1 つのエンドポイントに束ねる MCP サーバー。authentik (OIDC) で利用者を認証し、利用者のグループとツールごとに allow/ask/deny を掛け、TypeScript の Code Mode を提供し、OpenTelemetry で観測できるようにする。
 
-この文書の読者は、mcp-sluice を実装・変更する人。実装はまだ無く、この文書が仕様の正本になる。
+この文書の読者は、mcp-sluice を実装・変更する人。この文書が仕様の正本になる。
 
 外部依存の事実は、2026-10-26〜27 に一次情報 (仕様の repo・ソース・公式 docs) で確かめたものを根拠に書く。確かめられなかったものは「未確認」と書く。
 
@@ -68,7 +68,7 @@ mcp-sluice は、複数の子 MCP サーバーを 1 つのエンドポイント�
     - POST の SSE の流れの中で `elicitation/create` を送れる。
 - 両方を受ける理由:
   - claude.ai の connector の docs が挙げる仕様は 2025-11-25 まで。
-  - Claude Code は 2026-07-28 に対応している。
+  - Claude Code は 2026-07-28 に対応している (Claude Code の CHANGELOG の v2.1.281 に、2026-07-28 の接続での URL mode の elicitation がある)。
 - SDK v2 は 1 つの handler で両世代を受けられる (`docs/protocol-versions.md`・`examples/dual-era`)。
 - 子へは、SDK v2 の client を `versionNegotiation: { mode: 'auto' }` で使う。
 - `tools/list` の結果:
@@ -114,7 +114,7 @@ authentik 2026.8.5 と main のソースで確認した。
   - `/.well-known/oauth-protected-resource` (RFC 9728) を出す。
     - `resource` = 公開 URL
     - `authorization_servers` = [issuer]
-  - 未認証には 401 と `WWW-Authenticate: Bearer resource_metadata="…"` を返す。claude.ai は 401 でしか認証を始めない。
+  - 未認証には 401 と `WWW-Authenticate: Bearer resource_metadata="…"` を返す。claude.ai は 401 でしか認証を始めない (claude.com の connector の docs の authentication の節。200 に付けた `WWW-Authenticate` は無視されると書いてある)。
   - JWT は次を検証する:
     - JWKS での署名
     - `iss`
@@ -132,9 +132,9 @@ authentik 2026.8.5 と main のソースで確認した。
 ### 3.3 子サーバーへの資格情報
 
 - 受け取ったトークンを子へ流さない。MCP の仕様は token passthrough を禁止している。
-- 子の資格情報は `shared` だけ: 管理者が env の名前で渡す、固定の資格情報 (Bearer・ヘッダ・stdio の env)。全利用者で共有する。
+- 子の資格情報は、管理者が env の名前で渡す固定のもの (Bearer・ヘッダ・stdio の env) だけ。全利用者で共有する (以下 `shared`)。
 - `shared` の子は誰の要求でも同じ身元で動く。誰がその子を使えるかは、policy のグループで絞る。
-- 設定の `credentials` は、将来の `per_user` を足すための項目で、最初の版は `shared` だけを受ける。
+- 資格情報の持ち方を選ぶ設定は、将来の `per_user` を足すときに設定へ加える。
 
 #### 将来: `per_user`
 
@@ -166,7 +166,6 @@ default: ask                        # どの規則にも当たらないとき
 servers:
   github:
     transport: { type: http, url: https://api.githubcopilot.com/mcp/ }
-    credentials: shared
     auth: { bearer_env: GITHUB_TOKEN }   # 秘密は env の名前で参照する
     groups: [dev]                   # この子を使える人。無ければ全員
     rules:                          # 上から順に評価し、最初に当たったものを採る
@@ -175,7 +174,6 @@ servers:
       - { tools: ["get_*", "list_*", "search_*"], decision: allow }
   fs:
     transport: { type: stdio, command: /usr/local/bin/fs-mcp, args: [--root, /data] }
-    credentials: shared
     env: { }                        # 子へ渡す env は明示したものだけ
     rules:
       - { tools: "write_*", decision: ask }
@@ -192,7 +190,7 @@ gateway:                            # ゲートウェイ自身のツールにも
 - server id は `^[a-z][a-z0-9_]{0,15}$`。JS の識別子として使える形にする。`gateway` は予約する。
 - 合成した名前が `^[A-Za-z0-9_-]{1,64}$` に収まらないツールは公開しない。そのときは警告を log に出す。
   - 64 の根拠: OpenAI の function 名の上限。
-  - Claude Code は名前の前に `mcp__<登録名>__` を足し、128 文字を超えたツールを落とす。
+  - Claude Code は名前の前に `mcp__<登録名>__` を足し、128 文字を超えたツールを落とす (`code.claude.com/docs/en/mcp` の「tools with names longer than 128 characters」。v2.1.292 より前は要求ごと失敗した)。
 - Code Mode からは `tools.<server>.<tool>(args)` で呼ぶ。名前に `-` や `.` があれば `tools.github["create-issue"]` の形にする。
 
 ### 4.3 子の管理
@@ -209,10 +207,11 @@ gateway:                            # ゲートウェイ自身のツールにも
 | 利用者 | (`iss`, `sub`) | 両方が一致 | — |
 | 子への接続 | server id | 設定の項目が同じ | プロセス |
 | ツールの一覧 | server id | 子が返した定義 | 子の `list_changed` まで |
-| 中断した要求 | 要求 id (128 bit の乱数) | id と利用者の両方が一致 | 完了・期限切れ (既定 15 分)・取り消しまで |
+| 中断した要求 | 要求 id (128 bit の乱数) | id と利用者の両方が一致 | 完了・期限切れ (15 分)・取り消しまで |
 | 利用者の操作 (承認) | 操作 id (128 bit の乱数) | id が一致し、ページのログインの利用者が要求の利用者と一致 | 中断した要求と同じ |
 | 実行中の承認 | (要求 id, server id, tool 名) | 「この実行の間は許可」を選んだもの | その実行の間 |
-| ブラウザのセッション | cookie の値 | 署名が正しく、期限内 | 既定 8 時間 |
+| ブラウザのセッション | cookie の値 | 署名が正しく、期限内 | 8 時間 |
+| Code Mode の型定義 (`.d.ts`) | (利用者, 子の一覧の版) | 両方が一致 | 子の一覧か設定が変わるまで (一覧の版は子の `list_changed` で増える) |
 | (将来) 利用者ごとの子のトークン | (`iss`, `sub`, server id) | 3 つが一致 | 失効か、利用者が切るまで (SQLite) |
 
 ## 5. Policy (allow / ask / deny)
@@ -233,7 +232,7 @@ gateway:                            # ゲートウェイ自身のツールにも
 | 判定 | `tools/list` | 直接の呼び出し | Code Mode の中 |
 | --- | --- | --- | --- |
 | allow | 載せる | 子へ中継する | 子へ中継する |
-| ask | 載せる | 承認されたら中継する | 承認されたら中継する |
+| ask | 載せる | 承認されたら中継する。拒否・期限切れなら `isError` で理由を返す | 承認されたら中継する。拒否・期限切れなら例外 |
 | deny | 載せない | 「ツールが無い」と同じエラーにする | 型定義に載せない。呼べば例外にする |
 
 判定は、一覧を作るときと、呼び出しのたびの両方で行う。
@@ -272,24 +271,27 @@ gateway:                            # ゲートウェイ自身のツールにも
     - `/i/<id>` の URL
     - 再開の仕方
   - モデルがチャットで URL を示し、利用者はブラウザで authentik にログインして操作する。
-  - そのあと、モデルが `gateway__resume({ id })` を呼ぶと、中断した要求の続きを返す。まだ操作が済んでいなければ、同じ案内を返す。
+  - そのあと、モデルが `gateway__resume({ id })` を呼ぶと、中断した要求の続きを返す。`gateway__resume` の結果:
+
+    | 状態 | 結果 |
+    | --- | --- |
+    | 操作が済み、要求が終わった | 元の要求の結果 |
+    | まだ操作が済んでいない | `isError` を付けず、`status: "pending"` と同じ案内。元の要求が終わったとは示さない |
+    | 拒否された・期限切れ・取り消された | `isError: true` と理由 (`denied`・`expired`・`cancelled`) |
+    | id が無い・別の利用者のもの | `isError: true` と理由 `unknown` (別の利用者の id があることも明かさない) |
   - 安全性:
     - ページは、ログインした利用者が要求の利用者と一致するときだけ操作を受ける。
     - 送信には CSRF の対策をする。
     - URL を持つだけでは何もできない。
     - モデルが URL を伝えなければ何も起きない (閉じる側に倒れる)。
-- claude.ai が elicitation に対応しているという一次情報は見つからなかった。根拠は次の 3 つ:
-  - Claude の docs 全体に "elicit" の語が無い。
-  - MCP 公式のクライアント対応表 (2026-05 に削除された最終版) では、Elicitation が付いているのは Claude Code だけ。
-  - Anthropic の issue (anthropics/claude-ai-mcp#153) に、claude.ai への対応の要望が開いたまま残っている。
-  - 対応したら、上の表で form の行が自動で選ばれる。
+- claude.ai・Claude Desktop・ChatGPT は、elicitation 無しの行に当たると見込む (2026-10-27 の時点。claude.ai は anthropics/claude-ai-mcp#153 で対応が要望されている)。対応したら、上の表で form の行が自動で選ばれる。
 
 ### 6.3 中断の扱い
 
 - 中断した要求は、メモリに持つ。
   - Code Mode の実行なら、worker の中で Promise を待ったまま止める。
   - 直接の呼び出しなら、引数を持つ。
-- 期限 (既定 15 分) を過ぎたら、止めて消す。
+- 期限 (15 分。設定には出さない) を過ぎたら、止めて消す。
 - 承認を待つ間は、Code Mode の CPU の時間に数えない。
 - Code Mode の中で ask が同時に起きたら、1 つの操作にまとめる。
   - elicitation の場合: 1 つの `inputRequests` に入れる。
@@ -335,15 +337,20 @@ gateway:                            # ゲートウェイ自身のツールにも
 1. 静的な検査: typescript 6.x の API を、プロセスの中で仮想のファイルシステムを使って呼ぶ。
    - `import`・`export`・`require` があれば拒否する。
    - 利用者から見えるツール (deny を除く) の `.d.ts` を、JSON Schema から生成して型検査する。型エラーがあれば実行せずに返す (副作用の前に、引数の誤りを直させる)。
-   - typescript 7.0.2 (npm の latest) には `transpileModule` が無かったので、6.x に固定する。外せる条件: 7.x の API が、仮想のファイルシステムでの型検査と JS への変換を提供したとき。
+   - typescript は 6.x に固定する。7.0.2 (2026-10 の npm の latest) の API は `transpileModule` を持たない。外せる条件: 7.x の API が、仮想のファイルシステムでの型検査と JS への変換を提供したとき。
 2. TS を JS に変換する (同じ compiler で)。
 3. 実行: QuickJS-WASM (quickjs-emscripten) で、実行ごとに新しい context を作り、worker thread で回す。
-   - WASM を選ぶ理由: WASM は、渡したもの以外の IO を持たない。Deno の子プロセスでは、許可フラグが無くても次が通ることを実測した (2.9.6)。
-     - `localStorage` が実行をまたいで残る。
-     - 文字列リテラルの `import("file:///…")` が、読み取りの許可なしに通る。
-     - `npm:`・`jsr:` のモジュールが、ネットワークの許可なしに取ってこられる。
+   - 実行の基盤の比較 (物差し: 何もしないときに IO を持つか、閉じるのに要る手当て、依存の状態):
+
+     | 候補 | 何もしないときの IO | 閉じるのに要る手当て | 採否 |
+     | --- | --- | --- | --- |
+     | QuickJS-WASM (quickjs-emscripten) | 無い。README は「By default, no host functionality is exposed」と書く (実測は 11 節の spike) | 無し。渡すのは `tools` と `console` だけ | 採る。依存は pre-1.0 で監査されていないので、実行の基盤を 1 つの interface の裏に置く |
+     | Deno の子プロセス (許可フラグ無し) | 有る。2.9.6 で、許可フラグが無くても `localStorage` が実行をまたいで残り、文字列リテラルの `import("file:///…")` が読み取りの許可なしに通り、`npm:`・`jsr:` のモジュールがネットワークの許可なしに取れることを実測した | `--no-remote`・`--no-npm`・実行ごとの `DENO_DIR`・スクリプトを文字列で評価すること | 採らない |
+     | Deno の Worker (`permissions: "none"`) | Deno の許可の仕組みに同じ | 上と同じ。加えて `--unstable-worker-options` が要る | 採らない |
+     | isolated-vm | 無い | 別のプロセスに置くこと (README が、同じプロセスでは落とされうると書く) | 採らない。README が maintenance mode と書く |
+     | Cloudflare の Dynamic Worker | `globalOutbound: null` で外へ出ない | Workers の基盤 | 採らない。自前のホストで動かす前提に合わない |
    - 非同期の橋渡しは、`newPromise` と `executePendingJobs` で行う (`Promise.all` で並行に呼べる)。
-   - 上限 (既定値は実装で決める):
+   - 上限 (値は実装で計測して決め、設定には出さない):
      - メモリ
      - スタック
      - CPU の時間
@@ -361,12 +368,12 @@ gateway:                            # ゲートウェイ自身のツールにも
 - `tools.gateway.run_code({ code })` で、入れ子の実行を作る。
   - 入れ子の実行は新しい context で動く。型検査も policy も観測も、同じ経路を通る。
   - 期限と呼び出しの予算は、根の実行と共有する。
-  - 深さの上限は、既定で 3。
+  - 深さの上限は 3 (設定には出さない)。
 - 使い道: 保存のできる子ツールから読んだスクリプトを、実行する。
 
 ### 7.4 進捗
 
-クライアントが `progressToken` を付けていれば、ツール呼び出しが終わるたびに `notifications/progress` を出す。Claude Code では、これで idle timeout が延びる。
+クライアントが `progressToken` を付けていれば、ツール呼び出しが終わるたびに `notifications/progress` を出す。Claude Code の docs (`code.claude.com/docs/en/mcp`) は、progress の通知が idle timeout を延ばすと書く (実測していない)。
 
 ## 8. 観測
 
@@ -422,7 +429,7 @@ compose に、Grafana・Tempo・Loki・Prometheus を同梱する。
 | SigNoz | コンテナが 5 つ。community 版の SSO は Google だけ |
 | Langfuse | コンテナが 6 つ以上。LLM の span に寄っていて、metrics と log を受けない |
 
-- ゲートウェイは、信号ごとの OTLP のエンドポイントへ直接送る (collector を挟まない)。
+- ゲートウェイは、信号ごとの OTLP のエンドポイントへ直接送る。OpenTelemetry Collector は挟まない (コンテナと設定が 1 つずつ増える一方、送り先が 3 つに決まっているので振り分けの役が要らない)。
   - trace → Tempo
   - log → Loki の `/otlp`
   - metrics → Prometheus の `--web.enable-otlp-receiver`
@@ -473,7 +480,7 @@ README にセキュリティモデルを書く (0 節と 3.3 節・6.2 節・7 �
 
 ## 12. 既存のもの
 
-組み合わせの全体 (OIDC、グループとツールごとの allow/ask/deny、Code Mode、OpenTelemetry) を持つ OSS は見つからなかった。
+近い既存の実装と、mcp-sluice との違い:
 
 | 名前 | 近い点 |
 | --- | --- |
