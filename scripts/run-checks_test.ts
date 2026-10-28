@@ -4,6 +4,7 @@
  * - run-checks.ts に渡す deno の引数は、verify.sh が exec する引数 (verifyFlags) を使う。PATH の先に置いた fake の deno に、verify.sh の exec の引数を書かせて得る。
  * - fake (shellcheck・git) は git・deno・sleep の symlink と同じ dir に置き、PATH の先頭にする。PATH から本物の shellcheck を外す test (段より前の確かめ) は、PATH をその dir だけにする。
  * - symlink は ln -s で作る。deno test の段の --allow-write は TMPDIR に絞ってあり、Deno.symlink は絞らない read・write を要る (canon: facts/deno/symlink-requires-unscoped-permissions)。
+ * - test が起動したもの (run-checks.ts の子、fake の段のグループ、fixture の常駐ループ、グループを抜けた sleep) は、test の finally で止める。pid は fake と fixture に書かせる。
  * - 子の環境は、このプロセスの環境から git の場所を決める変数 (canon: facts/git/local-env-vars-and-hook-env) を消し、利用者の git の設定を読まないもの。
  */
 import fc from "fast-check";
@@ -399,7 +400,7 @@ const probes: [string, Record<string, string>, string][] = [
   ],
 ];
 
-Deno.test("段より前の確かめ: shellcheck の版と、作業ツリーに無い追跡ファイル", async () => {
+Deno.test("段より前の確かめ: shellcheck の版、作業ツリーに無い追跡ファイル、入れ子のリポジトリ", async () => {
   const { failures, expect } = collector();
   const unstaged = (r: Awaited<ReturnType<typeof runChecks>>) =>
     r.code === 1 && !r.stdout.includes("==") && !r.stderr.includes("==") &&
@@ -418,6 +419,17 @@ Deno.test("段より前の確かめ: shellcheck の版と、作業ツリーに�
         );
       })
     ),
+    withRepo({}, async (dir) => {
+      await run("git", ["init", "-q", "--template=", `${dir}/nested`]);
+      const r = await runChecks(dir, "0");
+      expect(
+        "入れ子のリポジトリ",
+        unstaged(r) &&
+          r.stderr.includes("処理できない名前のファイルがある") &&
+          r.stderr.includes(": nested/"),
+        r.stdout + r.stderr,
+      );
+    }),
     withRepo(
       { "gone.ts": "export {};\n", "kept.ts": "export {};\n" },
       async (dir) => {
@@ -541,35 +553,72 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const version =
   "case \" $* \" in *' --version '*) echo 'version: 0.11.0'; exit 0 ;; esac";
 
-/** fake の shellcheck を段で回し、started が出たら signals を送って、結果と、後で survived が書かれたかを返す。 */
+/** 終わった子への ChildProcess.kill は TypeError を投げる (canon: facts/deno/command-spawn) ので、それだけを捕まえる。 */
+const killChild = (child: Deno.ChildProcess, signal: Deno.Signal) => {
+  try {
+    child.kill(signal);
+  } catch (e) {
+    if (!(e instanceof TypeError)) throw e;
+  }
+};
+/** pidFile の各行の pid (負ならグループ) に SIGKILL を送る。もう居ないものと、pidFile が無いことは無視する。 */
+async function killRecorded(pidFile: string) {
+  let pids: string[];
+  try {
+    pids = (await Deno.readTextFile(pidFile)).split("\n").filter(Boolean);
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return;
+    throw e;
+  }
+  for (const pid of pids) {
+    try {
+      Deno.kill(Number(pid), "SIGKILL");
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) throw e;
+    }
+  }
+}
+/** fake が自分のグループ ($$ は段のグループの先頭) を書く行。test の finally がグループごと止める。 */
+const recordGroup = (g: string) => `echo "-$$" >> "${g}/pids"`;
+
+/** 中断の test で、started が出てから survived を確かめるまでの待ち。 */
+const afterMs = 3500;
+
+/**
+ * fake の shellcheck を段で回し、started が出たら signals を送る。
+ * 返す値: started (started が出たか)、code・stdout・stderr (run-checks.ts の結果)、secs (最初のシグナルから終わるまでの秒)、terminated (fake が TERM の trap で terminated を書いたか)、survived (afterMs の後に survived が書かれていたか)。
+ */
 async function interrupt(
   shellcheck: (dir: string) => string,
   signals: Deno.Signal[],
-  afterMs: number,
 ) {
   return await withRepo({ "a.sh": "#!/bin/sh\n" }, async (dir) => {
-    const bin = await fakePath(dir, {
-      shellcheck: shellcheck(`${dir}/.git`),
-    });
+    const g = `${dir}/.git`;
+    const bin = await fakePath(dir, { shellcheck: shellcheck(g) });
     const child = spawnChecks(dir, "0", { PATH: `${bin}:${baseEnv.PATH}` });
-    const started = await poll(() => exists(`${dir}/.git/started`));
-    const sent = performance.now();
-    for (const [i, signal] of signals.entries()) {
-      if (i > 0) await sleep(200);
-      child.kill(signal);
+    try {
+      const started = await poll(() => exists(`${g}/started`));
+      const sent = performance.now();
+      for (const [i, signal] of signals.entries()) {
+        if (i > 0) await sleep(200);
+        killChild(child, signal);
+      }
+      const r = await child.output();
+      const secs = (performance.now() - sent) / 1000;
+      await sleep(afterMs);
+      return {
+        started,
+        code: r.code,
+        stdout: dec.decode(r.stdout),
+        stderr: dec.decode(r.stderr),
+        secs,
+        terminated: await exists(`${g}/terminated`),
+        survived: await exists(`${g}/survived`),
+      };
+    } finally {
+      killChild(child, "SIGKILL");
+      await killRecorded(`${g}/pids`);
     }
-    const r = await child.output();
-    const secs = (performance.now() - sent) / 1000;
-    await sleep(afterMs);
-    return {
-      started,
-      code: r.code,
-      stdout: dec.decode(r.stdout),
-      stderr: dec.decode(r.stderr),
-      secs,
-      terminated: await exists(`${dir}/.git/terminated`),
-      survived: await exists(`${dir}/.git/survived`),
-    };
   });
 }
 
@@ -587,13 +636,13 @@ Deno.test("中断: 段のグループを空にし、128 + シグナルの番号�
           [
             "#!/bin/sh",
             version,
+            recordGroup(g),
             `trap 'echo > "${g}/terminated"; exit 143' TERM`,
             `(sleep 3; echo > "${g}/survived") &`,
             `echo > "${g}/started"`,
             "wait",
           ].join("\n"),
         [signal],
-        3500,
       ).then((r) =>
         expect(
           `段の最中の ${signal}`,
@@ -609,13 +658,13 @@ Deno.test("中断: 段のグループを空にし、128 + シグナルの番号�
         [
           "#!/bin/sh",
           version,
+          recordGroup(g),
           "trap 'exit 143' TERM",
           `(trap '' TERM; sleep 5; echo > "${g}/survived") &`,
           `echo > "${g}/started"`,
           "wait",
         ].join("\n"),
       ["SIGTERM"],
-      3500,
     ).then((r) =>
       expect(
         "孫が残る",
@@ -630,13 +679,13 @@ Deno.test("中断: 段のグループを空にし、128 + シグナルの番号�
           [
             "#!/bin/sh",
             version,
+            recordGroup(g),
             "trap '' TERM",
             `echo > "${g}/started"`,
             "sleep 5",
             `echo > "${g}/survived"`,
           ].join("\n"),
         signals as Deno.Signal[],
-        3500,
       ).then((r) =>
         expect(
           `TERM を無視する先頭 (${signals.join(" → ")})`,
@@ -652,45 +701,53 @@ Deno.test("中断: 段のグループを空にし、128 + シグナルの番号�
       const bin = await fakePath(dir, {
         git: [
           "#!/bin/sh",
-          `if [ "$1 $2 $3" = "ls-files -z --cached" ]; then echo > "${g}/started"; sleep 4; echo > "${g}/survived"; exit 0; fi`,
+          `if [ "$1 $2 $3" = "ls-files -z --cached" ]; then ${
+            recordGroup(g)
+          }; echo > "${g}/started"; sleep 4; echo > "${g}/survived"; exit 0; fi`,
           `exec "${which("git")}" "$@"`,
         ].join("\n"),
         shellcheck: `#!/bin/sh\n${version}\n`,
       });
       const child = spawnChecks(dir, "0", { PATH: bin });
-      const started = await poll(() => exists(`${g}/started`));
-      child.kill("SIGTERM");
-      const r = await child.output();
-      await sleep(4500);
-      const got = {
-        started,
-        code: r.code,
-        stdout: dec.decode(r.stdout),
-        stderr: dec.decode(r.stderr),
-        survived: await exists(`${g}/survived`),
-      };
-      expect(
-        "段より前",
-        JSON.stringify(got) ===
-          JSON.stringify({
-            started: true,
-            code: 143,
-            stdout: "",
-            stderr: "",
-            survived: false,
-          }),
-        JSON.stringify(got),
-      );
+      try {
+        const started = await poll(() => exists(`${g}/started`));
+        killChild(child, "SIGTERM");
+        const r = await child.output();
+        await sleep(4500);
+        const got = {
+          started,
+          code: r.code,
+          stdout: dec.decode(r.stdout),
+          stderr: dec.decode(r.stderr),
+          survived: await exists(`${g}/survived`),
+        };
+        expect(
+          "段より前",
+          JSON.stringify(got) ===
+            JSON.stringify({
+              started: true,
+              code: 143,
+              stdout: "",
+              stderr: "",
+              survived: false,
+            }),
+          JSON.stringify(got),
+        );
+      } finally {
+        killChild(child, "SIGKILL");
+        await killRecorded(`${g}/pids`);
+      }
     }),
     // deno test の段。TERM を無視する孫が TMPDIR に書き続けても、TMPDIR は残らない
     withRepo({}, async (dir) => {
       const token = crypto.randomUUID();
+      const loopPid = `${dir}/.git/loop.pid`;
       await writeFiles(dir, {
         "wait_test.ts": [
           'Deno.test("w", async () => {',
           '  const tmp = Deno.env.get("TMPDIR");',
           '  new Deno.Command("sh", {',
-          `    args: ["-c", \`trap "" TERM; while :; do echo > "\${tmp}/f.$$"; sleep 0.05; done\`],`,
+          `    args: ["-c", \`echo $$ > "${loopPid}"; trap "" TERM; while :; do echo > "\${tmp}/f.$$"; sleep 0.05; done\`],`,
           "  }).spawn();",
           `  await Deno.writeTextFile(\`\${tmp}/${token}\`, "");`,
           "  await new Promise((r) => setTimeout(r, 30000));",
@@ -714,7 +771,7 @@ Deno.test("中断: 段のグループを空にし、128 + シグナルの番号�
           }
           return false;
         });
-        child.kill("SIGTERM");
+        killChild(child, "SIGTERM");
         const r = await child.output();
         await sleep(500);
         expect(
@@ -724,8 +781,12 @@ Deno.test("中断: 段のグループを空にし、128 + シグナルの番号�
           JSON.stringify({ started, code: r.code, testTmp }),
         );
       } finally {
-        if (testTmp !== undefined && await exists(testTmp)) {
-          await Deno.remove(testTmp, { recursive: true });
+        killChild(child, "SIGKILL");
+        await killRecorded(loopPid);
+        if (testTmp !== undefined) {
+          await Deno.remove(testTmp, { recursive: true }).catch((e) => {
+            if (!(e instanceof Deno.errors.NotFound)) throw e;
+          });
         }
       }
     }),
@@ -744,23 +805,28 @@ Deno.test("段が普通に終わると、残った孫を止め、deno test の�
       shellcheck: [
         "#!/bin/sh",
         version,
+        recordGroup(g),
         `(sleep 1; echo > "${g}/survived") >/dev/null 2>&1 &`,
         "exit 0",
       ].join("\n"),
     });
-    const r = await runChecks(dir, "0", { PATH: `${bin}:${baseEnv.PATH}` });
-    const testTmp = r.stdout.match(/TESTTMP=(.*)/)?.[1];
-    await sleep(1500);
-    deepStrictEqual(
-      {
-        code: r.code,
-        testTmp: testTmp?.startsWith(`${tmpdir}/run-checks-`),
-        left: testTmp !== undefined && await exists(testTmp),
-        survived: await exists(`${g}/survived`),
-      },
-      { code: 0, testTmp: true, left: false, survived: false },
-      r.stderr,
-    );
+    try {
+      const r = await runChecks(dir, "0", { PATH: `${bin}:${baseEnv.PATH}` });
+      const testTmp = r.stdout.match(/TESTTMP=(.*)/)?.[1];
+      await sleep(1500);
+      deepStrictEqual(
+        {
+          code: r.code,
+          testTmp: testTmp?.startsWith(`${tmpdir}/run-checks-`),
+          left: testTmp !== undefined && await exists(testTmp),
+          survived: await exists(`${g}/survived`),
+        },
+        { code: 0, testTmp: true, left: false, survived: false },
+        r.stderr,
+      );
+    } finally {
+      await killRecorded(`${g}/pids`);
+    }
   });
 });
 
@@ -794,11 +860,7 @@ Deno.test("段の子孫がグループを抜けて出力の pipe を持ったま
         `${secs}s\n${r.stderr}`,
       );
     } finally {
-      try {
-        Deno.kill(Number(await Deno.readTextFile(pidFile)), "SIGKILL");
-      } catch (e) {
-        if (!(e instanceof Deno.errors.NotFound)) throw e;
-      }
+      await killRecorded(pidFile);
     }
   });
 });

@@ -268,6 +268,25 @@ const cases: {
     ],
   },
   {
+    name: "frontmatter: CRLF",
+    files: {
+      "b.md": "---\r\ntitle: x\r\n---\r\n# Real\r\n",
+      "a.md": "[l](b.md#real) [m](b.md#title-x)\n",
+    },
+    code: 1,
+    stderr: ["a.md: anchor が見出しに無い — b.md#title-x"],
+  },
+  {
+    // markdown-it は \_ を text_special の _ にする (canon: facts/github/heading-anchor-ids の子トークンの選び方)
+    name: "見出しの id: backslash escape",
+    files: {
+      "b.md": "## a\\_b\n",
+      "a.md": "[l](b.md#a_b) [m](b.md#ab)\n",
+    },
+    code: 1,
+    stderr: ["a.md: anchor が見出しに無い — b.md#ab"],
+  },
+  {
     name: "読めないファイルは原因の文言のまま",
     files: { "dir.md": null, "a.md": "[l](gone.md#x)\n" },
     args: ["a.md", "dir.md", "gone.md", "gone.json"],
