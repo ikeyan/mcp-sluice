@@ -9,7 +9,7 @@ mcp-sluice は、複数の子 MCP サーバーを 1 つのエンドポイント�
 
 この文書の読者は、mcp-sluice を実装・変更する人。この文書が仕様の正本になる。
 
-外部依存の事実は、2026-10-26〜28 に一次情報で確かめたものを根拠に書く。確かめられなかったものは「未確認」と書き、選定の根拠にしない。一次情報は次のもの:
+外部依存の事実は、一次情報で確かめたものを根拠に書き、各出典に確認した日を添える。外部の契約が今も成り立つかを、後でその日から判定するため。確かめられなかったものは「未確認」と書き、選定の根拠にしない。一次情報は次のもの:
 
 - 仕様の repo
 - ソース
@@ -30,7 +30,7 @@ mcp-sluice は、複数の子 MCP サーバーを 1 つのエンドポイント�
   - Codex
   - ChatGPT
 
-  claude.ai に含まれるものは、どれも同じ callback の URL で接続する (`claude.com/docs/connectors/building/authentication` の Callback URLs)。
+  claude.ai に含まれるものは、どれも同じ callback の URL で接続する (`claude.com/docs/connectors/building/authentication` の Callback URLs、2026-10-28)。
 - 守るもの:
   - エージェントの誤り。プロンプトインジェクションで書かれたスクリプトが外部へ持ち出すことも含む。
   - 誤った相手への送信。利用者 A の資格情報や承認が、利用者 B の要求に使われることも含む。
@@ -67,7 +67,10 @@ mcp-sluice は、複数の子 MCP サーバーを 1 つのエンドポイント�
 
 - 実行時:
   - Deno 2.x を使う。
-  - 公式 TypeScript SDK v2 (`@modelcontextprotocol/server` 2.4.0) を使う。README は Node・Bun・Deno で動くと書く。
+  - 公式 TypeScript SDK v2 (`@modelcontextprotocol/server` 2.4.0) を使う。README は、次で動くと書く (https://github.com/modelcontextprotocol/typescript-sdk の README、2026-10-28):
+    - Node.js
+    - Bun
+    - Deno
 - 持つ状態:
   - メモリだけに持つ: 中断した要求 (承認待ちの Code Mode の実行など)。
   - メモリの状態があるので、レプリカは 1 つにする。
@@ -84,10 +87,12 @@ mcp-sluice は、複数の子 MCP サーバーを 1 つのエンドポイント�
     - `initialize` とセッションがある。
     - POST の SSE の流れの中で `elicitation/create` を送れる。
 - 両方を受ける理由:
-  - claude.ai の connector の docs が挙げる仕様は 2025-11-25 まで。
-  - Claude Code は 2026-07-28 に対応している (Claude Code の CHANGELOG の v2.1.281 に、2026-07-28 の接続での URL mode の elicitation がある)。
+  - claude.ai の connector の docs が挙げる authorization の仕様は 2025-11-25 まで (https://claude.com/docs/connectors/building/index.md の Specification version、2026-10-28)。
+  - Claude Code は 2026-07-28 に対応している (https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md の 2.1.281 に、2026-07-28 の接続での URL mode の elicitation がある。2026-10-28)。
 - SDK v2 は 1 つの handler で両世代を受けられる (`docs/protocol-versions.md`・`examples/dual-era`)。
 - 2025-11-25 の経路を外せる条件: 対象のクライアント (0 節) が、どれも 2026-07-28 で接続するようになったとき。
+  - 確かめ方: 11 節の実測 3。
+  - 追跡先: anthropics/claude-ai-mcp#153 (claude.ai の elicitation の対応の要望)。
 - 子へは、SDK v2 の client を `versionNegotiation: { mode: 'auto' }` で使う。
 - `tools/list` の結果:
   - 利用者ごとに絞るので、`cacheScope: "private"` を付ける (2026-07-28 の caching)。
@@ -178,10 +183,17 @@ authentik 2026.8.5 と main のソースで確認した。
   2. CIMD
   3. DCR
 - 暗号化の鍵は env で渡す。鍵を失ったら、保存したトークンは全部無効になり、利用者は再接続する。
-- 子が返すツールの定義は、利用者によって違いうる。持ち方と寿命は、4.4 節の表の「(将来) `per_user` の子の定義」の行に従う。
-- 子の `list_changed` を受けたら:
-  - その server id の全利用者の定義に、古いと印を付ける。
-  - 印の付いた定義を取り直すのは、その利用者の次の `tools/list` のとき。
+- 子が返すツールの定義は、利用者によって違いうる。鍵は、4.4 節の表の「(将来) `per_user` の子の定義」の行に従う。
+- 定義は、利用者が子に接続したときに取る。
+- 定義を捨てるとき:
+  - 子との接続が切れた。
+  - 子のトークンが失効した。
+  - 子のトークンが差し替わった (トークンの id が変わる)。
+- 定義の古さは、server id ごとの世代番号で表す。
+  - 子の `list_changed` を受けたら、その server id の世代番号を 1 つ増やす。
+  - 定義は、取ったときの世代番号を持つ。今の世代番号と違えば古い。
+  - 古い定義は、`tools/call` の判定にも `.d.ts` (7.2 節) にも使わない。
+  - `tools/list` と `tools/call` (`gateway__run_code` を含む) を受けたら、その要求が使う定義のうち古いものを、先に取り直す。
   - 同時に取り直す数には、全利用者を通した上限を置く。上限は固定値で、値は実装で計測して決める。
 - 利用者に見せる一覧は、`tools/list` のたびに、その利用者の定義と接続の状態から作る。まだ接続していない利用者の一覧には、`gateway__connect` を載せる。
 
@@ -203,37 +215,39 @@ servers:
     groups: [dev]                   # この子を使える人 (5.1 節)
     rules:                          # 評価の順は 5.1 節
       - { tools: "delete_*", groups: [admins], decision: ask }
-      - { tools: "delete_*", decision: deny }
-      - { tools: ["get_*", "list_*", "search_*"], decision: allow }
+      - { tools: "delete_*", groups: ["*"], decision: deny }
+      - { tools: ["get_*", "list_*", "search_*"], groups: ["*"], decision: allow }
   fs:
     transport: { type: stdio, command: /usr/local/bin/fs-mcp, args: [--root, /data] }
     env: { }                        # 子へ渡す env は明示したものだけ
     groups: [dev]
     rules:
-      - { tools: "write_*", decision: ask }
-      - { tools: "*", decision: allow }
+      - { tools: "write_*", groups: ["*"], decision: ask }
+      - { tools: "*", groups: ["*"], decision: allow }
 gateway:                            # ゲートウェイ自身のツールにも同じ規則を掛ける
   rules:
-    - { tools: "*", decision: allow }
+    - { tools: "*", groups: ["*"], decision: allow }
 ```
 
 - 起動時の設定の検査で、次のどれかに当たれば起動を失敗させる:
-  - どこかの階層に、JSON Schema に無いキーがある (`additionalProperties: false`)。rule の `groups` を綴り誤ると、その規則が全員に効くため。
+  - どこかの階層に、JSON Schema に無いキーがある (`additionalProperties: false`)。綴りを誤ったキーが、黙って無視されないため。
   - 空の配列がある (`minItems: 1`)。対象:
     - server の `groups`
     - rule の `groups`
     - rule の `tools`
-  - server に `groups` が無い。全員に開くなら、`groups` に `"*"` を書く (5.1 節)。
+  - server か rule に `groups` が無い。全員に当てるなら、`groups` に `"*"` を書く (5.1 節)。
   - server id が 4.2 節の形に外れる。
   - rule の `tools` の文字列が 5.1 節の形に外れる。
-  - `auth.issuer` か、HTTP の子の `url` が `https:` でない。loopback (`127.0.0.1`・`[::1]`・`localhost`) の `http:` だけは許す。平文でホストの外へ出さないため (0 節)。
+  - rule の `tools` の文字列が、その server の公開名の接頭辞 `<server id>__` で始まる。照合は子の名前で行うので、公開名で書いた記述はどのツールにも当たらない (5.1 節)。
+  - `auth.issuer` が `https:` でない。平文でホストの外へ出さないため (0 節)。
+  - HTTP の子の `url` が `https:` でない。例外として、loopback (`127.0.0.1`・`[::1]`・`localhost`) の `http:` だけは許す。平文でホストの外へ出さないため (0 節)。
   - `bearer_env` が指す環境変数が無い。
 - stdio の `env` を省略したときは、子の環境を空にする。
 
 ### 4.2 名前
 
 - 公開する名前は `<server>__<tool>`。
-  - 区切りは `__` にする。Messages API のツール名は `^[a-zA-Z0-9_-]{1,128}$` で、`.` を含められない (`platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools`)。
+  - 区切りは `__` にする。Messages API のツール名は `^[a-zA-Z0-9_-]{1,128}$` で、`.` を含められない (`platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools`、2026-10-26)。
 - server id は `^(?=.{1,16}$)[a-z][a-z0-9]*(?:_[a-z0-9]+)*$`。
   - 公開名の区切りは最初の `__` に決まる。
   - JS の識別子として使える。
@@ -259,12 +273,12 @@ gateway:                            # ゲートウェイ自身のツールにも
 | 子への接続 | server id | 設定の項目が同じ | プロセス |
 | 公開名 | (server id, tool 名) | 最初の `__` で分けた結果が一致 | 子への接続と同じ |
 | `shared` の子のツールの一覧 | server id | 子が返した定義 | 子への接続と同じ (4.3) |
-| 中断した要求 | 要求 id (128 bit の乱数) | id と利用者の両方が一致。2026 系の再送では、`name`・`arguments` も記録と JSON として等しい。承認の根拠 (server・tool・引数・クライアント) は記録のものに固定する | 完了・期限切れ・取り消しまで |
+| 中断した要求 | 要求 id (128 bit の乱数) | 6.2 節の確かめを全部通る。承認の根拠 (公開名・引数・クライアント) は記録のものに固定する。policy の判定は記録に固定せず、再開の直前にやり直す (6.3 節) | 完了・期限切れ・取り消しまで |
 | 利用者の操作 (承認) | 操作 id (128 bit の乱数) | id が一致し、ページのログインの利用者が要求の利用者と一致 | 中断した要求と同じ |
-| 実行中の承認 | (run id, server id, tool 名) | 「この実行の間は許可」を選んだ run で、3 つが一致 | その run の間 |
+| 実行中の承認 | (run id, 公開名) | 「この実行の間は許可」を選んだ run で、2 つが一致 | その run の間 |
 | ブラウザのセッション | cookie の値 | 署名が正しく、期限内 | 8 時間 |
 | (将来) 利用者ごとの子のトークン | (`iss`, `sub`, server id) | 3 つが一致 | 失効か、利用者が切るまで (SQLite) |
-| (将来) `per_user` の子の定義 | (`iss`, `sub`, server id, 子のトークンの id) | 4 つが一致 | 利用者の接続で取る。切断・失効・トークンの差し替えで捨てる。子の `list_changed` を受けたら、その server id の全利用者の分に古いと印を付け、その利用者の次の `tools/list` で取り直す (3.3 節) |
+| (将来) `per_user` の子の定義 | (`iss`, `sub`, server id, 子のトークンの id) | 4 つが一致し、取ったときの世代番号が今の世代番号と同じ (3.3 節) | 取る・捨てる・取り直すときは 3.3 節 |
 
 ## 5. Policy (allow / ask / deny)
 
@@ -273,14 +287,14 @@ gateway:                            # ゲートウェイ自身のツールにも
 1. 利用者が server の `groups` のどれにも入っていなければ、その server のツールは全部 deny。`groups` は必須 (4.1 節の起動時の検査)。
 2. server の `rules` を上から見て、次の 2 つを両方満たす最初の規則の `decision` を採る:
    - `tools` (下の形の文字列か、その配列。配列なら、どれか 1 つが当たれば当たる) が当たる。
-   - `groups` が無いか、利用者が入っている。
+   - `groups` に利用者が入っている (`"*"` を含む)。`groups` は必須 (4.1 節の起動時の検査)。
 3. 当たる規則が無ければ、全体の `default` (既定は ask) を採る。
 
 - `groups` の `"*"` は全員に当たる。
 - rule の `tools` の文字列:
   - 形は `^[A-Za-z0-9_*-]+$`。形に外れる記述は、起動時に拒否する (4.1 節)。
   - `*` だけを任意の文字の並び (0 文字を含む) として扱い、他の文字はそのまま比べる。
-  - 照合するのは、子が報告した名前 (例: `create_issue`)。
+  - 照合は子の名前 (子が報告した名前。例: `create_issue`) で行う。公開名 (例: `github__create_issue`) では当たらない。公開名の接頭辞で始まる記述は、起動時に拒否する (4.1 節)。
 - 上から順に評価する理由: 「admins だけ ask、他は deny」のような例外を、否定を使わずに書ける。
 - 判定は `groups` と `rules` だけで行う。仕様は tool annotations (`readOnlyHint` など) を信頼しない入力として扱うよう求めている。annotations はそのままクライアントへ渡す。
 
@@ -328,10 +342,11 @@ form で聞くときの既定の選択は「拒否」。
     1. `input_required` を返す。
     2. `requestState` には、要求 id と、その署名だけを入れる。仕様は `requestState` の改ざん防止を求めている。
     3. 再送を受けたら、`requestState` の要求 id で、中断した要求の記録 (6.3 節) を引く。
-    4. 次を全部確かめてから、記録した server・tool・引数を実行する (Code Mode なら、中断した worker を再開する)。どれかが外れれば、`isError: true` と理由 `unknown` を返す。
+    4. 次を全部確かめる。どれかが外れれば、`isError: true` と理由 `unknown` を返す。
        - 要求 id の記録がある。
        - 再送の利用者が、記録の利用者と一致する。
        - 再送の `name`・`arguments` が、記録のものと JSON として等しい。
+    5. 6.3 節の「再開の直前の判定」を通してから、記録の要求を実行する (Code Mode なら、中断した worker を再開する)。
 - 結果に URL を返す場合:
   - 要求を中断し、ツールの結果として次を返す:
     - 何が必要か (承認か接続か)
@@ -339,13 +354,13 @@ form で聞くときの既定の選択は「拒否」。
     - 再開に使う `request_id` (要求 id。URL の操作 id とは別の値)
     - 再開の仕方
   - モデルがチャットで URL を示し、利用者はブラウザで authentik にログインして操作する。
-  - そのあと、モデルが `gateway__resume({ request_id })` を呼ぶと、中断した要求の続きを返す。`gateway__resume` の結果:
+  - そのあと、モデルが `gateway__resume({ request_id })` を呼ぶと、中断した要求の続きを返す。承認が済んでいれば、6.3 節の「再開の直前の判定」を通してから、記録の要求を実行する。`gateway__resume` の結果:
 
     | 状態 | 結果 |
     | --- | --- |
     | 操作が済み、要求が終わった | 元の要求の結果 |
     | まだ操作が済んでいない | `isError: false` で、`status: "pending"` と、最初と同じ案内 (URL と再開の仕方) を返す。元の要求は未完了として示す |
-    | 拒否された・取り消された | `isError: true` と理由 (`denied`・`cancelled`) |
+    | 拒否された (再開の直前の判定で deny になったものを含む)・取り消された | `isError: true` と理由 (`denied`・`cancelled`) |
     | id が無い (期限切れで消えたものを含む)、または別の利用者のもの | `isError: true` と理由 `unknown` |
   - 安全性:
     - ページは、ログインした利用者が要求の利用者と一致するときだけ操作を受ける。
@@ -358,9 +373,15 @@ form で聞くときの既定の選択は「拒否」。
 
 - 中断した要求は、メモリに記録として持つ。記録が持つもの:
   - 利用者・期限・操作 id・クライアント
-  - 元の `tools/call` の `name`・`arguments`
+  - 元の `tools/call` の `name`・`arguments`。中継する server と tool は、`name` を 4.2 節の最初の `__` で分けて得る。
   - Code Mode の実行なら、Promise を待ったまま止めた worker
-  - 直接の呼び出しなら、中継する server・tool・引数
+- 再開の直前の判定: 中断した要求を実行する直前に、5.1 節の判定をやり直す。
+  - 経路 (2026 系の再送・`gateway__resume`) によらず同じに扱う。
+  - 判定する対象は、承認を待つツール呼び出し。直接の呼び出しなら記録の `name` で、Code Mode なら worker の中で承認を待つ呼び出し。
+  - 判定に使うのは、再開を求めた要求 (再送か、`gateway__resume` の呼び出し) のトークンの `groups`。中断の後に利用者が groups から外れれば、その変化が判定に効く。
+  - 結果ごとの扱い:
+    - deny: 実行しない (Code Mode なら worker を止める)。`isError: true` と理由 `denied` を返し、記録を消す。
+    - ask・allow: 記録した承認で実行する。
 - 期限は 15 分の固定値。過ぎたら、止めて記録ごと消す。消えた id は、`gateway__resume` で `unknown` になる (6.2 節)。
 - 承認を待つ間は、Code Mode の CPU の時間に数えない。
 - Code Mode の中で ask が同時に起きたら、1 つの操作にまとめる。
@@ -387,7 +408,11 @@ form で聞くときの既定の選択は「拒否」。
     - 戻り値は `outputSchema` があれば `structuredContent`、無ければ `{ content }`。
     - 子が `isError` を返したら、例外 (`ToolError`) にする。
   - `console.log` など: 出力を集めて、結果に入れる。
-  - 言語の組み込み (`JSON`・`Math`・`Date`・`Promise` など)
+  - 言語の組み込み。例:
+    - `JSON`
+    - `Math`
+    - `Date`
+    - `Promise`
 - 使えないもの:
   - ネットワーク
   - ファイル
@@ -407,36 +432,48 @@ form で聞くときの既定の選択は「拒否」。
 1. 静的な検査: typescript 6.x の API を、プロセスの中で仮想のファイルシステムを使って呼ぶ。
    - `import`・`export`・`require` があれば拒否する。
    - 利用者から見えるツール (deny を除く) の `.d.ts` を、JSON Schema から生成して型検査する。型エラーがあれば実行せずに返す (副作用の前に、引数の誤りを直させる)。
-     - `.d.ts` は実行ごとに、その時点の一覧と policy (利用者の groups と設定) から作り、実行をまたいで保持しない。
+     - `.d.ts` は、各実行のためだけに、その時点の一覧と policy (利用者の groups と設定) から作る。一覧 (`list_changed`) と利用者の groups は実行の間に変わりうるので、前の実行の `.d.ts` は、その時点の一覧と policy に合う保証が無い。
+     - 生成と型検査にかかる時間は未測定。11 節の spike で測る。
    - typescript は 6.x に固定する。7.0.2 (2026-10 の npm の latest) の API は `transpileModule` を持たない。外せる条件: 7.x の API が、仮想のファイルシステムでの型検査と JS への変換を提供したとき。
 2. TS を JS に変換する (同じ compiler で)。
 3. 実行: QuickJS-WASM (quickjs-emscripten) で、実行ごとに新しい context を作り、worker thread で回す。
-   - 実行の基盤の比較 (物差し: 何もしないときに IO を持つか、閉じるのに要る手当て、依存の状態):
+   - 実行の基盤の比較。物差し:
+     - 何もしないときに IO を持つか
+     - 閉じるのに要る手当て
+     - 依存の状態
 
      | 候補 | 何もしないときの IO | 閉じるのに要る手当て | 依存の状態 | 採否 |
      | --- | --- | --- | --- | --- |
-     | QuickJS-WASM (quickjs-emscripten) | 無い。README は「By default, no host functionality is exposed to code running inside QuickJS」と書く (実測は 11 節の spike) | 無し。渡すのは `tools` と `console` だけ | 版は 1.0 未満。README は「has not been audited」と書く | 採る。依存の状態が理由で、実行の基盤を 1 つの interface の裏に置く |
-     | Deno の子プロセス (許可フラグ無し) | 有る (下の 3 つ) | `--no-remote`・`--no-npm`・実行ごとの `DENO_DIR`・スクリプトを文字列で評価すること | Deno は実行時 (1 節) で、足す依存は無い | 採らない。許可フラグが無くても IO を持つ |
-     | Deno の Worker (`deno.permissions: "none"`) | 有る (下の 2 つ目と 3 つ目) | 上と同じ | `deno.permissions` は unstable の API で、`--unstable-worker-options` が要る | 採らない。上と同じく IO を持ち、加えて `--unstable-worker-options` が要る |
-     | isolated-vm | 無い | 別のプロセスに置くこと。README は、V8 は普通の JS で落とされうるので、重要な基盤とは別の node のプロセスに置くよう勧める | README は maintenance mode と書く | 採らない。README が maintenance mode と書く |
-     | Cloudflare の Dynamic Worker (`@cloudflare/codemode` が使う形) | `globalOutbound: null` で外へ出ない | Workers の `worker_loaders` の binding が要る | `@cloudflare/codemode` の README は Experimental と書く | 採らない。手当てに Workers の基盤が要り、自前のホストで動かす前提に合わない |
+     | QuickJS-WASM (quickjs-emscripten) | 無い (下の実測)。README は「By default, no host functionality is exposed to code running inside QuickJS」と書く | 無し。渡すのは `tools` と `console` だけ | 版は 1.0 未満。README は「has not been audited」と書く | 採る。IO が無く、手当ても要らない。依存の状態には難がある |
+     | Deno の子プロセス (許可フラグ無し) | 有る (下の実測の 3 つ) | `--no-remote`・`--no-npm`・実行ごとの `DENO_DIR`・スクリプトを文字列で評価すること | Deno は実行時 (1 節) で、足す依存は無い | 採らない。IO が有り、閉じるのに手当てが要る。依存の状態に難は無い |
+     | Deno の Worker (`deno.permissions: "none"`) | 有る (下の実測の 2 つ目と 3 つ目) | 上と同じ | `deno.permissions` は unstable の API で、`--unstable-worker-options` が要る | 採らない。IO が有り、閉じるのに手当てが要る。依存は unstable の API |
+     | isolated-vm | 無い | 別のプロセスに置くこと。README は、V8 は普通の JS で落とされうるので、重要な基盤とは別の node のプロセスに置くよう勧める | README は maintenance mode と書く | 採らない。IO は無いが、別のプロセスが要る。依存の状態には難がある |
+     | Cloudflare の Dynamic Worker (`@cloudflare/codemode` が使う形) | `globalOutbound: null` で外へ出ない | Workers の `worker_loaders` の binding が要る | `@cloudflare/codemode` の README は Experimental と書く | 採らない。外へは出ないが、手当てに Workers の基盤が要り、自前のホストで動かす前提に合わない。依存は Experimental |
 
-     deno 2.9.8 で、許可フラグを付けない子プロセスに次の IO があることを実測した (canon: facts/deno/io-without-permission-flags):
-     - `localStorage` が実行をまたいで残る。
-     - 文字列リテラルの `import("file:///…")` が、読み取りの許可なしに通る。
-     - `npm:` のモジュールが、ネットワークの許可なしに取れる。
+     - 依存の状態は、QuickJS (1.0 未満・未監査) と isolated-vm (maintenance mode) の両方に難がある。IO と手当てで QuickJS を採る。
+     - 依存の状態から残るリスクは、実行の基盤を 1 つの interface の裏に置くことで受ける。基盤を差し替えるときに、その裏だけを替えれば済む。
 
-     `deno.permissions: "none"` の Worker では、2 つ目と 3 つ目が同じく通り、`localStorage` は定義されない (同じ canon)。
+     実測 (deno 2.9.8、Linux。手順と結果は canon):
+     - Deno の子プロセス (許可フラグ無し) に、次の IO がある (canon: facts/deno/io-without-permission-flags):
+       - `localStorage` が実行をまたいで残る。
+       - 文字列リテラルの `import("file:///…")` が、読み取りの許可なしに通る。
+       - `npm:` のモジュールが、ネットワークの許可なしに取れる。
+     - `deno.permissions: "none"` の Worker では、2 つ目と 3 つ目が同じく通り、`localStorage` は定義されない (同じ canon)。
+     - QuickJS-WASM (quickjs-emscripten 0.32.0) で、新しい context に同じ試験を回すと、どれも通らない (canon: facts/quickjs-emscripten/no-host-io-by-default):
+       - 文字列リテラルの `import("file:///…")` と `import("npm:…")` は、モジュールを読めずに失敗する。
+       - 次は定義されない:
+         - `localStorage` などの記憶域
+         - fs の API (`Deno`・`require` など)
+         - `fetch`
+       - 前の context の `globalThis` への書き込みは、新しい context に残らない。
 
-     出典:
+     出典 (2026-10-28 に確認):
      - QuickJS-WASM: https://github.com/justjake/quickjs-emscripten の README
      - Deno の Worker:
        - `deno.permissions`: https://github.com/denoland/deno/blob/main/cli/tsc/dts/lib.deno.unstable.d.ts の `WorkerOptions`
        - `--unstable-worker-options`: https://github.com/denoland/deno/blob/main/runtime/features/data.rs の `worker-options`
      - isolated-vm: https://github.com/laverdet/isolated-vm の README
      - Dynamic Worker: https://github.com/cloudflare/agents/tree/main/packages/codemode の README
-
-     Deno の子プロセスと Worker の行の「何もしないときの IO」は、上の実測による。
    - 非同期の橋渡しは、`newPromise` と `executePendingJobs` で行う (`Promise.all` で並行に呼べる)。
    - 上限は固定値で、値は実装で計測して決める:
      - メモリ
@@ -479,7 +516,11 @@ form で聞くときの既定の選択は「拒否」。
     - 推奨: `mcp.protocol.version`、`gen_ai.operation.name` (`execute_tool`)
   - 規約に無いものは `sluice.*` の属性で足す:
     - `sluice.policy.decision`
-    - `sluice.interaction.kind`・`sluice.interaction.channel` (form・url・結果の URL)
+    - `sluice.interaction.kind`
+    - `sluice.interaction.channel`。値:
+      - `form`
+      - `url`
+      - 結果の URL
     - `sluice.run.id`・`sluice.run.depth`・`sluice.code.sha256`・`sluice.code.bytes`
     - `user.id` (= `sub`)・`sluice.client_id`
   - span の入れ子:
@@ -517,7 +558,7 @@ form で聞くときの既定の選択は「拒否」。
     - 時間
     - 引数の hash と大きさ
   - Code Mode のソース: 実行ごとに全文を 1 件出し、`trace_id`・`span_id` で trace とつなぐ。
-    - span の属性に入れない理由: Tempo は 2048 バイトを超える属性を既定で切り詰め (`max_attribute_bytes`)、上限を上げると querier が out-of-memory になりうると docs が警告している (grafana/tempo の `docs/sources/tempo/configuration/_index.md`)。
+    - span の属性に入れない理由: Tempo は 2048 バイトを超える属性を既定で切り詰め (`max_attribute_bytes`)、上限を上げると querier が out-of-memory になりうると docs が警告している (grafana/tempo の `docs/sources/tempo/configuration/_index.md`、2026-10-27)。
     - Loki の 1 行の上限が 64 KiB の入力を受けられるかは、未確認 (実装の前に確かめる)。
   - 引数と結果の本文は、既定では記録しない。
 
@@ -527,16 +568,20 @@ compose に、Grafana・Tempo・Loki・Prometheus を同梱する。
 
 比べる物差し:
 
-- 可動部品の数: コンテナの数。
+- 可動部品の数: 次の機能をそろえるのに要るコンテナの数。
+  - trace
+  - log
+  - metrics
+  - UI のログイン
 - 依存する契約の安定性: ゲートウェイが送る OTLP の受け口と、UI のログインについて、一次情報が書く状態。
 
 | 候補 | コンテナの数 | 依存する契約の安定性 | 扱い |
 | --- | --- | --- | --- |
-| **Grafana + Tempo + Loki + Prometheus** | 4 | Tempo の README は OpenTelemetry 互換と書く。Loki の docs は `/otlp` で OpenTelemetry の log を native に受けると書く。Prometheus は通常のフラグ `--web.enable-otlp-receiver` で受ける。ログインは Grafana の generic OAuth | 選ぶ。確かめた事実は表の下 |
-| grafana/otel-lgtm | 1 | README が、開発・デモ・テスト用と書く | 退ける。用途が開発・デモ・テストに限られる |
-| Jaeger v2 | 1 (README の all-in-one。保存はメモリ) | OTLP (gRPC と HTTP) を受ける。README は trace の基盤と書く。UI の認証の有無は未確認 | 退ける。log と metrics の送り先が別に要る |
+| **Grafana + Tempo + Loki + Prometheus** | 4 | Tempo の README は OpenTelemetry 互換と書く。Loki の docs は `/otlp` で OpenTelemetry の log を native に受けると書く。Prometheus は通常のフラグ `--web.enable-otlp-receiver` で受ける。UI のログインは、Grafana の generic OAuth の docs が書く | 選ぶ。確かめた事実は表の下 |
+| grafana/otel-lgtm | 1 | README が、開発・デモ・テスト用と書く | 退ける。コンテナの数では 4 対 1 で負けるが、README が書く用途 (開発・デモ・テスト) が運用に合わないので採らない |
+| Jaeger v2 | trace だけなら 1 (README の all-in-one。保存はメモリ)。log と metrics の送り先を足すと 3 (log と metrics を見る UI は含まない) | OTLP (gRPC と HTTP) を受ける。README は trace の基盤と書く。UI の認証の有無は未確認 | 退ける。log と metrics の送り先に加えて、それを見る UI も別に要り、数で Grafana の案に勝たない |
 | OpenObserve | 1 (README は single binary と書く) | README は native OTLP と書く。OIDC を含む SSO は Enterprise の機能 | 退ける。Enterprise でないと authentik でログインできない |
-| SigNoz | 未確認 (コンテナの数と community 版の SSO) | 未確認 | 保留。確かめるまで選定の根拠にしない |
+| SigNoz | 未確認 (コンテナの数と community 版の SSO) | 未確認 | 保留 (一次情報で確かめてから判断する) |
 | Langfuse | 6 (compose の service) | OTLP の受け口は traces と metrics で、metrics の handler は中身が空。logs の受け口は無い | 退ける。metrics と log を受けない |
 
 Grafana + Tempo + Loki + Prometheus で確かめた事実:
@@ -564,9 +609,12 @@ Grafana + Tempo + Loki + Prometheus で確かめた事実:
     - Code Mode の実行 (ソースと trace)
   - Tempo・Loki・Prometheus の最小の設定。
 - 自前の基盤を持つ運用者は、OTLP の送り先を変えるだけで使える。同梱の 4 つは compose の profile で分ける。
-- ライセンス: Grafana・Tempo・Loki は AGPL-3.0 (Grafana の https://github.com/grafana/grafana/blob/main/LICENSE、Tempo と Loki の README)。同梱は compose から image を参照するだけで、mcp-sluice のコードには入らない。
+- ライセンス: 次は AGPL-3.0 (2026-10-28 に確認)。同梱は compose から image を参照するだけで、mcp-sluice のコードには入らない。
+  - Grafana: https://github.com/grafana/grafana/blob/main/LICENSE
+  - Tempo: README
+  - Loki: README
 
-表の出典:
+表の出典 (2026-10-28 に確認):
 
 - Grafana:
   - generic OAuth: https://github.com/grafana/grafana/blob/main/docs/sources/setup-grafana/configure-access/configure-authentication/generic-oauth/index.md
@@ -590,7 +638,7 @@ Grafana + Tempo + Loki + Prometheus で確かめた事実:
 - 前段の reverse proxy で TLS を終端する。
 - claude.ai から使う場合:
   - ゲートウェイと authentik の両方が、インターネットから届く必要がある。
-  - claude.ai の docs (`claude.com/docs/connectors/building/authentication`) は、AS が `160.79.104.0/21` から届くことを求めている。
+  - claude.ai の docs (`claude.com/docs/connectors/building/authentication`、2026-10-26) は、AS が `160.79.104.0/21` から届くことを求めている。
 - stdio の子は、ゲートウェイのコンテナの中で子プロセスとして動く。子は信頼する前提なので、子の IO は制限しない。
 - 秘密は env で渡す。設定ファイルには env の名前だけを書く。秘密は次の 2 つ (将来の `per_user` で、トークンの暗号化の鍵が加わる):
   - 子の資格情報
@@ -598,25 +646,52 @@ Grafana + Tempo + Loki + Prometheus で確かめた事実:
 
 ## 10. 利用者向けの文書
 
-README にセキュリティモデルを書く (0 節と 3.3 節・6.2 節・7 節の要約)。そのほか、英語で次を書く:
-  - authentik の設定手順 (provider・redirect URI・Grafana の連携)
-  - クライアントごとの登録手順 (0 節の対象のクライアント)
-  - 設定ファイルの reference
+README に、セキュリティモデルとして次の節の要約を書く:
+
+- 0 節
+- 3.3 節
+- 6.2 節
+- 7 節
+
+そのほか、英語で次を書く:
+
+- authentik の設定手順。対象:
+  - provider
+  - redirect URI
+  - Grafana の連携
+- クライアントごとの登録手順 (0 節の対象のクライアント)
+- 設定ファイルの reference
 
 ## 11. 作る順番
 
 1. 実測 (spike):
-   1. authentik と各クライアントの OAuth: OIDC discovery に落ちるか、redirect の regex、`aud`。3.2 節の方式で足りるかが、ここで決まる。
-   2. QuickJS-WASM を Deno の worker で動かす: 非同期の橋渡し、interrupt、メモリの上限。
+   1. authentik と各クライアントの OAuth。3.2 節の方式で足りるかが、ここで決まる。確かめること:
+      - OIDC discovery に落ちるか
+      - redirect の regex
+      - `aud`
+   2. QuickJS-WASM を Deno の worker で動かす。確かめること:
+      - 非同期の橋渡し
+      - interrupt
+      - メモリの上限
    3. elicitation:
       - Claude Code で 2025 系と 2026 系。
       - claude.ai で、結果に URL を返す経路。
       - Claude Desktop と ChatGPT が、elicitation の form と url に対応するか (6.2 節の表のどの行に当たるか)。
+   4. Code Mode の静的な検査 (7.2 節) で、`.d.ts` の生成と型検査にかかる時間。
 2. 中継と allow/deny と認証 (MVP)
-3. 利用者の操作 (承認: elicitation・URL・`gateway__resume`)
-   - 試験: 2026 系の再送の引数だけを変えた入力で、承認が使われない (6.2 節)。
-4. Code Mode (型検査、QuickJS、入れ子)
-5. 観測 (OpenTelemetry、compose の観測の基盤、ダッシュボード)
+3. 利用者の操作。対象:
+   - 承認の届け方: elicitation・URL・`gateway__resume`
+   - 試験:
+     - 2026 系の再送の引数だけを変えた入力で、承認が使われない (6.2 節)。
+     - 中断の後に利用者を groups から外した入力で、承認が使われず実行されない (6.3 節)。
+4. Code Mode。対象:
+   - 型検査
+   - QuickJS
+   - 入れ子
+5. 観測。対象:
+   - OpenTelemetry
+   - compose の観測の基盤
+   - ダッシュボード
 
 最初の公開の後に、`per_user` の子 (接続、暗号化した保存) を足す。
 
@@ -631,7 +706,7 @@ README にセキュリティモデルを書く (0 節と 3.3 節・6.2 節・7 �
 | Docker MCP Gateway (Go) | 複数のサーバーを束ね、profile ごとにツールを `<server>.<tool>` で指して有効・無効にする | README の OAuth は子への接続のためで、クライアントの利用者の認証の記載が無い。承認と OpenTelemetry の記載も無い |
 | Cloudflare の `@cloudflare/codemode` | Code Mode の参照実装。Dynamic Worker (`WorkerLoader`) で動き、`globalOutbound: null` で外へ出さない | Workers の `worker_loaders` の binding が要る。自前のホストで動かす前提に合わない。README は Experimental と書く |
 
-出典 (いずれも README):
+出典 (2026-10-28 に確認。いずれも README):
 
 - agentgateway: https://github.com/agentgateway/agentgateway
 - IBM mcp-context-forge: https://github.com/IBM/mcp-context-forge
