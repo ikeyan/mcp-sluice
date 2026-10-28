@@ -95,11 +95,12 @@
  * - 環境変数 TMPDIR: deno test の段があるとき (test があるとき) だけ使い、その下に段の TMPDIR を作る。verify.sh は絶対パスにした値を渡す。次のときは段の前で exit 1:
  *   - 未設定。
  *   - 空。
+ *   - 絶対パスでない (`/` で始まらない)。
  *   - その下に作れない (無い・書けないなど)。
  * - cwd はリポのルート。読むファイルは deno.json だけ。書くのは TMPDIR の下だけ。許可は verify.sh が渡す。
  * - 環境はそのまま段の子に渡す。差し替えるのは次だけ:
  *   - git (git()): git の場所を決める変数 (git rev-parse --local-env-vars の一覧。canon: facts/git/local-env-vars-and-hook-env) を消す。git は cwd のリポを見る。
- *     - 一覧は、このプロセスの環境のまま聞く。測った版での出方は verify.sh の先頭。
+ *     - 一覧は、このプロセスの環境のまま聞く。
  *     - 一覧の各行の形は verify.sh が確かめる。
  *     - git を起動できないか、git が非 0 で終わるときは、理由を出して段の前で exit 1。
  *   - deno (deno()):
@@ -177,9 +178,11 @@
  *   - 外せる条件: `--allow-run=deno` で、差し替えた PATH の dir の deno を起動できるようになったら (canon: facts/deno/allow-run-name-with-child-path)、run を起動するものに絞る。
  * - deno.json の imports の各キー (importKeys 段):
  *   - 指定子を集める: git が知る .ts のそれぞれに `deno info --json` を回し (canon: facts/deno/info-json-dependencies)、graph の module (相対 import で辿った先を含む) の dependencies[].specifier を集める。
- *   - キーが使われているとみなすのは、次のどれか:
+ *   - キーが使われているとみなすのは、次のどれか (import map の当て方と、deno.json の imports の展開。canon: facts/deno/import-map-prefix-keys):
  *     - 集めた指定子のどれかと一致する。
  *     - 末尾が / のキーで、集めた指定子のどれかがその接頭辞で始まる。
+ *     - 末尾が / でないキーで、値が `npm:`・`jsr:` で始まり / で終わらず、キー + / が imports に無い。集めた指定子のどれかがキー + / で始まる。
+ *   - キーと指定子は書かれた文字列のまま比べる。正規化 (相対パス・URL の形のキーの解決) はしないので、そういうキーは指定子と同じ綴りでしか使われているとみなさない。
  *   - 指定子に入る構文:
  *     - 静的 import (`import x from "a"`・`import "a"`・`import { type W } from "a"`)。
  *     - `export … from "a"`。
@@ -329,8 +332,8 @@ const finish = (code: number): Promise<never> =>
 for (const [signal, code] of signals) {
   Deno.addSignalListener(signal, () => void finish(code));
 }
-/** 本流が段より前の失敗か段の結果を出した直後に、同期のまま呼ぶ。出した失敗の記録を消す (上の「終了」)。 */
-const reported = () => {
+/** 出した失敗の記録を消す (上の「終了」)。呼ぶ側は失敗を出した後に、await を挟まずに呼ぶ。 */
+const dropReportedRecords = () => {
   groups.clear();
   testTmp = undefined;
 };
@@ -341,7 +344,7 @@ const failBeforeSteps = async (problems: string[]): Promise<never> => {
     problems.map((p) => `${self}: ${p}`).join("\n") +
       "\n検査の段は回していない",
   );
-  reported();
+  dropReportedRecords();
   return finish(1);
 };
 
@@ -457,10 +460,13 @@ const denoResultVars = [
   "DENO_TSC_BIN",
   "DENO_V8_FLAGS",
 ];
-/** deno を args で、上の「入力と環境の定義域」の deno の環境に set を足して起動する。 */
-const deno = (args: string[], set: Record<string, string> = {}) =>
+/** deno を args で、上の「入力と環境の定義域」の deno の環境で起動する。tmp があれば子の TMPDIR にする。 */
+const deno = (args: string[], tmp?: string) =>
   exec("deno", args, {
-    set: { DENO_NO_PACKAGE_JSON: "1", ...set },
+    set: {
+      DENO_NO_PACKAGE_JSON: "1",
+      ...(tmp === undefined ? {} : { TMPDIR: tmp }),
+    },
     unset: denoResultVars,
   });
 
@@ -508,7 +514,7 @@ const endsWithAny = (f: string, list: string[]) =>
 
 /** git が知る項目のうち処理するものの名前と、処理できない項目の理由。 */
 async function gitFiles(): Promise<{ files: string[]; problems: Problems }> {
-  // 本流は失敗を出した後に記録を全部消すので、並べた exec の全部を待ち、投げたものを全部出す
+  // 並べた exec は全部待ち、投げたものを全部出す
   const [cachedRun, othersRun] = await Promise.allSettled([
     git(["ls-files", "-z", "-s", "-t", "--cached"]),
     git(["ls-files", "-z", "--others", "--exclude-standard"]),
@@ -704,6 +710,10 @@ if (tests.length) {
     preProblems.push(
       `TMPDIR が未設定か空で、deno test の段の TMPDIR を作る場所が無い。${setWritableTmpdir}`,
     );
+  } else if (!tmpdir.startsWith("/")) {
+    preProblems.push(
+      `TMPDIR (${tmpdir}) が絶対パスでない。絶対パスの、${setWritableTmpdir}`,
+    );
   } else if (preProblems.length === 0) {
     try {
       // 終了の経路が作りかけを見落とさないように、同期で作る
@@ -739,17 +749,6 @@ const onFiles = (
 /** 名前を取る deno の subcommand の入口。args の後に targets を置く。 */
 const denoFiles = (args: string[], targets: string[]) =>
   onFiles(targets, (names) => deno([...args, ...names]));
-/** deno test を、write の許可と子の TMPDIR を dir にして回す。 */
-const denoTestIn = (dir: string) =>
-  onFiles(tests, (names) =>
-    deno([
-      "test",
-      "--allow-read",
-      `--allow-write=${dir}`,
-      "--allow-env",
-      "--allow-run",
-      ...names,
-    ], { TMPDIR: dir }));
 
 /** deno.json の imports の各キーが、.ts の import の指定子から使われていること。 */
 async function importKeys(): Promise<Run> {
@@ -774,26 +773,27 @@ async function importKeys(): Promise<Run> {
     );
   }
   const keys = Object.keys(imports);
-  // gitFiles と同じく、並べた exec の全部を待ち、投げたものを全部出す
-  const infos = await Promise.allSettled(ts.map((f) =>
-    denoFiles([
+  // 並べた exec は全部待ち、投げたものを全部出す
+  const infos = await Promise.all(ts.map((f) =>
+    deno([
       "info",
       "--json",
       "--no-config",
       "--no-lock",
       "--no-npm",
       "--no-remote",
-    ], [f])
+      dotSlash(f),
+    ]).then((r) => ({ f, r }), (reason: unknown) => ({ f, reason }))
   ));
   const problems: string[] = [];
   const specifiers = new Set<string>();
-  for (const [i, run] of infos.entries()) {
-    const f = ts[i];
-    if (run.status === "rejected") {
-      problems.push(`${f}: ${describe(run.reason)}`);
+  for (const info of infos) {
+    const { f } = info;
+    if ("reason" in info) {
+      problems.push(`${f}: ${describe(info.reason)}`);
       continue;
     }
-    const r = run.value;
+    const { r } = info;
     if (r.code !== 0) {
       problems.push(`${f}: ${exited("deno info", r)}`);
       continue;
@@ -811,11 +811,21 @@ async function importKeys(): Promise<Run> {
     );
     return fail(problems.join("\n"));
   }
-  const unused = keys.filter((key) =>
-    ![...specifiers].some((s) =>
-      s === key || (key.endsWith("/") && s.startsWith(key))
-    )
-  );
+  /** キーが接頭辞として当たる形。無ければ undefined。 */
+  const prefixOf = (key: string) => {
+    if (key.endsWith("/")) return key;
+    const value = imports[key];
+    return typeof value === "string" && /^(?:npm|jsr):/.test(value) &&
+        !value.endsWith("/") && !(`${key}/` in imports)
+      ? `${key}/`
+      : undefined;
+  };
+  const unused = keys.filter((key) => {
+    const prefix = prefixOf(key);
+    return ![...specifiers].some((s) =>
+      s === key || (prefix !== undefined && s.startsWith(prefix))
+    );
+  });
   return unused.length
     ? fail(
       unused.map((key) =>
@@ -830,7 +840,14 @@ async function denoTest(): Promise<Run> {
   if (testTmp === undefined) throw new Error("deno test の段の TMPDIR が無い");
   const { path, remove } = testTmp;
   // 段の結果を先に決め、TMPDIR を消せなければそれに足す
-  const r = await denoTestIn(path).catch((e) => fail(describe(e)));
+  const r = await deno([
+    "test",
+    "--allow-read",
+    `--allow-write=${path}`,
+    "--allow-env",
+    "--allow-run",
+    ...tests.map(dotSlash),
+  ], path).catch((e) => fail(describe(e)));
   try {
     await remove();
     return r;
@@ -901,7 +918,7 @@ for (const r of results) {
   }
 }
 for (const message of writeErrors) err(enc.encode(`${self}: ${message}\n`));
-reported();
+dropReportedRecords();
 await finish(
   state === "1" || writeErrors.size > 0 || !results.every(passed) ? 1 : 0,
 );

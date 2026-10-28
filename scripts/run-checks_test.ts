@@ -367,6 +367,16 @@ Deno.test("引数・TMPDIR・出力の経路と順", async () => {
         );
       })
     ),
+    withRepo({ "a_test.ts": passingTest }, async (dir) => {
+      const r = await runChecks(dir, "0", { TMPDIR: ".git/tmp" });
+      expect(
+        "TMPDIR が相対パスなら、deno test の段の TMPDIR を作らずに段の前で落ちる",
+        r.code === 1 && !r.stdout.includes("==") &&
+          r.stderr.includes("TMPDIR (.git/tmp) が絶対パスでない") &&
+          r.stderr.includes("検査の段は回していない"),
+        r.stderr,
+      );
+    }),
     withRepo({ "a.ts": emptyModule }, async (dir) => {
       const r = await runChecks(dir, "0", { TMPDIR: "" });
       expect(
@@ -644,6 +654,37 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
           !r.stderr.includes('"dir/" が、どの') &&
           r.stdout.includes(passedHead("deno check")),
         `${r.stdout}\n${r.stderr}`,
+      );
+    }),
+    withRepo({
+      "deno.json": JSON.stringify({
+        imports: {
+          n: "npm:left-pad@1.3.0",
+          j: "jsr:@std/path@1.0.8",
+          both: "npm:left-pad@1.3.0",
+          "both/": "./lib/",
+          local: "./lib/a.ts",
+        },
+      }),
+      "lib/a.ts": "export const a = 1;\n",
+      "main.ts":
+        'import "n/index.js";\nimport "j/posix";\nimport "both/a.ts";\nimport "local/a.ts";\n',
+    }, async (dir) => {
+      // deno check が npm から取ろうとするのを、届かない registry ですぐ落とす
+      const r = await runChecks(dir, "0", {
+        NPM_CONFIG_REGISTRY: "http://127.0.0.1:9/",
+      });
+      const section = sectionOf(r.stderr, "deno.json の imports");
+      const reported = ["n", "j", "both", "both/", "local"].filter((key) =>
+        section.includes(`imports の "${key}" が、どの .ts の`)
+      );
+      // canon: facts/deno/import-map-prefix-keys の「deno.json の imports の展開」
+      expect(
+        `npm:・jsr: のキーはキー + / の接頭辞でも使われる (報告されたもの: ${
+          reported.join(" ")
+        })`,
+        JSON.stringify(reported) === JSON.stringify(["both", "local"]),
+        r.stderr,
       );
     }),
     withRepo({
