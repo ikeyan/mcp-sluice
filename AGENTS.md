@@ -34,15 +34,18 @@
 - `.claude/settings.json` は ikeyan-skills と superpowers の plugin を宣言する。入り方は環境で違う:
   - Claude Code on the web: 公式 docs (2026-10-28) によると、届くのは claude.ai の account と組織で有効にした plugin。このリポの宣言は手元の Claude Code 向け (canon: facts/claude-code/cloud-session-ignores-repo-declared-plugins)。
   - 手元の Claude Code: 各利用者が shell で入れる (canon: facts/claude-code/external-plugin-requires-per-user-install-trust)。
-    - 前提: 公式の marketplace (`claude-plugins-official`) が登録されている。Claude Code が最初の対話のセッションで足すので、対話のセッションを開いたことのない機械では `claude plugin marketplace add anthropics/claude-plugins-official` で足す。
-    - 手順:
+    - 前提: 公式の marketplace (`claude-plugins-official`) が登録されている。
+      - 最初の対話のセッションで Claude Code が足す。
+      - 対話のセッションを開いたことのない機械では、先に `claude plugin marketplace add anthropics/claude-plugins-official` で足す。
+    - 手順 (cwd はこのリポのルート):
       1. marketplace を足す: `claude plugin marketplace add ikeyan/agent-files` (`ikeyan` の名前で登録される)。
       2. plugin を入れる: `claude plugin install ikeyan-skills@ikeyan --scope project` と `claude plugin install superpowers@claude-plugins-official --scope project`。
+    - cwd がリポのルートでなくても、`--scope project` はエラーにならずに cwd の `.claude/settings.json` に書く (リポのルートの `.claude/settings.json` には書かない)。
 
 ## このリポの仕様
 
 - 仕様の正本は [docs/design.md](docs/design.md)。実装が設計と食い違ったら、同じ commit でどちらかを直して揃える。
-- 設計の根拠にした外部依存の事実は、design.md に日付と確かめ方を添えて書いてある。実装で使う前に、canon に出典つきで足す。
+- 設計の根拠にした外部依存の事実は、design.md の各出典に確認した日を添えて書いてある。実装で使う前に、canon に出典つきで足す。
 
 ## このリポの検証
 
@@ -50,7 +53,11 @@
 - 単一検証コマンドは `./verify.sh`。CI も同じものを回す。
 - 規則の本文は次のファイルの先頭にある。変えるときはそこを直す:
   - `verify.sh`:
-    - 事前条件と入力 (引数・`$0`・消す環境変数)。
+    - 事前条件。
+    - 入力:
+      - 引数。
+      - `$0`。
+      - 消す環境変数。
     - hook の状態ごとの扱い。
     - TMPDIR の値ごとの扱い。
   - `scripts/run-checks.ts`:
@@ -108,8 +115,11 @@
 
 ## 外部依存の事実
 
-- コードとコメントは、事実の本文を置かず canon を参照で引く。
-- canon を読めない環境では、一次情報 (仕様・ソース・公式 docs) を直接確かめる。
+- コードとコメントは、外部依存に依る制約の文の末尾に canon の参照を添える (writing-comments)。
+- canon を読めない環境では、一次情報を直接確かめる。一次情報は次のもの:
+  - 仕様。
+  - ソース。
+  - 公式 docs。
 
 ## 文書の言語
 
