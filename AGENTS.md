@@ -58,7 +58,7 @@
 ## このリポの検証
 
 - clone したら、まず `./verify.sh` を 1 回回す。pre-push の hook (`PUSH_OK=1` の判定) は、このとき入る。
-- `hooks/pre-push` を変える checkout・pull の後も、`./verify.sh` を回す。git が呼ぶ hook の写しの状態ごとの扱い (前の版の写しを置き換えるコマンドを示すことを含む) は、`verify.sh` の先頭の「hook」にある。
+- `hooks/pre-push` を変える checkout・pull の後も、`./verify.sh` を回す。git が呼ぶのは common git dir の hook の写しで、`verify.sh` が状態ごとに扱う (前の版の写しを置き換えるコマンドを示すことを含む)。
 - 単一検証コマンドは `./verify.sh`。CI も同じものを回す。
 - 規則の本文は次のファイルの先頭にある。変えるときはそこを直す:
   - `verify.sh`:
