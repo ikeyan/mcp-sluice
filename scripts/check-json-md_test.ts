@@ -12,13 +12,20 @@ const dec = new TextDecoder();
 const tmpdir = Deno.env.get("TMPDIR");
 if (!tmpdir) throw new Error("TMPDIR が空。./verify.sh から回す");
 
+/** dir を作って fn に渡し、終われば消す。fn が投げたら、消せなくても fn の例外を投げる (消せないことは stderr に出す)。 */
 const withTempDir = async <T>(fn: (dir: string) => Promise<T>): Promise<T> => {
   const dir = await Deno.makeTempDir({ dir: tmpdir });
+  let result: T;
   try {
-    return await fn(dir);
-  } finally {
-    await Deno.remove(dir, { recursive: true });
+    result = await fn(dir);
+  } catch (e) {
+    await Deno.remove(dir, { recursive: true }).catch((left) =>
+      console.error(`${dir} を消せない — ${left}`)
+    );
+    throw e;
   }
+  await Deno.remove(dir, { recursive: true });
+  return result;
 };
 
 /** files を置いた一時ディレクトリを cwd にして check-json-md.ts を回す。値が null のパスはディレクトリにし、Uint8Array はそのバイトで書く。引数の既定は null でないパスの全部。 */
@@ -75,6 +82,7 @@ const labels = {
   anchor: "anchor が見出しに無い。リンク先の見出しの id に合わせる",
   notMd:
     ".md でないファイルの行の anchor (L10 の形) の他は、検査できない。L<行番号> にするか、anchor を外す",
+  dirAnchor: "ディレクトリへのリンクの anchor は検査できない。anchor を外す",
 };
 /** file の、link のリンク先が無い違反の行。 */
 const missingLine = (link: string, file = "a.md") =>
@@ -185,6 +193,9 @@ const textElements: (
   ].map((e) => ({ open: `<${e}>`, close: `</${e}>`, filtered: true as const })),
   { open: "<textarea/>", close: "</textarea>", filtered: true },
   { open: "<style\t>", close: "</style\n>", filtered: true },
+  // CR は parse の前の normalize が LF にする (canon: facts/markdown-it/render-html)
+  { open: "<title\r>", close: "</title\r>", filtered: true },
+  { open: "<xmp >", close: "</xmp >", filtered: true },
   // 閉じのタグは tagfilter が文字にするので、文書の終わりまで textarea の中
   {
     open: "<textarea\f>",
@@ -250,9 +261,10 @@ const foreignCases = ([
   // tagfilter に無い noscript は、svg・math の直下では外来の要素で、中の a も要素
   ["svg", "noscript", true],
   ["math", "noscript", true],
-  // 統合点 (svg の desc・math の mi) の中は HTML の規則に戻る。noscript の中身は文字で、style は tagfilter が文字にするので中の a は要素
+  // 統合点 (svg の desc・math の mi) の中は HTML の規則に戻り、noscript の中身は文字
   ["svg", "desc><noscript", false],
   ["math", "mi><noscript", false],
+  // 統合点の中の style は tagfilter が文字にするので、中の a は要素
   ["svg", "desc><style", true],
   ["math", "mi><style", true],
 ] as const).flatMap(([outer, inner, seen]) => {
@@ -425,7 +437,7 @@ const cases: {
     ],
   },
   {
-    // canon: facts/url/parser-strips-c0-space-and-tab-newline
+    // URL の parser は前後の C0 制御文字と空白を落とし、中の tab と改行を消す (canon: facts/url/parser-strips-c0-space-and-tab-newline)
     name: "生の HTML の属性の値: 前後の C0 制御文字と空白、中の tab と改行",
     files: {
       "b.md": "",
@@ -526,7 +538,7 @@ const cases: {
     ],
   },
   {
-    // canon: facts/github/blob-line-anchors
+    // GitHub の docs が示す行の anchor は、ファイルの L<行番号> だけ (canon: facts/github/blob-line-anchors)
     name: ".md でないファイルとディレクトリの anchor",
     files: {
       LICENSE: "",
@@ -538,8 +550,8 @@ const cases: {
     stderr: [
       `a.md: ${labels.notMd} — LICENSE#L10-L20`,
       `a.md: ${labels.notMd} — LICENSE#intro`,
-      `a.md: ${labels.notMd} — docs#x`,
-      `a.md: ${labels.notMd} — docs#L10`,
+      `a.md: ${labels.dirAnchor} — docs#x`,
+      `a.md: ${labels.dirAnchor} — docs#L10`,
     ],
   },
   {
@@ -555,7 +567,7 @@ const cases: {
     ],
   },
   {
-    // canon: facts/github/heading-anchor-ids の表の行
+    // GitHub が付けた見出しの id の実測 (canon: facts/github/heading-anchor-ids の表の行)
     name: "見出しの id: 画像の alt・HTML の alt・_・日本語",
     files: {
       "logo.png": "",
@@ -727,11 +739,7 @@ const model = (url: string): keyof typeof labels | undefined => {
       else if (out.pop() === undefined) return "outside";
     }
   }
-  const isMd = known.some((f) =>
-    f.endsWith(".md") && f.split("/").length === out.length &&
-    f.split("/").every((s, i) => s === out[i])
-  );
-  const isFile = known.some((f) =>
+  const file = known.find((f) =>
     f.split("/").length === out.length &&
     f.split("/").every((s, i) => s === out[i])
   );
@@ -748,7 +756,10 @@ const model = (url: string): keyof typeof labels | undefined => {
   } catch {
     return "malformed";
   }
-  if (!isMd) return isFile && /^L\d+$/.test(anchor) ? undefined : "notMd";
+  if (file === undefined) return "dirAnchor";
+  if (!file.endsWith(".md")) {
+    return /^L\d+$/.test(anchor) ? undefined : "notMd";
+  }
   return "anchor";
 };
 

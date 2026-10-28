@@ -37,7 +37,9 @@
  *   - 木構築が捨てる開きタグ (body の中の head・frame、select の中の a など)。
  * - 木構築は閉じない a などを後の要素に複製するので、同じ違反が重なる (上の「同じ違反の行は 1 回だけ」。canon: facts/parse5/parse-tree-attributes)。
  * - 属性の名前は小文字。外来の要素の xlink:href などは prefix つきの名前で見る。値は引用符を外して文字参照を戻したもの。U+0000 と `&#0;` は U+FFFD になり、値の一部として残る (canon: facts/markdown-it/render-html、facts/parse5/parse-tree-attributes)。
- * - 値は、WHATWG URL の parser の前処理に合わせ、前後の C0 制御文字と空白を落とし、中の tab と改行を消してから扱う (canon: facts/url/parser-strips-c0-space-and-tab-newline)。
+ * - 値は、WHATWG URL の parser の前処理に合わせて、次の順に直してから扱う (canon: facts/url/parser-strips-c0-space-and-tab-newline):
+ *   1. 前後の C0 制御文字と空白を落とす。
+ *   2. 中の tab と改行を消す。
  * - 属性の類 (attributeClasses。canon: facts/html/url-valued-attributes の一覧と「値の形」) と値の類ごとの扱い:
  *
  *   | 属性の類 | 外部のスキーム (`http:`・`mailto:` など) | `//` で始まる | 空 | fragment だけ (`#x`) | リポ内に在る | リポ内に無い |
@@ -58,8 +60,8 @@
  * - 辿った先が、引数のどれかと segment ごとに綴り (大文字小文字を含む) まで一致するか、どれかの親ディレクトリ (ルートを含む) でなければ「リンク先が無い」違反。
  * - anchor (空なら見ない。%-decode できなければ「不正な %-エンコード」違反):
  *   - 辿った先が `.md` の引数: その見出しの id のどれかと一致すること。id は github-slugger の規則で作る (canon: facts/github/heading-anchor-ids)。
- *   - 辿った先が `.md` でないファイル: 行の anchor `L<行番号>` だけを受ける (canon: facts/github/blob-line-anchors)。他の形 (範囲の `L10-L20` を含む) は、GitHub の docs に綴りが無く検査できないので違反。
- *   - 辿った先がディレクトリ: GitHub の docs に行の anchor の扱いが無く検査できないので、どの形も違反。
+ *   - 辿った先が `.md` でないファイル: 行の anchor `L<行番号>` だけを受ける。他の形 (範囲の `L10-L20` を含む) は検査できないので違反 (canon: facts/github/blob-line-anchors)。
+ *   - 辿った先がディレクトリ: どの形も検査できないので違反 (canon: facts/github/blob-line-anchors の「docs に無いもの」)。直し方は anchor を外すこと。
  *   - 範囲とディレクトリを外せる条件: canon の facts/github/blob-line-anchors の「確かめ方」で GitHub の描画を確かめたとき。効く形を受ける形に足す。
  * - ファイルを読めない (無い、を含む) か UTF-8 として不正なら、そのファイル自身の違反にする。そういう .md への anchor は見ない。
  * - 違反の行は `<file>: <何が>。<どう直すか> — <リンクか原因の文言>`。
@@ -76,16 +78,18 @@ if (Deno.args.length === 0) {
   console.error(`${self}: 引数が無い。${passPaths}`);
   Deno.exit(2);
 }
+/** 不正な引数の違反の行の、引数までの部分。 */
+const argHead = (f: string) => `${self}: 引数 ${JSON.stringify(f)}`;
 const badArgs = Deno.args.flatMap((f) =>
   f.split("/").some((s) => s === "" || s === "." || s === "..")
     ? [
-      `${self}: 引数 ${
-        JSON.stringify(f)
+      `${
+        argHead(f)
       } が、正規の相対パスでない (先頭の /、空・.・.. の segment のどれかを持つ)。${passPaths}`,
     ]
     : checkedExts.some((e) => !f.endsWith(e) && f.toLowerCase().endsWith(e))
     ? [
-      `${self}: 引数 ${JSON.stringify(f)} の拡張子が ${
+      `${argHead(f)} の拡張子が ${
         checkedExts.join("・")
       } と大文字小文字だけ違う。ファイルの拡張子を小文字にする`,
     ]
@@ -100,8 +104,9 @@ const markdownFiles = Deno.args.filter((f) => f.endsWith(".md"));
 
 /** segment の列の鍵は JSON にする (segment は decode した `/` や NUL を含みうるので)。 */
 const key = (segments: string[]) => JSON.stringify(segments);
-/** 引数のファイルの鍵。 */
-const fileKeys = new Set(Deno.args.map((f) => key(f.split("/"))));
+/** リポのルートからの相対パスの鍵。 */
+const pathKey = (path: string) => key(path.split("/"));
+const fileKeys = new Set(Deno.args.map(pathKey));
 /** リンク先として在るもの: 引数のファイルと、その親ディレクトリ (ルートを含む) の鍵。 */
 const linkTargets = new Set(
   Deno.args.flatMap((f) => {
@@ -311,7 +316,7 @@ const markdown = new Map<
 for (const file of markdownFiles) {
   const text = await readOrReport(file);
   const tokens = text === undefined ? undefined : parse(text);
-  markdown.set(key(file.split("/")), {
+  markdown.set(pathKey(file), {
     file,
     parsed: tokens && { tokens, anchors: anchorsOf(tokens) },
   });
@@ -356,9 +361,16 @@ for (const { file, parsed } of markdown.values()) {
       continue;
     }
     const linked = markdown.get(at);
+    if (!fileKeys.has(at)) {
+      report(
+        file,
+        `ディレクトリへのリンクの anchor は検査できない。anchor を外す — ${url}`,
+      );
+      continue;
+    }
     if (linked === undefined) {
-      // 行の anchor の形は canon: facts/github/blob-line-anchors
-      if (!fileKeys.has(at) || !/^L\d+$/.test(anchor)) {
+      // GitHub の docs が示す行の anchor は L<行番号> だけ (canon: facts/github/blob-line-anchors)
+      if (!/^L\d+$/.test(anchor)) {
         report(
           file,
           `.md でないファイルの行の anchor (L10 の形) の他は、検査できない。L<行番号> にするか、anchor を外す — ${url}`,
