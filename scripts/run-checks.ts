@@ -54,7 +54,7 @@
  * - 版:
  *   - deno: denoRange (下の定数)。このプロセスを動かす deno を見る (段の子も同じ PATH で引く)。
  *   - shellcheck: shellcheckVersion だけ。版で出す指摘が違う (canon: facts/shellcheck/sc2015-version-difference)。
- *   - git: 2.31 以降 (verify.sh の --path-format)。
+ *   - git: verify.sh の事前条件 (verify.sh が確かめる)。
  *   - 範囲を広げる・版を上げるとき: このファイルが引く canon の事実を新しい版で測り直し、同じ commit で .github/workflows/verify.yml・AGENTS.md・この定数を揃える。
  * - 名前: git が知るファイル (追跡と、無視されない未追跡) を -z で受ける (canon: facts/git/path-output-quoting)。次の述語を全部満たす名前だけを処理する。外れる名前が 1 つでもあれば、理由と名前 (バイトを escape したもの) を出して、段を回さずに落ちる。
  *   - UTF-8 として正しい。不正な名前はコマンドへ渡す引数 (文字列) で表せない。
