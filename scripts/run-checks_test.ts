@@ -78,24 +78,19 @@ async function writeFiles(dir: string, files: Record<string, string>) {
   }
 }
 
+/** dir に fixture のリポを作る。 */
+async function makeRepo(dir: string, files: Record<string, string>) {
+  await run("git", ["init", "-q", "--template=", dir]);
+  await writeFiles(dir, { "deno.json": "{}", ...files });
+}
+
 /** fixture のリポを作って fn に渡し、終われば消す。 */
 const withRepo = <T>(
   files: Record<string, string>,
   fn: (dir: string) => Promise<T>,
 ): Promise<T> =>
   withTempDir(async (dir) => {
-    await run("git", [
-      "init",
-      "-q",
-      "--template=",
-      "--object-format=sha1",
-      dir,
-    ]);
-    await writeFiles(dir, {
-      "deno.json": "{}",
-      ".agent-sync/generated": "",
-      ...files,
-    });
+    await makeRepo(dir, files);
     return await fn(dir);
   });
 
@@ -129,23 +124,23 @@ const verifyFlags = await withTempDir(async (dir) => {
   return args.slice(1, script);
 });
 
-const spawnChecks = (
-  dir: string,
-  state: string,
-  env: Record<string, string> = {},
-) =>
-  spawn("deno", {
+/** env の undefined の変数は消す。 */
+type EnvChange = Record<string, string | undefined>;
+
+const spawnChecks = (dir: string, state: string, change: EnvChange = {}) => {
+  const env = { ...baseEnv, ...change };
+  for (const [name, value] of Object.entries(env)) {
+    if (value === undefined) delete env[name];
+  }
+  return spawn("deno", {
     args: ["run", ...verifyFlags, `${root}/scripts/run-checks.ts`, state],
     cwd: dir,
-    env: { ...baseEnv, ...env },
+    env: env as Record<string, string>,
     clearEnv: true,
   });
+};
 
-async function runChecks(
-  dir: string,
-  state: string,
-  env: Record<string, string> = {},
-) {
+async function runChecks(dir: string, state: string, env: EnvChange = {}) {
   const r = await spawnChecks(dir, state, env).output();
   return {
     code: r.code,
@@ -179,58 +174,56 @@ const collector = () => {
   };
 };
 
-/** git の blob の id (sha1)。git hash-object --no-filters と独立に求める。 */
-const blobId = async (content: string): Promise<string> => {
-  const body = enc.encode(content);
-  const header = enc.encode(`blob ${body.length}\0`);
-  const all = new Uint8Array(header.length + body.length);
-  all.set(header);
-  all.set(body, header.length);
-  return Array.from(
-    new Uint8Array(await crypto.subtle.digest("SHA-1", all)),
-    (b) => b.toString(16).padStart(2, "0"),
-  ).join("");
-};
+/** HOME を差し替えても deno が同じ cache を使うように、DENO_DIR を固定する。 */
+const denoDir: string =
+  JSON.parse(await run("deno", ["info", "--json"])).denoDir;
 
-Deno.test("shellcheck から除くのは、記録した id と今の中身が同じ .sh だけ", async () => {
+Deno.test("shellcheck は利用者の SHELLCHECK_OPTS と .shellcheckrc を読まない", async () => {
+  // 次元: canon: facts/shellcheck/environment-and-config-inputs の入力の目録
   const { failures, expect } = collector();
-  await Promise.all([
-    withRepo({
-      "bad.sh": bad,
-      ".agent-sync/generated": `bad.sh\t${await blobId(bad)}\n`,
-    }, async (dir) => {
-      const r0 = await runChecks(dir, "0");
-      expect("同じ中身・引数 0", r0.code === 0, r0.stderr);
-      const r1 = await runChecks(dir, "1");
+  const disable = "disable=SC2086\n";
+  const rows: [string, (outer: string) => Promise<EnvChange>][] = [
+    [
+      "SHELLCHECK_OPTS",
+      () => Promise.resolve({ SHELLCHECK_OPTS: "--exclude=SC2086" }),
+    ],
+    ["リポの親の .shellcheckrc", async (outer) => {
+      await Deno.writeTextFile(`${outer}/.shellcheckrc`, disable);
+      return {};
+    }],
+    ["リポの親の shellcheckrc", async (outer) => {
+      await Deno.writeTextFile(`${outer}/shellcheckrc`, disable);
+      return {};
+    }],
+    ["HOME の .shellcheckrc", async (outer) => {
+      await Deno.writeTextFile(`${outer}/.shellcheckrc`, disable);
+      return { HOME: outer, DENO_DIR: denoDir };
+    }],
+    ["XDG_CONFIG_HOME の shellcheckrc", async (outer) => {
+      await Deno.writeTextFile(`${outer}/shellcheckrc`, disable);
+      return { XDG_CONFIG_HOME: outer };
+    }],
+    [
+      "XDG_CONFIG_HOME が未設定で HOME/.config の shellcheckrc",
+      async (outer) => {
+        await writeFiles(outer, { ".config/shellcheckrc": disable });
+        return { HOME: outer, DENO_DIR: denoDir, XDG_CONFIG_HOME: undefined };
+      },
+    ],
+  ];
+  await Promise.all(rows.map(([name, prepare]) =>
+    withTempDir(async (outer) => {
+      const dir = `${outer}/repo`;
+      await makeRepo(dir, { "bad.sh": bad });
+      const r = await runChecks(dir, "0", await prepare(outer));
       expect(
-        "同じ中身・引数 1 (段は全部通る)",
-        r1.code === 1 && !r1.stderr.includes("落ちた"),
-        r1.stderr,
-      );
-    }),
-    withRepo({
-      "bad.sh": bad,
-      ".agent-sync/generated": `bad.sh\t${await blobId(
-        '#!/bin/sh\necho "$1"\n',
-      )}\n`,
-    }, async (dir) => {
-      const r = await runChecks(dir, "0");
-      expect(
-        "手を入れた写し",
+        name,
         r.code === 1 && r.stderr.includes("== shellcheck: 落ちた") &&
-          r.stderr.includes("./bad.sh"),
+          r.stderr.includes("SC2086"),
         r.stderr,
       );
-    }),
-    withRepo({ "bad.sh": bad }, async (dir) => {
-      const r = await runChecks(dir, "0");
-      expect(
-        "記録に無い .sh",
-        r.code === 1 && r.stderr.includes("./bad.sh"),
-        r.stderr,
-      );
-    }),
-  ]);
+    })
+  ));
   deepStrictEqual(failures, []);
 });
 
@@ -545,7 +538,8 @@ const exists = (path: string) =>
     throw e;
   });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const version = "[ \"$1\" = --version ] && { echo 'version: 0.11.0'; exit 0; }";
+const version =
+  "case \" $* \" in *' --version '*) echo 'version: 0.11.0'; exit 0 ;; esac";
 
 /** fake の shellcheck を段で回し、started が出たら signals を送って、結果と、後で survived が書かれたかを返す。 */
 async function interrupt(

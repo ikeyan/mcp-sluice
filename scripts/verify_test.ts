@@ -54,7 +54,6 @@ console.log(JSON.stringify({
     envOther: granted({ name: "env", variable: "HOME" }),
     writeTmpdir: granted({ name: "write", path: tmpdir }),
     readDenoJson: granted({ name: "read", path: "deno.json" }),
-    readGenerated: granted({ name: "read", path: ".agent-sync/generated" }),
     readCwd: granted({ name: "read", path: "." }),
     net: granted({ name: "net" }),
   },
@@ -193,10 +192,9 @@ const realTmpdir = await Deno.realPath(tmpdir);
 const permissions = {
   run: true,
   envTmpdir: true,
-  envOther: false,
+  envOther: true,
   writeTmpdir: true,
   readDenoJson: true,
-  readGenerated: true,
   readCwd: false,
   net: false,
 };

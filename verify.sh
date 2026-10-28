@@ -66,5 +66,6 @@ case $tmpdir in
   ;;
 esac
 # Deno.kill で段のプロセスグループに送るには、パスを付けない --allow-run が要る (canon: facts/deno/command-spawn の「Deno.kill」)。パスで絞った --allow-run で通るようになったら、段が起動するもの (git・shellcheck・deno) に絞る。
+# 段の子の環境から変数を消すには環境を丸ごと写すので、変数を絞らない --allow-env が要る。
 export TMPDIR=$tmpdir
-exec deno run --frozen-lockfile --allow-run --allow-env=TMPDIR --allow-write="$tmpdir" --allow-read=deno.json,.agent-sync/generated scripts/run-checks.ts "$status"
+exec deno run --frozen-lockfile --allow-run --allow-env --allow-write="$tmpdir" --allow-read=deno.json scripts/run-checks.ts "$status"

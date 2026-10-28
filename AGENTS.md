@@ -46,7 +46,7 @@
 - 単一検証コマンドは `./verify.sh`。CI も同じものを回す。
 - 規則の本文は次のファイルの先頭にある。変えるときはそこを直す:
   - `verify.sh`: hook の状態ごとの扱い、消す環境変数、TMPDIR、事前条件。
-  - `scripts/run-checks.ts`: 検査の段と対象、名前の扱い、shellcheck から除くもの、lint の規則、imports の判定、出力の順と終了コード、中断、版の範囲とその上げ方。
+  - `scripts/run-checks.ts`: 検査の段と対象、名前の扱い、段の子の環境、lint の規則、imports の判定、出力の順と終了コード、中断、版の範囲とその上げ方。
   - `scripts/check-json-md.ts`: リンクと anchor の解決。
 - 各検査が見るもの:
   - 段より前: git が知るファイルの名前、作業ツリーに無い追跡ファイル、deno と shellcheck の版。

@@ -41,11 +41,14 @@
  * 入力と環境の定義域:
  * - 引数は 1 つで、verify.sh が hook を揃えた結果 (0 か 1)。外れていれば理由を出して exit 1。
  * - 環境変数 TMPDIR: verify.sh が symlink を解決した絶対パスを渡す。空なら理由を出して exit 1。
- * - cwd はリポのルート。読むファイルは deno.json と .agent-sync/generated だけ。書くのは TMPDIR の下だけ。許可は verify.sh が渡す。
- * - 環境はそのまま段の子に渡す (deno test の段は TMPDIR を差し替える)。git の場所を決める環境変数 (canon: facts/git/local-env-vars-and-hook-env) は verify.sh が消してから起動するので、git は cwd のリポを見る。
+ * - cwd はリポのルート。読むファイルは deno.json だけ。書くのは TMPDIR の下だけ。許可は verify.sh が渡す。
+ * - 環境はそのまま段の子に渡す。差し替えるのは次だけ:
+ *   - deno test の段: TMPDIR。
+ *   - shellcheck (段と版の確かめ): SHELLCHECK_OPTS を消し、`--norc` を付ける。shellcheck は引数の他に SHELLCHECK_OPTS と .shellcheckrc (script の dir とその親、HOME、XDG_CONFIG_HOME) を読み (canon: facts/shellcheck/environment-and-config-inputs)、利用者の指定で手元と CI の結果が分かれる。リポの .shellcheckrc も読まないので、directive は各 script に書く。
+ * - git の場所を決める環境変数 (canon: facts/git/local-env-vars-and-hook-env) は verify.sh が消してから起動するので、git は cwd のリポを見る。
  * - 版:
  *   - deno: denoRange (下の定数)。このプロセスを動かす deno を見る (段の子も同じ PATH で引く)。
- *   - shellcheck: shellcheckVersion だけ。版で出す指摘が違う (canon: facts/shellcheck/sc2015-version-difference)。入力の目録は canon: facts/shellcheck/environment-and-config-inputs。
+ *   - shellcheck: shellcheckVersion だけ。版で出す指摘が違う (canon: facts/shellcheck/sc2015-version-difference)。
  *   - git: 2.31 以降 (verify.sh の --path-format)。
  *   - 範囲を広げる・版を上げるとき: このファイルが引く canon の事実を新しい版で測り直し、同じ commit で .github/workflows/verify.yml・AGENTS.md・この定数を揃える。
  * - 名前: git が知るファイル (追跡と、無視されない未追跡) を -z で受ける (canon: facts/git/path-output-quoting)。次の述語を全部満たす名前だけを処理する。外れる名前が 1 つでもあれば、理由と名前 (バイトを escape したもの) を出して、段を回さずに落ちる。
@@ -57,7 +60,6 @@
  *   - shellcheck・git・deno (check-json-md.ts を除く): 名前に `./` を前置する。先頭の `-` (option)・`!` (deno の除外)・`npm:` など (deno の URL) が名前として読まれる。deno check は `--` の後の名前を無視して cwd 全体を検査する (canon: facts/deno/check-double-dash)。
  *   - check-json-md.ts: 名前を全部、そのまま渡す (canon: facts/deno/run-args-passthrough)。check-json-md.ts はこのファイルの隣のものを起動する。
  * - 拡張子で対象を決める: shellcheck は `*.sh`、deno は `*.ts` (test は `*_test.ts`)。拡張子の無い shell は検査しないので、このリポの shell は `*.sh` と名付ける。対象が無い段は回さずに通す (shellcheck は引数が無いと落ちる。canon: facts/shellcheck/no-files-argument)。
- * - shellcheck から除くもの: `.agent-sync/generated` の行 `<path>\t<id>` のうち、そのファイルの今の `git hash-object --no-filters` が id と等しいもの (agent-sync が置いたままのもので、上流が検査する)。手を入れた写しと、hash を取れないもの (canon: facts/git/hash-object-missing-file) は検査する。
  * - deno lint は cwd の deno.json の lint 設定を読む (canon: facts/deno/lint-file-args-and-rules)。この段は lint が空であることを前提にし、規則を no-unused-vars 1 つに絞る。recommended は deno の版で規則が増え、コードを変えていない CI が落ちうるため。足すときは `--rules-include` を足す。
  * - deno test の許可:
  *   - write: 段の TMPDIR だけ (canon: facts/deno/make-temp-dir-permissions)。Deno.symlink は絞らない write を要る (canon: facts/deno/symlink-requires-unscoped-permissions) ので、test は symlink を ln -s で作る。
@@ -178,16 +180,25 @@ const unlessInterrupted = async () => {
   if (interruption) await interruption;
 };
 
+/** 子の環境の、このプロセスの環境からの差分。 */
+interface EnvChange {
+  set?: Record<string, string>;
+  unset?: string[];
+}
+
 /** 子を自分のプロセスグループで起動し、終わってグループを空にするまで待つ。 */
 async function exec(
   cmd: string,
   args: string[],
-  env?: Record<string, string>,
+  { set = {}, unset = [] }: EnvChange = {},
 ): Promise<Run> {
   if (interruption) throw new Error("中断した");
+  const env = Deno.env.toObject();
+  for (const name of unset) delete env[name];
   const child = new Deno.Command(cmd, {
     args,
-    env,
+    env: { ...env, ...set },
+    clearEnv: true,
     stdin: "null",
     stdout: "piped",
     stderr: "piped",
@@ -324,6 +335,7 @@ function denoVersion(): Promise<Pre> {
 }
 
 const shellcheckVersion = "0.11.0";
+const shellcheckEnv: EnvChange = { unset: ["SHELLCHECK_OPTS"] };
 const shellcheckInstall = [
   `shellcheck ${shellcheckVersion} を PATH の先に置く:`,
   `- https://github.com/koalaman/shellcheck/releases/tag/v${shellcheckVersion} から OS と CPU に合う shellcheck-v${shellcheckVersion}.<os>.<arch>.tar.xz を取り、展開した shellcheck を PATH の先のディレクトリ (~/.local/bin など) に置く。Linux の x86_64 は .github/workflows/verify.yml の shellcheck の手順と同じ (sha256 もそこにある)。`,
@@ -337,7 +349,7 @@ async function shellcheckProbe(): Promise<Pre> {
   });
   let probe: Run;
   try {
-    probe = await exec("shellcheck", ["--version"]);
+    probe = await exec("shellcheck", ["--norc", "--version"], shellcheckEnv);
   } catch (e) {
     if (!(e instanceof Deno.errors.NotFound)) throw e;
     return problem("shellcheck が PATH に無い。");
@@ -390,29 +402,15 @@ if (tests.length) {
   testTmp = Deno.makeTempDirSync({ dir: tmpdir, prefix: "run-checks-" });
 }
 
-const onFiles = (cmd: string, args: string[], targets: string[]) =>
+const onFiles = (
+  cmd: string,
+  args: string[],
+  targets: string[],
+  env?: EnvChange,
+) =>
   targets.length
-    ? exec(cmd, [...args, ...targets])
+    ? exec(cmd, [...args, ...targets], env)
     : Promise.resolve(pass("対象のファイルが無い"));
-
-async function shellcheck(): Promise<Run> {
-  const recorded = new Map(
-    (await Deno.readTextFile(".agent-sync/generated")).split("\n").filter(
-      Boolean,
-    ).map((l) => l.split("\t") as [string, string]),
-  );
-  const sh = withExt(".sh");
-  const unchanged = await Promise.all(sh.map(async (f) => {
-    if (!recorded.has(f)) return false;
-    const r = await exec("git", ["hash-object", "--no-filters", dotSlash(f)]);
-    return r.code === 0 && dec.decode(r.out).trim() === recorded.get(f);
-  }));
-  return onFiles(
-    "shellcheck",
-    [],
-    sh.filter((_, i) => !unchanged[i]).map(dotSlash),
-  );
-}
 
 /** deno.json の imports の各キーが、.ts の import の指定子から使われていること。 */
 async function importKeys(): Promise<Run> {
@@ -476,14 +474,23 @@ async function denoTest(): Promise<Run> {
       "--allow-env",
       "--allow-run",
       ...tests.map(dotSlash),
-    ], { TMPDIR: testTmp });
+    ], { set: { TMPDIR: testTmp } });
   } finally {
     await removeTestTmp();
   }
 }
 
 const steps: [string, () => Promise<Run>][] = [
-  ["shellcheck", shellcheck],
+  [
+    "shellcheck",
+    () =>
+      onFiles(
+        "shellcheck",
+        ["--norc"],
+        withExt(".sh").map(dotSlash),
+        shellcheckEnv,
+      ),
+  ],
   ["deno fmt", () => onFiles("deno", ["fmt", "--check"], ts.map(dotSlash))],
   // --rules-tags= で recommended を外し、no-unused-vars だけを走らせる (canon: facts/deno/lint-file-args-and-rules)
   [
