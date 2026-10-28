@@ -7,7 +7,11 @@
  *    - 作業ツリーに無い追跡ファイル (`git ls-files --deleted`)。deno lint はその名前を黙って飛ばす (canon: facts/deno/missing-file-args)。deno lint が存在しない引数を error にするようになったら外せる。
  *    - deno と shellcheck の版 (下の「版」)。
  *    - deno test の段の TMPDIR を作れること (下の「deno test の段の TMPDIR」)。
- * 2. 段 (下の steps) を回し、全部を待つ。段が共有して書くのは deno の cache (DENO_DIR) だけ。deno.lock は読むだけ: deno.json の lock.frozen で、lock を読む subcommand (check・test・run) は deno.lock が deno.json と食い違えば落ち、書き換えない。fmt・lint は lock を読まない (canon: facts/deno/lock-frozen-config)。
+ * 2. 段 (下の steps) を回し、全部を待つ。段が共有して書くのは deno の cache (DENO_DIR) だけ。
+ *    - deno.lock は読むだけ。deno.json の lock.frozen による (canon: facts/deno/lock-frozen-config):
+ *      - lock を読む subcommand (check・test・run): deno.lock が deno.json と食い違えば落ち、書き換えない。
+ *      - fmt・lint: lock を読まない。
+ *    - 前提: リポの祖先に、このリポを workspace の member に含む deno.json が無い (下の「入力と環境の定義域」の deno)。在ると lock.frozen は効かず、使う lock は workspace のルートの設定と deno.lock になる。
  * 3. 段の出力を steps の順に出す。
  *    - 通った段: 見出しと標準出力を stdout へ、標準エラーを stderr へ。
  *    - 落ちた段: 見出しと両方を stderr へ。
@@ -71,8 +75,9 @@
  *   - deno (deno()):
  *     - 消すもの: 検査の結果を変える変数 (canon: facts/deno/environment-and-config-inputs の「結果を変える」)。
  *     - 残すもの: 同じ canon の「取得だけを変える」「出力の形だけ」の変数。
- *     - 渡すもの: DENO_NO_PACKAGE_JSON=1。deno test の段は、さらに TMPDIR を段の TMPDIR にする。
- *     - リポの祖先に、このリポを workspace の member に含む deno.json があると、deno はその設定を読む。flag で止められず、検出もしない (同じ canon の「設定ファイル」)。
+ *     - 渡すもの: DENO_NO_PACKAGE_JSON=1。
+ *     - deno test の段だけ: TMPDIR を段の TMPDIR にする。
+ *     - リポの祖先に、このリポを workspace の member に含む deno.json があると、deno はその設定を読む。lint の規則 (同じ canon の「設定ファイル」) と lock (このリポの lock.frozen と deno.lock は使われない。canon: facts/deno/lock-frozen-config の「祖先の workspace の member のとき」) が変わる。flag で止められず (--frozen-lockfile もルートの deno.lock と比べる)、検出もしない。
  *   - shellcheck (shellcheck()。段と版の確かめ): SHELLCHECK_OPTS を消し、`--norc` を付ける。
  *     - shellcheck は引数の他に SHELLCHECK_OPTS と .shellcheckrc を読み (canon: facts/shellcheck/environment-and-config-inputs)、利用者の指定で手元と CI の結果が分かれる。
  *     - リポの .shellcheckrc も読まないので、directive は各 script に書く。
@@ -83,7 +88,9 @@
  *   - 版を足す・上げるときは、次を済ませてから、その道具の版の定数 (deno は denoMinor・denoPatches、shellcheck は shellcheckVersion) を変える:
  *     1. 次を新しい版で測り直す。このファイルが引く canon の事実と、deno info --json の形 (下の「deno.json の imports」)。
  *     2. deno: deno lint の recommended に増えた規則の指摘を直す。
- *     3. 同じ commit で .github/workflows/verify.yml を合わせる。deno は deno-version を denoPatches に入る版にする。shellcheck は SHELLCHECK_VERSION と、取る tar.xz の sha256 を shellcheckVersion の版のものにする。
+ *     3. 同じ commit で .github/workflows/verify.yml を合わせる:
+ *        - deno: deno-version を denoPatches に入る版にする。
+ *        - shellcheck: SHELLCHECK_VERSION と、取る tar.xz の sha256 を shellcheckVersion の版のものにする。
  * - 名前: git が知る項目を -z で受ける (canon: facts/git/path-output-quoting)。
  *   - 追跡された項目は `git ls-files -s -t --cached` で種類も受け、次の全部を満たすものだけを処理する (canon: facts/git/repository-shapes の「作業ツリーの項目」)。
  *     - 項目が `<tag> <mode> <object> <stage>\t<名前>` の形 (tag は 1 文字、mode は 6 桁の 8 進、stage は 0〜3)。
@@ -581,7 +588,9 @@ const shellcheckInstall = [
   `  1. https://github.com/koalaman/shellcheck/releases/tag/v${shellcheckVersion} から、OS と CPU に合う shellcheck-v${shellcheckVersion}.<os>.<arch>.tar.xz を取る。`,
   "  2. Linux の x86_64 なら、.github/workflows/verify.yml の sha256 と合うことを確かめる (sha256sum -c)。",
   "  3. 展開した shellcheck を PATH の先のディレクトリ (~/.local/bin など) に置く。",
-  `- Homebrew: macOS で、brew info shellcheck の版が ${shellcheckVersion} のときだけ。brew install shellcheck。`,
+  "- Homebrew (macOS):",
+  `  1. brew info shellcheck で、入る版が ${shellcheckVersion} かを確かめる。違えば release の tar.xz で置く。`,
+  "  2. brew install shellcheck。",
 ].join("\n");
 async function shellcheckProbe(): Promise<Problems> {
   const problem = (message: string): Problems => [
@@ -666,7 +675,17 @@ const denoFiles = (args: string[], targets: string[], tmp?: string) =>
 
 /** deno.json の imports の各キーが、.ts の import の指定子から使われていること。 */
 async function importKeys(): Promise<Run> {
-  const { imports = {} } = JSON.parse(await Deno.readTextFile("deno.json"));
+  const config = JSON.parse(await Deno.readTextFile("deno.json"));
+  if (
+    typeof config !== "object" || config === null || Array.isArray(config)
+  ) {
+    return fail(
+      `deno.json: 最上位がオブジェクトでない。オブジェクトにする — ${
+        JSON.stringify(config)
+      }`,
+    );
+  }
+  const { imports = {} } = config;
   if (
     typeof imports !== "object" || imports === null || Array.isArray(imports)
   ) {

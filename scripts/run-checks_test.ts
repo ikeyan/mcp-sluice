@@ -690,6 +690,18 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
         );
       })
     ),
+    ...['"x"', "[]", "null"].map((config) =>
+      withRepo({ "deno.json": config }, async (dir) => {
+        const r = await runChecks(dir, "0");
+        expect(
+          `deno.json の最上位がオブジェクトでない (${config})`,
+          sectionOf(r.stderr, "deno.json の imports").includes(
+            `deno.json: 最上位がオブジェクトでない。オブジェクトにする — ${config}`,
+          ),
+          r.stderr,
+        );
+      })
+    ),
     ...['"x"', "[]", "null"].map((imports) =>
       withRepo({ "deno.json": `{"imports": ${imports}}` }, async (dir) => {
         const r = await runChecks(dir, "0");
