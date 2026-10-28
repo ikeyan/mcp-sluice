@@ -38,7 +38,7 @@
 ## このリポの仕様
 
 - 仕様の正本は [docs/design.md](docs/design.md)。実装が設計と食い違ったら、同じ commit でどちらかを直して揃える。
-- 設計の根拠にした外部依存の事実は、design.md に日付と確かめ方を添えて書いてある。実装で使う前に、canon に出典つきで足す (下の「外部依存の事実」)。
+- 設計の根拠にした外部依存の事実は、design.md に日付と確かめ方を添えて書いてある。実装で使う前に、canon に出典つきで足す。
 
 ## このリポの検証
 
@@ -86,18 +86,14 @@
 ## このリポの言語
 
 - 製品・テスト・開発用のスクリプトは TypeScript (Deno) で書く。
-- shell は次だけ:
+- shell は次だけ (場所: そこに置く理由):
   - `verify.sh`: 入口と、pre-push の hook の写し。
-  - agent-sync が置くもの:
-    - `hooks/pre-push`
-    - `.agent-sync/sync.sh`
-    - `.claude/skills/pr-workflow/` の shell
+  - `hooks/pre-push`・`.agent-sync/sync.sh`・`.claude/skills/pr-workflow/` の shell: agent-sync が置く。
   - `.github/workflows/verify.yml` の `run`: CI の shellcheck の入手 (sha256 の確かめを含む) と、`./verify.sh` の起動。
 - deno で hook を写すには、run-checks.ts の許可に common git dir への write が要る。hook の写しを `verify.sh` に置くのは、この許可を足さないため。
 
 ## 外部依存の事実
 
-- 確定した契約は canon (`ikeyan/canon` の `facts/<topic>/`) に置き、そこから引く。
 - canon を読めない環境では、一次情報 (仕様・ソース・公式 docs) を直接確かめる。
 
 ## 文書の言語
