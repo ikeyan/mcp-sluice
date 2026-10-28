@@ -1275,7 +1275,7 @@ Deno.test("名前: 処理できない名前があれば段の前で名前を出�
         withRepo({}, async (dir) => {
           for (const n of names) {
             if (n.bytes.includes(0xff)) {
-              // 不正な UTF-8 の名前は Deno の文字列で表せないので、index にだけ入れる
+              // 不正な UTF-8 の名前は Deno の文字列で表せない (canon: facts/deno/strings-encode-lone-surrogates-as-replacement) ので、index にだけ入れる
               await run("sh", [
                 "-c",
                 'git update-index --add --cacheinfo "100644,$(git hash-object -w --stdin </dev/null),$(printf "$1")"',

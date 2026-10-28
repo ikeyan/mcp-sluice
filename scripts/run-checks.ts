@@ -382,7 +382,7 @@ async function exec(
   }).spawn();
   const readers = [child.stdout.getReader(), child.stderr.getReader()];
   const outputs = Promise.all(readers.map(readAll));
-  // 待つまでに reject すると unhandled rejection でこのプロセスが落ち、グループが残る
+  // 待つまでに reject すると unhandled rejection でこのプロセスが落ち、グループが残る (canon: facts/deno/unhandled-rejection-exits)
   outputs.catch(() => {});
   let emptied: Promise<void> | undefined;
   // 終了の経路と exec の finally の両方が呼ぶ
