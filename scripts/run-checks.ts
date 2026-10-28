@@ -61,7 +61,10 @@
  * - 引数は 1 つで、verify.sh が hook を揃えた結果。外れていれば理由を出して exit 2。
  *   - 0: 揃えた。
  *   - 1: 揃えられなかった (理由は verify.sh が出した)。段は回し、最後に exit 1。
- * - 環境変数 TMPDIR: verify.sh が絶対パスにした値を受ける。未設定・空・書けない値なら、deno test の段の TMPDIR を作れないので段の前で exit 1 (test が無ければ使わない)。
+ * - 環境変数 TMPDIR: deno test の段があるとき (test があるとき) だけ使い、その下に段の TMPDIR を作る。verify.sh は絶対パスにした値を渡す。次のときは段の前で exit 1:
+ *   - 未設定。
+ *   - 空。
+ *   - その下に作れない (無い・書けないなど)。
  * - cwd はリポのルート。読むファイルは deno.json だけ。書くのは TMPDIR の下だけ。許可は verify.sh が渡す。
  * - 環境はそのまま段の子に渡す。差し替えるのは次だけ:
  *   - git (git()): git の場所を決める変数 (git rev-parse --local-env-vars の一覧。canon: facts/git/local-env-vars-and-hook-env) を消す。git は cwd のリポを見る。一覧は、どの環境でも同じものを出す (canon の同じページ) ので、このプロセスの環境のまま聞く。聞けなければ理由を出して exit 1。
@@ -625,7 +628,11 @@ const dotSlash = (f: string) => `./${f}`;
 const ts = withExt(exts.ts);
 const tests = ts.filter((f) => f.endsWith("_test.ts"));
 const preProblems = [...listing.problems, ...others.flat()];
-if (preProblems.length === 0 && tests.length) {
+if (tests.length && !tmpdir) {
+  preProblems.push(
+    "TMPDIR が未設定か空で、deno test の段の TMPDIR を作る場所が無い。書けるディレクトリを TMPDIR に設定する",
+  );
+} else if (tests.length && tmpdir && preProblems.length === 0) {
   try {
     // 終了の経路が作りかけを見落とさないように、同期で作る
     const path = Deno.makeTempDirSync({ dir: tmpdir, prefix: "run-checks-" });
@@ -636,9 +643,7 @@ if (preProblems.length === 0 && tests.length) {
     };
   } catch (e) {
     preProblems.push(
-      `deno test の段の TMPDIR を、TMPDIR (${
-        tmpdir ?? "未設定"
-      }) の下に作れない。書けるディレクトリを TMPDIR に設定する — ${
+      `deno test の段の TMPDIR を、TMPDIR (${tmpdir}) の下に作れない。書けるディレクトリを TMPDIR に設定する — ${
         messageOf(e)
       }`,
     );

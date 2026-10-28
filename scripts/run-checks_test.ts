@@ -1,7 +1,7 @@
 /**
  * run-checks.ts を子として、fixture のリポで回す。
  * - fixture は TMPDIR の下の一時ディレクトリの git のリポ。run-checks.ts が読む deno.json を必ず置く。
- * - run-checks.ts に渡す deno の引数は、verify.sh が exec するもの (verifyFlags) と同じにする。
+ * - run-checks.ts に渡す deno の引数は、verify.sh が exec するもの (verifyFlags) と同じにする。許可を広げて確かめる行だけが替える。
  * - 子の環境: このプロセスの環境から git の場所を決める変数 (canon: facts/git/local-env-vars-and-hook-env) を消し、GIT_CONFIG_GLOBAL=/dev/null・GIT_CONFIG_NOSYSTEM=1 で利用者の git の設定を読まないもの。git 2.32 以降を要る (canon: facts/git/config-sources-and-scopes)。
  * - symlink は ln -s で作る。Deno.symlink は絞らない read・write を要り (canon: facts/deno/symlink-requires-unscoped-permissions)、deno test の段の許可では作れない。Deno.symlink が絞った write で通るようになったら替える。
  * - test と、test が起動したものが書くもの:
@@ -157,15 +157,20 @@ const verifyFlags = await withTempDir(async (dir) => {
 /** env の undefined の変数は消す。 */
 type EnvChange = Record<string, string | undefined>;
 
-/** verify.sh と同じ形で run-checks.ts を起動する deno の引数。 */
-const checksArgs = (state: string) => [
+/** run-checks.ts を起動する deno の引数。flags の既定は verify.sh と同じもの。 */
+const checksArgs = (state: string, flags = verifyFlags) => [
   "run",
-  ...verifyFlags,
+  ...flags,
   `${root}/scripts/run-checks.ts`,
   state,
 ];
 
-const spawnChecks = (dir: string, state: string, change: EnvChange = {}) => {
+const spawnChecks = (
+  dir: string,
+  state: string,
+  change: EnvChange = {},
+  flags = verifyFlags,
+) => {
   const env: Record<string, string> = {};
   for (
     const [name, value] of Object.entries({
@@ -177,15 +182,20 @@ const spawnChecks = (dir: string, state: string, change: EnvChange = {}) => {
     if (value !== undefined) env[name] = value;
   }
   return spawn("deno", {
-    args: checksArgs(state),
+    args: checksArgs(state, flags),
     cwd: dir,
     env,
     clearEnv: true,
   });
 };
 
-async function runChecks(dir: string, state: string, env: EnvChange = {}) {
-  const r = await spawnChecks(dir, state, env).output();
+async function runChecks(
+  dir: string,
+  state: string,
+  env: EnvChange = {},
+  flags = verifyFlags,
+) {
+  const r = await spawnChecks(dir, state, env, flags).output();
   return {
     code: r.code,
     stdout: dec.decode(r.stdout),
@@ -313,18 +323,36 @@ Deno.test("引数・TMPDIR・出力の経路と順", async () => {
         r.stderr,
       );
     }),
-    ...([["空", ""], ["未設定", undefined]] as const).map(([name, value]) =>
+    // 未設定の行は、deno が既定の一時の場所に作れる許可 (絞らない --allow-write) でも落ちること
+    ...[
+      { name: "空", value: "", flags: verifyFlags },
+      {
+        name: "未設定",
+        value: undefined,
+        flags: verifyFlags.map((f) =>
+          f.startsWith("--allow-write=") ? "--allow-write" : f
+        ),
+      },
+    ].map(({ name, value, flags }) =>
       withRepo({ "a_test.ts": 'Deno.test("t", () => {});\n' }, async (dir) => {
-        const r = await runChecks(dir, "0", { TMPDIR: value });
+        const r = await runChecks(dir, "0", { TMPDIR: value }, flags);
         expect(
-          `TMPDIR が${name}なら、deno test の段の TMPDIR を作れずに段の前で落ちる`,
+          `TMPDIR が${name}なら、deno test の段の TMPDIR を作らずに段の前で落ちる`,
           r.code === 1 && !r.stdout.includes("==") &&
-            r.stderr.includes("の下に作れない") &&
+            r.stderr.includes("TMPDIR が未設定か空") &&
             r.stderr.includes("検査の段は回していない"),
           r.stderr,
         );
       })
     ),
+    withRepo({ "a.ts": "export {};\n" }, async (dir) => {
+      const r = await runChecks(dir, "0", { TMPDIR: "" });
+      expect(
+        "test が無ければ、TMPDIR が空でも通る",
+        r.code === 0 && r.stdout.includes(passedHead("deno check")),
+        `${r.stdout}\n${r.stderr}`,
+      );
+    }),
     withRepo({ "a_test.ts": 'Deno.test("t", () => {});\n' }, async (dir) => {
       const r = await runChecks(dir, "0", { TMPDIR: `${dir}/.git/nowhere` });
       expect(
