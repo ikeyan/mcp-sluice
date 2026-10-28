@@ -11,7 +11,7 @@
  * - 次のときは何も検査せず exit 2:
  *   - 引数が無い。
  *   - どれかが正規の相対パスでない (先頭の `/`、空・`.`・`..` の segment)。
- *   - どれかの拡張子が `.json`・`.md` と大文字小文字だけ違う (`.JSON`・`.Md` など。run-checks.ts が段の前で落とすので、渡されない)。
+ *   - どれかの拡張子が `.json`・`.md` と大文字小文字だけ違う (`.JSON`・`.Md` など)。
  * - 違反があれば stderr に出して exit 1。同じ違反の行は 1 回だけ出す。無ければ件数を stdout に出して exit 0。
  *
  * リンク:
@@ -60,16 +60,22 @@
  * - 辿った先が、引数のどれかと segment ごとに綴り (大文字小文字を含む) まで一致するか、どれかの親ディレクトリ (ルートを含む) でなければ「リンク先が無い」違反。
  * - anchor (空なら見ない。%-decode できなければ「不正な %-エンコード」違反):
  *   - 辿った先が `.md` の引数: その見出しの id のどれかと一致すること。id は github-slugger の規則で作る (canon: facts/github/heading-anchor-ids)。
- *   - 辿った先が `.md` でないファイル: 行の anchor `L<行番号>` の形だけを受ける。他の形 (範囲の `L10-L20` を含む) は検査できないので違反 (canon: facts/github/blob-line-anchors)。
- *     - 行番号は 10 進の数として読む。`L01` は `L1` と同じ。
- *     - 行番号が 1 から行数 (下の「行数」) までに無ければ、存在しない行へのリンクとして違反。GitHub の blob の描画も、行数を超える番号と `L0` に行を持たない (同じ canon の「実測」)。
- *     - 行数を数えるファイルを読めなければ、リンクを置いた .md の違反。
- *   - 辿った先がディレクトリ: どの形も検査できないので違反 (同じ canon の「docs に無いもの」)。直し方は anchor を外すこと。
- * - 行数は、ファイルのバイトの LF の数。最後のバイトが LF でなければ 1 を足す。CR は区切りに数えない (CR だけで区切るファイルは 1 行)。空のファイルは 0 行。
- *   - 根拠: GitHub の blob の描画の行の数と、最後のバイトが LF のファイルと LF でないファイルで一致した (canon: facts/github/blob-line-anchors の「実測」)。
- *   - 次は GitHub で測っていない (同じ canon の「測っていないもの」): 空のファイル、CRLF、CR だけの区切り、先頭に 0 のある行番号 (`L01`)、行の強調表示。同じ canon の「確かめ方」で違うと分かれば、数え方と読み方を合わせる。
- * - 検査できない形の違反 (範囲とディレクトリ) は、canon の facts/github/blob-line-anchors の「確かめ方」で GitHub の描画を確かめたときに外せる。外し方は、効く形を受ける形に足すこと。
- * - `.json`・`.md` を読めない (無い、を含む) か UTF-8 として不正なら、そのファイル自身の違反にする。そういう .md への anchor は見ない。`.md` でないファイルは、行の anchor の先のときだけ読む。
+ *   - 辿った先が `.md` でないファイル: 下の「行の anchor」で検査する。
+ *   - 辿った先がディレクトリ: どの形も検査できないので違反 (canon: facts/github/blob-line-anchors の「docs に無いもの」。この canon を以下「blob の canon」と呼ぶ)。直し方は anchor を外すこと。
+ * - 行の anchor:
+ *   - 受ける形は `L<行番号>` で、行番号は `0` か、先頭が 0 でない 10 進の数。1 ≤ 行番号 ≤ 行数 でなければ、存在しない行へのリンクとして違反 (blob の canon の「実測」)。
+ *   - 行数は、ファイルのバイトの LF の数。最後のバイトが LF でなければ 1 を足す。空のファイルは 0 (blob の canon の「実測」)。
+ *     - 行数を数えるのは、行の anchor の先になった .md でないファイルだけ。
+ *     - 読めなければ、リンクを置いた .md の違反。
+ *   - 次は GitHub の描画を測っていない (blob の canon の「測っていないもの」) ので、検査できない形として違反にする:
+ *     - 他の形の anchor (範囲の `L10-L20`、先頭に 0 のある行番号 `L01` を含む)。直し方は L<行番号> にするか、anchor を外すこと。
+ *     - CR を含むファイルへの行の anchor。直し方は anchor を外すこと。測っていない次の区切りを含む:
+ *       - CRLF
+ *       - CR だけ
+ *     - UTF-8 として不正なファイル (テキストでない blob) への行の anchor。直し方は anchor を外すこと。
+ *   - 空のファイルも測っていないが、行数 0 で、どの行の anchor も範囲の外の違反になる。
+ *   - 検査できない形 (上の箇条とディレクトリ) は、blob の canon の「確かめ方」で GitHub の描画を確かめ、行が在ると分かれば、受ける形に足す。
+ * - `.json`・`.md` を読めない (無い、を含む) か UTF-8 として不正なら、そのファイル自身の違反にする。そういう .md への anchor は見ない。
  * - 違反の行は `<file>: <何が>。<どう直すか> — <リンクか原因の文言>`。
  */
 import GithubSlugger from "github-slugger";
@@ -130,6 +136,17 @@ const readBytes = async (
 };
 
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+/** UTF-8 として読んだ文字列。不正なら原因の文言。 */
+const decodeUtf8 = (
+  bytes: Uint8Array,
+): { text: string } | { invalid: string } => {
+  try {
+    return { text: utf8.decode(bytes) };
+  } catch (e) {
+    if (!(e instanceof TypeError)) throw e;
+    return { invalid: messageOf(e) };
+  }
+};
 /** 読めて UTF-8 なら文字列。読めなければ違反を記録して undefined を返す。 */
 const readOrReport = async (file: string): Promise<string | undefined> => {
   const read = await readBytes(file);
@@ -137,12 +154,9 @@ const readOrReport = async (file: string): Promise<string | undefined> => {
     report(file, `読めない。読める通常ファイルにする — ${read.unreadable}`);
     return;
   }
-  try {
-    return utf8.decode(read.bytes);
-  } catch (e) {
-    if (!(e instanceof TypeError)) throw e;
-    report(file, `UTF-8 として不正。UTF-8 で保存し直す — ${messageOf(e)}`);
-  }
+  const decoded = decodeUtf8(read.bytes);
+  if ("text" in decoded) return decoded.text;
+  report(file, `UTF-8 として不正。UTF-8 で保存し直す — ${decoded.invalid}`);
 };
 
 for (const file of jsonFiles) {
@@ -284,7 +298,7 @@ const targetsOf = (tokens: Token[]): Target[] =>
 
 type Resolved = { segments: string[] } | { problem: string };
 const malformed =
-  "不正な %-エンコード。正しい %XX の列にする (% そのものは %25)";
+  "不正な %-エンコード。% の後に 16 進 2 桁を置くか、%XX の列を UTF-8 の 1 文字に完成させる (% そのものは %25)";
 
 /** %-decode できなければ undefined。 */
 const percentDecode = (s: string): string | undefined => {
@@ -341,13 +355,27 @@ for (const file of markdownFiles) {
   markdownParsed.push([file, parsed]);
 }
 
-/** file の行数 (上の「行数」)。読めなければ原因の文言。 */
+/** 行の anchor の先の file の行数 (上の「行の anchor」)。読めなければ原因の文言、検査できないファイルなら違反の文言。 */
 const countLines = async (
   file: string,
-): Promise<{ count: number } | { unreadable: string }> => {
+): Promise<
+  { count: number } | { unreadable: string } | { uncheckable: string }
+> => {
   const read = await readBytes(file);
   if ("unreadable" in read) return read;
   const { bytes } = read;
+  if ("invalid" in decodeUtf8(bytes)) {
+    return {
+      uncheckable:
+        "UTF-8 として不正なファイルへの行の anchor は検査できない。anchor を外す",
+    };
+  }
+  if (bytes.includes(0x0d)) {
+    return {
+      uncheckable:
+        "CR を含むファイルへの行の anchor は検査できない。anchor を外す",
+    };
+  }
   const lfs = bytes.filter((b) => b === 0x0a).length;
   return { count: bytes.length > 0 && bytes.at(-1) !== 0x0a ? lfs + 1 : lfs };
 };
@@ -397,13 +425,12 @@ for (const [file, parsed] of markdownParsed) {
           `ディレクトリへのリンクの anchor は検査できない。anchor を外す — ${url}`,
         );
         break;
-      // GitHub の docs が示す行の anchor は L<行番号> だけ (canon: facts/github/blob-line-anchors)
       case "file": {
-        const line = /^L(\d+)$/.exec(anchor);
+        const line = /^L(0|[1-9][0-9]*)$/.exec(anchor);
         if (line === null) {
           report(
             file,
-            `.md でないファイルの行の anchor (L10 の形) の他は、検査できない。L<行番号> にするか、anchor を外す — ${url}`,
+            `.md でないファイルの行の anchor (L10 の形。先頭に 0 を置かない) の他は、検査できない。L<行番号> にするか、anchor を外す — ${url}`,
           );
           break;
         }
@@ -413,6 +440,8 @@ for (const [file, parsed] of markdownParsed) {
             file,
             `行の anchor の先を読めない。読める通常ファイルにするか、anchor を外す — ${url}: ${counted.unreadable}`,
           );
+        } else if ("uncheckable" in counted) {
+          report(file, `${counted.uncheckable} — ${url}`);
         } else if (Number(line[1]) < 1 || Number(line[1]) > counted.count) {
           report(
             file,

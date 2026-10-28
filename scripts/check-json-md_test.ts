@@ -1,7 +1,11 @@
 /**
  * check-json-md.ts を子として、TMPDIR の下の一時ディレクトリの fixture に回す。
  * - 表の各行: fixture のファイルと引数に対し、終了コードと stderr の違反の行 (順を問わない集合) が一致すること。
- * - 性質: 生成した相対パスへのリンクと、生成した a/c.json の中身について、報告が、最初の # と、その前の最初の ? で割り、パスを segment ごとに decode して辿り、anchor を decode するモデルと一致すること。
+ * - 性質: 生成した相対パスへのリンクと、生成した a/c.json の中身について、報告がモデルと一致すること。モデルは:
+ *   1. 最初の # と、その前の最初の ? で割る。
+ *   2. パスを segment ごとに decode して辿る。
+ *   3. anchor を decode する。
+ *   4. a/c.json への行の anchor を、形・CR の有無・行数で判定する。
  * - 属性の値の前処理: 前・中・後と U+0000〜U+0020 の全部の組 (そのままの文字と文字参照) で、報告が URL の前処理のモデルと一致すること。
  */
 import fc from "fast-check";
@@ -76,12 +80,16 @@ const assignable = (got: string[], want: string[], prefix: boolean) => {
 
 /** 違反の行の、ファイルの後から — の前まで。 */
 const labels = {
-  malformed: "不正な %-エンコード。正しい %XX の列にする (% そのものは %25)",
+  malformed:
+    "不正な %-エンコード。% の後に 16 進 2 桁を置くか、%XX の列を UTF-8 の 1 文字に完成させる (% そのものは %25)",
   outside: "リポの外を指す。リポ内を指すか、URL で書く",
   missing: "リンク先が無い。git が知るファイルかディレクトリを指す",
   anchor: "anchor が見出しに無い。リンク先の見出しの id に合わせる",
   notMd:
-    ".md でないファイルの行の anchor (L10 の形) の他は、検査できない。L<行番号> にするか、anchor を外す",
+    ".md でないファイルの行の anchor (L10 の形。先頭に 0 を置かない) の他は、検査できない。L<行番号> にするか、anchor を外す",
+  crAnchor: "CR を含むファイルへの行の anchor は検査できない。anchor を外す",
+  nonUtf8Anchor:
+    "UTF-8 として不正なファイルへの行の anchor は検査できない。anchor を外す",
   dirAnchor: "ディレクトリへのリンクの anchor は検査できない。anchor を外す",
   noLine:
     "行の anchor の行がファイルに無い。1 から行数までの番号にするか、anchor を外す",
@@ -559,7 +567,7 @@ const cases: {
   },
   {
     name:
-      "行の anchor の行数: 末尾の LF の有無と CRLF で行数ちょうどは通り、1 つ超えるか 0 は違反。CR だけの区切りは 1 行、空のファイルは 0 行",
+      "行の anchor の行数: 末尾の LF の有無で行数ちょうどは通り、1 つ超えるか 0 は違反。空のファイルは 0 行。CR を含むファイルと UTF-8 として不正なファイルは検査できない",
     files: {
       "lf.txt": "a\nb\n",
       "crlf.txt": "a\r\nb\r\n",
@@ -567,6 +575,7 @@ const cases: {
       "onlylf.txt": "\n",
       "cr.txt": "a\rb\r",
       "empty.txt": "",
+      "bin.dat": new Uint8Array([0x61, 0xff, 0x0a]),
       "a.md": [
         "lf.txt#L2",
         "lf.txt#L3",
@@ -580,17 +589,21 @@ const cases: {
         "cr.txt#L1",
         "cr.txt#L2",
         "empty.txt#L1",
+        "bin.dat#L1",
       ].map((l) => `[l](${l})\n`).join(""),
     },
     code: 1,
     stderr: [
       `a.md: ${labels.noLine} — lf.txt#L3`,
       `a.md: ${labels.noLine} — lf.txt#L0`,
-      `a.md: ${labels.noLine} — crlf.txt#L3`,
+      `a.md: ${labels.crAnchor} — crlf.txt#L2`,
+      `a.md: ${labels.crAnchor} — crlf.txt#L3`,
       `a.md: ${labels.noLine} — nolf.txt#L3`,
       `a.md: ${labels.noLine} — onlylf.txt#L2`,
-      `a.md: ${labels.noLine} — cr.txt#L2`,
+      `a.md: ${labels.crAnchor} — cr.txt#L1`,
+      `a.md: ${labels.crAnchor} — cr.txt#L2`,
       `a.md: ${labels.noLine} — empty.txt#L1`,
+      `a.md: ${labels.nonUtf8Anchor} — bin.dat#L1`,
     ],
   },
   {
@@ -752,14 +765,11 @@ Deno.test("check-json-md.ts の表", async () => {
   deepStrictEqual(failures, []);
 });
 
-/** リンクを置くファイル (a/b/x.md) の他に、git の一覧に載せるファイル。 */
-const known = ["a/b/x.md", "a/n.md", "a b/n.md", "a/c.json"];
-
 /**
  * a/c.json の中身の形 (canon: facts/github/blob-line-anchors の「行の anchor の入力の次元」。空のファイルは JSON でないので上の表で見る)。
  * - rows: 区切りで割った行の数。
  * - terminated: 最後の行の後にも区切りを置くか。
- * - eol: 区切り。CR だけは行を割らない。
+ * - eol: 区切り。CR を含むファイルへの行の anchor は、検査できない違反 (同じ canon の「測っていないもの」)。
  */
 const jsonShape = fc.record({
   rows: fc.integer({ min: 1, max: 3 }),
@@ -771,6 +781,19 @@ type JsonShape = { rows: number; terminated: boolean; eol: string };
 const jsonText = ({ rows, terminated, eol }: JsonShape) =>
   (rows === 1 ? ["[]"] : ["[", ...Array(rows - 2).fill(""), "]"]).join(eol) +
   (terminated ? eol : "");
+
+/** 性質のテストの fixture のファイルと、中身を作る関数。a/b/x.md は links へのリンクを置き、a/c.json は shape の中身。 */
+const propertyFiles: Record<
+  string,
+  (shape: JsonShape, links: string[]) => string
+> = {
+  "a/b/x.md": (_, links) => links.map((p) => `- [l](<${p}>)\n`).join(""),
+  "a/n.md": () => "",
+  "a b/n.md": () => "",
+  "a/c.json": (shape) => jsonText(shape),
+};
+/** git の一覧に載せるファイル。 */
+const known = Object.keys(propertyFiles);
 
 /** a/b/x.md の url のリンクの報告のモデル。known の .md はどれも見出しを持たない。a/c.json は shape の中身。報告が無ければ undefined。 */
 const model = (
@@ -819,16 +842,18 @@ const model = (
   if (file === undefined) return "dirAnchor";
   if (!file.endsWith(".md")) {
     const line = /^L(\d+)$/.exec(anchor);
-    if (line === null) return "notMd";
-    const count = shape.eol === "\r" ? 1 : shape.rows;
-    return Number(line[1]) >= 1 && Number(line[1]) <= count
+    if (line === null || (line[1].length > 1 && line[1].startsWith("0"))) {
+      return "notMd";
+    }
+    if (jsonText(shape).includes("\r")) return "crAnchor";
+    return Number(line[1]) >= 1 && Number(line[1]) <= shape.rows
       ? undefined
       : "noLine";
   }
   return "anchor";
 };
 
-Deno.test("リンクの報告は、# と ? で割り、segment ごとに decode して辿り、anchor を decode するモデルと一致する", async () => {
+Deno.test("リンクの報告は、# と ? で割り、segment ごとに decode して辿り、anchor を decode し、行の anchor を判定するモデルと一致する", async () => {
   const path = fc.array(
     fc.constantFrom(
       ".",
@@ -848,12 +873,6 @@ Deno.test("リンクの報告は、# と ? で割り、segment ごとに decode 
       "%25",
       "a%20b",
       "c.json",
-      "c.json#L0",
-      "c.json#L1",
-      "c.json#L01",
-      "c.json#L2",
-      "c.json#L3",
-      "c.json#L4",
       "c.json#x",
       "#",
       "#L1",
@@ -866,7 +885,7 @@ Deno.test("リンクの報告は、# と ? で割り、segment ごとに decode 
     ),
     { minLength: 1, maxLength: 6 },
   ).map((s) => s.join("/"));
-  // 生成したパスが a/c.json に届くのは稀なので、行番号の境目は毎回見る
+  // 生成したパスが a/c.json に届くのは稀なので、行番号はこの列で毎回見る
   const lineLinks = ["L0", "L1", "L01", "L2", "L3", "L4"].map((l) =>
     `../c.json#${l}`
   );
@@ -876,12 +895,13 @@ Deno.test("リンクの報告は、# と ? で割り、segment ごとに decode 
       jsonShape,
       async (paths, shape) => {
         const links = [...new Set([...lineLinks, ...paths])];
-        const r = await check({
-          "a/n.md": "",
-          "a b/n.md": "",
-          "a/c.json": jsonText(shape),
-          "a/b/x.md": links.map((p) => `- [l](<${p}>)\n`).join(""),
-        });
+        const r = await check(
+          Object.fromEntries(
+            Object.entries(propertyFiles).map((
+              [f, content],
+            ) => [f, content(shape, links)]),
+          ),
+        );
         deepStrictEqual(
           lines(r.stderr),
           links.flatMap((p) => {

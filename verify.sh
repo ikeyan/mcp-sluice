@@ -64,6 +64,7 @@
 #   - ln は写す先に何か在れば置かずに失敗する。ディレクトリだけはその中に作るので、置く前の分類で拒否する (canon: facts/shell/ln-hard-link-existing-destination)。
 #   - 置けなければ、もう一度下の写す先の表で分類する。分類の後に置かれたものも、その行の扱いになる。
 #   - 同じ common dir で並行に走る verify.sh にも、書きかけは見えない。
+#   - SIGKILL では EXIT trap が回らず、一時ファイル $GIT_COMMON_DIR/hooks/pre-push.verify-<pid> が残りうる (canon: facts/shell/bash-exit-trap-skipped-on-sigkill)。git はこれを hook として呼ばない (canon: facts/git/hook-found-by-exact-name)。
 # - 写す元 (作業ツリーの hooks/pre-push) の状態ごとの扱いと、示すコマンド。写す先を扱う前に分類し、写す先へ進まないものは写す先に触れない:
 #   - 通常ファイル (それへの symlink を含む) で、読める: 下の写す先の表へ進む。
 #   - 通常ファイル (それへの symlink を含む) で、読めない: 落ちる。chmod u+r。
@@ -156,7 +157,6 @@ hook=$hooks/pre-push
 hooks_path_shown=
 unset_cmd=
 config_exit=
-# git config の終了コードは、最後の項目 (exit <コード>) として受ける
 while IFS= read -r -d '' scope; do
   case $scope in
   exit\ *)
