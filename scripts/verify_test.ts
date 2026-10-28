@@ -1,6 +1,6 @@
 /**
  * verify.sh を子として、TMPDIR の下の一時ディレクトリの fixture のリポで回す。
- * - fixture は verify.sh・hooks/pre-push・deno.json・deno.lock の写しと、scripts/run-checks.ts の stub。stub は次を JSON で出し、引数 (hook を揃えた結果) で終わる。検査の段は run-checks_test.ts が受け持つ。
+ * - fixture は verify.sh・hooks/pre-push・deno.json・deno.lock の写しと、scripts/run-checks.ts の stub。stub は次を JSON で出し、引数 (hook を揃えた結果) で終わる。
  *   - git が指す git dir。
  *   - 環境に残っている GIT_ の変数の名前 (比べるのは --local-env-vars の一覧に載るものだけ)。
  *   - TMPDIR と、自分の許可 (Deno.permissions.querySync)。
@@ -8,11 +8,13 @@
  *   - 終了コード。
  *   - 回した後の common git dir の hooks の中身 (名前ごとのバイトと、実行可能か。一時ファイルが残れば名前が増える)。
  *   - stub の報告 (git dir・GIT_ の変数・TMPDIR・許可)。
- *   - 別のリポ (環境変数を向ける先) に hook を置かなかったか。
+ *   - 別のリポ (環境変数を向ける先) に hook を置かず、その場所を stdout に出さなかったか。
  *   - deno.lock を書き換えなかったか。
- * - 落ちる hook の状態の行は、示したコマンドを実行してから回し直し、exit 0 で hook が写ることも比べる。
+ * - 落ちる行は、示したコマンド (Execute: の後) を実行してから同じ環境で回し直し、exit 0 で hook が写ることも比べる。
+ * - 道具の失敗 (install・cmp・chmod) は、PATH の先に置いた fake で作る。
  * - linked worktree の test: worktree で回すと、hook は common git dir の hooks にだけ写る。
- * - 子の環境は、このプロセスの環境から git の場所を決める変数 (canon: facts/git/local-env-vars-and-hook-env) を消し、利用者の git の設定を読まないもの。
+ * - 中断の test: 写している最中に SIGTERM を受けると、一時ファイルを残さない。
+ * - 子の環境は run-checks_test.ts の先頭と同じ形。
  */
 import { deepStrictEqual } from "node:assert/strict";
 
@@ -89,7 +91,7 @@ async function git(dir: string, ...args: string[]) {
   if (!r.success) throw new Error(dec.decode(r.stderr));
 }
 
-// deno test の段は --allow-write を段の TMPDIR に絞り、Deno.symlink は絞らない read・write を要る (canon: facts/deno/symlink-requires-unscoped-permissions)
+// symlink を ln -s で作る理由は run-checks_test.ts の ln
 const ln = async (target: string, path: string) => {
   const r = await spawn("ln", { args: ["-s", target, path] }).output();
   if (!r.success) throw new Error(dec.decode(r.stderr));
@@ -110,7 +112,7 @@ async function makeRepo(dir: string) {
 
 /**
  * hooks と pre-push の状態 (verify.sh の先頭の表の行)。
- * 読めない pre-push の行は無い: root は mode 000 のファイルも読めるので、root で回す CI と cloud の環境では作れない。
+ * 「読めない」は mode 000 にし、PATH の先の fake の cmp が mode 000 を比べられないとする。root は mode 000 も読める (canon: facts/capabilities/root-reads-mode-000-files)。
  */
 type HookState =
   | "hooks が無い"
@@ -124,6 +126,7 @@ type HookState =
   | "同じ"
   | "同じで実行可能でない"
   | "違う"
+  | "読めない"
   | "ディレクトリ"
   | "FIFO";
 
@@ -164,26 +167,44 @@ async function setHook(dir: string, state: HookState) {
     }
   }
   await Deno.writeFile(hook, state === "違う" ? other : hookBytes, {
-    mode: state === "同じで実行可能でない" ? 0o644 : 0o755,
+    mode: state === "同じで実行可能でない"
+      ? 0o644
+      : state === "読めない"
+      ? 0
+      : 0o755,
   });
 }
 
 /**
- * hooks の中身 (名前ごとの、ファイルのバイトと実行可能か。ディレクトリは "dir"、壊れた symlink は "dangling"、通常ファイルでもディレクトリでもないものは "other")。
- * hooks が無ければ null、通常ファイルなら "file"、壊れた symlink なら "dangling"。
+ * gitDir の hooks の状態。
+ * - hooks が無い: null。
+ * - 通常ファイル: "file"。
+ * - 壊れた symlink: "dangling"。
+ * - ディレクトリ: 名前ごとの中身。
+ *   - 通常ファイル: バイトと、実行可能か。mode が 000 なら中身を読まず "mode 000" (root は読めてしまい、uid で結果が分かれるので)。
+ *   - ディレクトリ: "dir"。
+ *   - 壊れた symlink: "dangling"。
+ *   - 他: "other"。
  */
 async function readHooks(gitDir: string) {
   const hooks = `${gitDir}/hooks`;
-  const out: Record<string, Hook | "dir" | "dangling" | "other"> = {};
+  const out: Record<string, Hook | "mode 000" | "dir" | "dangling" | "other"> =
+    {};
   try {
     for await (const e of Deno.readDir(hooks)) {
       const path = `${hooks}/${e.name}`;
       try {
         const info = await Deno.stat(path);
-        out[e.name] = info.isDirectory ? "dir" : !info.isFile ? "other" : {
-          bytes: Array.from(await Deno.readFile(path)),
-          executable: ((info.mode ?? 0) & 0o111) !== 0,
-        };
+        out[e.name] = info.isDirectory
+          ? "dir"
+          : !info.isFile
+          ? "other"
+          : ((info.mode ?? 0) & 0o777) === 0
+          ? "mode 000"
+          : {
+            bytes: Array.from(await Deno.readFile(path)),
+            executable: ((info.mode ?? 0) & 0o111) !== 0,
+          };
       } catch (err) {
         if (!(err instanceof Deno.errors.NotFound)) throw err;
         out[e.name] = "dangling";
@@ -203,14 +224,19 @@ async function readHooks(gitDir: string) {
   return out;
 }
 
+/** dir の verify.sh を回す。relative なら dir の親を cwd にし、$0 を相対パスにする。 */
 async function verify(
   dir: string,
   env: Record<string, string>,
-  args: string[] = [],
+  { args = [], relative = false }: { args?: string[]; relative?: boolean } = {},
 ) {
+  const slash = dir.lastIndexOf("/");
   const r = await spawn("bash", {
-    args: [`${dir}/verify.sh`, ...args],
-    cwd: dir,
+    args: [
+      relative ? `${dir.slice(slash + 1)}/verify.sh` : `${dir}/verify.sh`,
+      ...args,
+    ],
+    cwd: relative ? dir.slice(0, slash) : dir,
     env: { ...baseEnv, ...env },
     clearEnv: true,
   }).output();
@@ -235,10 +261,15 @@ const reportOf = (stdout: string): Report | undefined => {
 type Hook = { bytes: number[]; executable: boolean };
 const copiedHook: Hook = { bytes: Array.from(hookBytes), executable: true };
 const realTmpdir = await Deno.realPath(tmpdir);
-const gitPath = dec.decode(
-  (await new Deno.Command("sh", { args: ["-c", "command -v git"] }).output())
-    .stdout,
-).trim();
+const which = async (name: string) =>
+  dec.decode(
+    (await new Deno.Command("sh", {
+      args: ["-c", 'command -v "$1"', "sh", name],
+    })
+      .output()).stdout,
+  ).trim();
+const failing = (name: string) =>
+  `#!/bin/sh\necho "${name}: fake の失敗" >&2\nexit 1\n`;
 const permissions = {
   run: true,
   envTmpdir: true,
@@ -252,9 +283,13 @@ const permissions = {
 interface Case {
   name: string;
   prepare?: (dir: string, elsewhere: string) => Promise<void>;
-  /** elsewhere は別の空のリポ。どの行でもそこに hook を置かないこと。 */
+  /** elsewhere は別の空のリポ。どの行でもそこに hook を置かず、その場所を stdout に出さないこと。 */
   env?: (elsewhere: string, dir: string) => Record<string, string>;
+  /** PATH の先 (dir の .git/fake-bin) に置く fake (名前 → 中身)。 */
+  fakes?: Record<string, string>;
   args?: string[];
+  /** dir の親を cwd にし、$0 を相対パスにする。 */
+  relative?: true;
   code: number;
   /** 回した後の hooks の中身。 */
   hooks: Awaited<ReturnType<typeof readHooks>>;
@@ -293,7 +328,7 @@ const pointElsewhere: Record<string, (e: string) => Record<string, string>> = {
 };
 
 const cases: Case[] = [];
-const refused = "。中身を確かめ、置き換えてよければ Execute: ";
+const refused = "。中身を確かめ、よければ Execute: ";
 const states: [HookState, number, Case["hooks"], string?][] = [
   ["hooks が無い", 0, { "pre-push": copiedHook }],
   [
@@ -327,6 +362,12 @@ const states: [HookState, number, Case["hooks"], string?][] = [
     `/pre-push: hooks/pre-push と中身が違う${refused}rm -f`,
   ],
   [
+    "読めない",
+    1,
+    { "pre-push": "mode 000" },
+    `/pre-push: hooks/pre-push と比べられない (理由は上の cmp)${refused}rm -f`,
+  ],
+  [
     "ディレクトリ",
     1,
     { "pre-push": "dir" },
@@ -339,10 +380,19 @@ const states: [HookState, number, Case["hooks"], string?][] = [
     `/pre-push: 通常のファイルでない${refused}rm -f`,
   ],
 ];
+const realCmp = await which("cmp");
 for (const [state, code, hooks, stderr] of states) {
   cases.push({
     name: state,
     prepare: (dir) => setHook(dir, state),
+    ...(state === "読めない"
+      ? {
+        fakes: {
+          cmp:
+            `#!/bin/sh\nif [ -n "$(find "$2" -prune -perm 0)" ]; then echo "cmp: $2: Permission denied" >&2; exit 2; fi\nexec '${realCmp}' "$@"\n`,
+        },
+      }
+      : {}),
     code,
     hooks,
     tmpdir: realTmpdir,
@@ -363,6 +413,9 @@ for (const name of localEnv) {
     tmpdir: realTmpdir,
   });
 }
+// file でない出どころ (command line など) の core.hooksPath の行は無い: command line の変数は verify.sh が消し、他の出どころは --file・--blob を付けない読みでは出ない
+const hooksPathFile = "[core]\n\thooksPath = elsewhere\n";
+const realGit = await which("git");
 cases.push(
   {
     name: "core.hooksPath",
@@ -371,31 +424,72 @@ cases.push(
     hooks: { "pre-push": copiedHook },
     tmpdir: realTmpdir,
     stderr:
-      "core.hooksPath が設定されている (local file:.git/config elsewhere)",
+      "core.hooksPath が設定されている (local file:.git/config elsewhere)。hook は ",
+    fix: true,
   },
   {
     name: "core.hooksPath を GIT_CONFIG_GLOBAL のファイルに書いた",
-    prepare: (_, e) =>
-      Deno.writeTextFile(`${e}/gitconfig`, "[core]\n\thooksPath = elsewhere\n"),
+    prepare: (_, e) => Deno.writeTextFile(`${e}/gitconfig`, hooksPathFile),
     env: (e) => ({ GIT_CONFIG_GLOBAL: `${e}/gitconfig` }),
     code: 1,
     hooks: { "pre-push": copiedHook },
     tmpdir: realTmpdir,
     stderr: "core.hooksPath が設定されている (global file:",
+    fix: true,
+  },
+  {
+    // git config は -z 無しだと、このパスを C の quote で出す (canon: facts/git/config-sources-and-scopes)
+    name:
+      "core.hooksPath を、空白・タブ・非 ASCII を含むパスの include に書いた",
+    prepare: async (dir, e) => {
+      const include = `${e}/a b\tあ.cfg`;
+      await Deno.writeTextFile(include, hooksPathFile);
+      await git(dir, "config", "include.path", include);
+    },
+    code: 1,
+    hooks: { "pre-push": copiedHook },
+    tmpdir: realTmpdir,
+    stderr: "core.hooksPath が設定されている (local file:",
+    fix: true,
+  },
+  {
+    name: "install が落ちる",
+    prepare: (dir) => setHook(dir, "無い"),
+    fakes: { install: failing("install") },
+    code: 1,
+    hooks: {},
+    tmpdir: realTmpdir,
+    stderr:
+      "/pre-push: hooks/pre-push を写せない (理由は上)。 Execute: mkdir -p",
+    fix: true,
+  },
+  {
+    name: "chmod +x が落ちる",
+    prepare: (dir) => setHook(dir, "同じで実行可能でない"),
+    fakes: { chmod: failing("chmod") },
+    code: 1,
+    hooks: { "pre-push": { ...copiedHook, executable: false } },
+    tmpdir: realTmpdir,
+    stderr:
+      "/pre-push: 実行可能にできない (理由は上の chmod)。 Execute: chmod +x",
+    fix: true,
+  },
+  {
+    name: "$0 が相対パスで、CDPATH が同じ相対パスの dir を持つ別の場所を指す",
+    relative: true,
+    prepare: (dir, e) =>
+      Deno.mkdir(`${e}/${dir.slice(dir.lastIndexOf("/") + 1)}`),
+    env: (e) => ({ CDPATH: e }),
+    code: 0,
+    hooks: { "pre-push": copiedHook },
+    tmpdir: realTmpdir,
   },
   ...([["2.30.9", 1], ["2.31.0", 0]] as const).map(([version, code]) => ({
     name: `git の版が ${version}`,
-    prepare: async (dir: string) => {
-      await Deno.mkdir(`${dir}/.git/fake-bin`);
-      await Deno.writeTextFile(
-        `${dir}/.git/fake-bin/git`,
-        `#!/bin/sh\n[ "$1" = --version ] && { echo 'git version ${version}'; exit 0; }\nexec '${gitPath}' "$@"\n`,
-        { mode: 0o755 },
-      );
+    fakes: {
+      git:
+        `#!/bin/sh\n[ "$1" = --version ] && { echo 'git version ${version}'; exit 0; }\nexec '${realGit}' "$@"\n`,
     },
-    env: (_: string, dir: string) => ({
-      PATH: `${dir}/.git/fake-bin:${baseEnv.PATH}`,
-    }),
     code,
     hooks: code === 0 ? { "pre-push": copiedHook } : null,
     tmpdir: code === 0 ? realTmpdir : undefined,
@@ -456,7 +550,7 @@ cases.push(
     stderr: "が , を含む",
   },
   {
-    name: "deno.lock が deno.json と食い違えば書き換えず落ちる",
+    name: "deno.lock が deno.json と食い違えば落ちる",
     prepare: async (dir) => {
       const json = JSON.parse(await Deno.readTextFile(`${dir}/deno.json`));
       json.imports["is-odd"] = "npm:is-odd@3.0.1";
@@ -473,9 +567,10 @@ async function fixAndRerun(
   dir: string,
   env: Record<string, string>,
   stderr: string,
+  relative: boolean,
 ) {
-  const command = stderr.split("\n").find((l) => l.includes(refused))
-    ?.split(refused)[1];
+  const command = stderr.split("\n").find((l) => l.includes(" Execute: "))
+    ?.split(" Execute: ")[1];
   if (command === undefined) return { command: null };
   const r = await spawn("bash", {
     args: ["-c", command],
@@ -483,7 +578,7 @@ async function fixAndRerun(
     clearEnv: true,
   }).output();
   if (!r.success) return { command, stderr: dec.decode(r.stderr) };
-  const again = await verify(dir, env);
+  const again = await verify(dir, env, { relative });
   return { code: again.code, hooks: await readHooks(`${dir}/.git`) };
 }
 
@@ -496,21 +591,34 @@ Deno.test("verify.sh の hook の状態と環境", async () => {
           await git(elsewhere, "init", "-q", "--template=");
           await c.prepare?.(dir, elsewhere);
           const env = c.env?.(elsewhere, dir) ?? {};
+          if (c.fakes) {
+            const bin = `${dir}/.git/fake-bin`;
+            await Deno.mkdir(bin);
+            for (const [name, content] of Object.entries(c.fakes)) {
+              await Deno.writeTextFile(`${bin}/${name}`, content, {
+                mode: 0o755,
+              });
+            }
+            env.PATH = `${bin}:${baseEnv.PATH}`;
+          }
           const lock = await Deno.readTextFile(`${dir}/deno.lock`);
-          const r = await verify(dir, env, c.args);
+          const relative = c.relative ?? false;
+          const r = await verify(dir, env, { args: c.args, relative });
           const got = {
             code: r.code,
             hooks: await readHooks(`${dir}/.git`),
             strayHooks: await readHooks(`${elsewhere}/.git`),
+            strayStdout: r.stdout.includes(elsewhere),
             report: reportOf(r.stdout),
             lockUnchanged: await Deno.readTextFile(`${dir}/deno.lock`) === lock,
             stderr: c.stderr === undefined || r.stderr.includes(c.stderr),
-            fixed: c.fix && await fixAndRerun(dir, env, r.stderr),
+            fixed: c.fix && await fixAndRerun(dir, env, r.stderr, relative),
           };
           const want = {
             code: c.code,
             hooks: c.hooks,
             strayHooks: null,
+            strayStdout: false,
             report: c.tmpdir === undefined ? undefined : {
               gitDir: `${await Deno.realPath(dir)}/.git`,
               gitVars: [],
@@ -581,4 +689,46 @@ Deno.test("linked worktree で回すと、hook は common git dir の hooks に�
       );
     })
   );
+});
+
+const exists = (path: string) =>
+  Deno.stat(path).then(() => true, (e) => {
+    if (e instanceof Deno.errors.NotFound) return false;
+    throw e;
+  });
+
+Deno.test("写している最中に SIGTERM を受けると、一時ファイルを残さずに 143 で終わる", async () => {
+  await withTempDir(async (dir) => {
+    await makeRepo(dir);
+    await setHook(dir, "無い");
+    const installed = `${dir}/.git/installed`;
+    const bin = `${dir}/.git/fake-bin`;
+    await Deno.mkdir(bin);
+    // 一時ファイルを書いた後に止まる install。sleep は有限なので、verify.sh が止まらなくても自分で終わる
+    await Deno.writeTextFile(
+      `${bin}/install`,
+      `#!/bin/sh\n'${await which(
+        "install",
+      )}' "$@" && echo > '${installed}' && sleep 3\n`,
+      { mode: 0o755 },
+    );
+    const child = spawn("bash", {
+      args: [`${dir}/verify.sh`],
+      cwd: dir,
+      env: { ...baseEnv, PATH: `${bin}:${baseEnv.PATH}` },
+      clearEnv: true,
+    });
+    let started = false;
+    for (let i = 0; i < 100 && !started; i++) {
+      started = await exists(installed);
+      if (!started) await new Promise((r) => setTimeout(r, 100));
+    }
+    child.kill("SIGTERM");
+    const r = await child.output();
+    deepStrictEqual(
+      { started, code: r.code, hooks: await readHooks(`${dir}/.git`) },
+      { started: true, code: 143, hooks: {} },
+      dec.decode(r.stderr),
+    );
+  });
 });
