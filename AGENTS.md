@@ -87,7 +87,7 @@
     - git が知る項目の種類と名前。
     - 作業ツリーに無い追跡ファイル。
     - deno と shellcheck の版。
-    - deno test の段の TMPDIR を作れること (test があるときだけ)。
+    - .ts があるとき、TMPDIR が設定されていて `/` で始まること。
   - `shellcheck`: このリポが持つ `*.sh`。
   - 次の 3 つは git が知る `.ts`:
     - `deno fmt --check`
