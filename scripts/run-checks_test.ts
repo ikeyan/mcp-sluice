@@ -521,6 +521,26 @@ Deno.test("段は指摘があれば落ちる: fmt・lint (recommended)・check�
   });
 });
 
+Deno.test("deno check は、- で始まる名前をその名前のファイルだけとして検査する", async () => {
+  // -- の後の名前を渡すと、deno check は git の無視するファイルを含む cwd 全体を検査する (canon: facts/deno/check-double-dash)
+  await withRepo({
+    ".gitignore": "ignored.ts\n",
+    "-n.ts": 'export const a: number = "s";\n',
+    "ignored.ts": 'export const b: number = "s";\n',
+  }, async (dir) => {
+    const r = await runChecks(dir, "0");
+    const section = sectionOf(r.stderr, "deno check");
+    deepStrictEqual(
+      {
+        named: section.includes("-n.ts") && section.includes("TS2322"),
+        ignored: section.includes("ignored.ts"),
+      },
+      { named: true, ignored: false },
+      r.stderr,
+    );
+  });
+});
+
 Deno.test("deno の子の環境", async () => {
   // 次元: canon: facts/deno/environment-and-config-inputs の「結果を変える」の変数
   const resultVars = [
@@ -1059,7 +1079,7 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
       expect(
         "deno info の出力が JSON として読めなければ落ち、並べた兄弟の deno info は run-checks.ts の終了の後に残らない",
         sectionOf(r.stderr, importsStage).includes(
-          "bad.ts: deno info の出力を JSON として読めない",
+          `bad.ts: deno info の出力を JSON として読めない — Unexpected token 'o', "notjson\n" is not valid JSON\nnotjson\n\ndeno.json: imports の未使用の判定をしていない。上を直してから回す\n`,
         ) && !alive.success,
         r.stderr,
       );
@@ -1113,10 +1133,10 @@ const placeBoundLine =
  * - 値を 1 つより多く測ったキー (lock・nodeModulesDir) は、測った値をそれぞれ少なくとも 1 回ずつ使う。
  */
 const uncopiedConfigs = [
-  { frozen: true },
-  false,
-  "./other.lock",
-].map((lock, i) => ({
+  { lock: { frozen: true }, nodeModulesDir: "none" },
+  { lock: false, nodeModulesDir: "auto" },
+  { lock: "./other.lock", nodeModulesDir: "auto" },
+].map((measured) => ({
   $schema:
     "https://raw.githubusercontent.com/denoland/deno/refs/heads/main/cli/schemas/config-file.v1.json",
   bench: { include: ["bench/"] },
@@ -1124,14 +1144,13 @@ const uncopiedConfigs = [
   fmt: { lineWidth: 100 },
   include: ["main.ts"],
   lint: { rules: { tags: ["recommended"] } },
-  lock,
   minimumDependencyAge: "P3D",
-  nodeModulesDir: i === 0 ? "none" : "auto",
   publish: { exclude: ["x/"] },
   tasks: { t: "echo t" },
   test: { include: ["t_test.ts"] },
   vendor: true,
   version: "1.0.0",
+  ...measured,
 }));
 const leftPad = "npm:left-pad@1.3.0";
 /**
@@ -1142,7 +1161,7 @@ const leftPad = "npm:left-pad@1.3.0";
 const unreachableRegistry = { NPM_CONFIG_REGISTRY: "http://127.0.0.1:9/" };
 /**
  * deno info を同時に起動する数の上限の fixture: .ts の数と、開ける fd の数 (ulimit -n)。
- * - manyTs 個の deno info を同時に起動すると、fdLimit を超えて spawn が Too many open files で落ちる (子 1 つあたりの fd の数は run-checks.ts の infoLimit の注釈)。
+ * - manyTs 個の deno info を同時に起動すると、fdLimit を超えて spawn が Too many open files で落ちる (子 1 つあたりの fd は 3 つ。canon: facts/deno/spawn-piped-child-fds)。
  */
 const manyTs = 60;
 const fdLimit = 128;

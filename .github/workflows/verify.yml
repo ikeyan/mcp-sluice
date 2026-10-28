@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          # scripts/run-checks.ts の denoMinor・denoPatches が受ける版にする (上げ方は同じファイルの先頭の「版」)
+          # scripts/run-checks.ts の denoVersions が受ける版にする (上げ方は同じファイルの先頭の「版」)
           deno-version: "2.9.8"
       # runner image の shellcheck は版が違い、指摘の出方が違う (canon: facts/shellcheck/sc2015-version-difference)。
       # 外せる条件: ubuntu-24.04 の同梱の shellcheck が scripts/run-checks.ts の shellcheckVersion と同じ版になったとき (canon: facts/github-actions/ubuntu-2404-runner-bundled-tools)。

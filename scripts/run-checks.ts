@@ -115,16 +115,15 @@
  *     - shellcheck は引数の他に SHELLCHECK_OPTS と .shellcheckrc を読み (canon: facts/shellcheck/environment-and-config-inputs)、利用者の指定で手元と CI の結果が分かれる。
  *     - リポの .shellcheckrc も読まないので、directive は各 script に書く。
  * - 版:
- *   - deno: 2.<denoMinor>.<patch> で、patch が denoPatches (下の定数) のどれか。このプロセスを動かす deno を見る (段の子も同じ PATH で引く)。
- *     - denoPatches は、recommended の lint を通し、このファイルが引く canon の事実を測った版だけを持つ。2.9.8 だけで測った事実 (uncopiedKeys の根拠など) があるので、2.9.8 だけ。
- *     - 例外: 2.9.7 だけで測った事実 (canon: facts/deno/check-double-dash など) は、2.9.8 で測り直していない。
+ *   - deno: denoVersions (下の定数) のどれか。このプロセスを動かす deno を見る (段の子も同じ PATH で引く)。
+ *     - denoVersions は、recommended の lint を通し、このファイルが引く canon の事実を Linux で測った版だけを持つ。macOS だけの事実 (killGroup の EPERM) は、killGroup の「外す判定」が macOS の版ごとに測る。
  *   - shellcheck: shellcheckVersion だけ。版で出す指摘が違う (canon: facts/shellcheck/sc2015-version-difference)。
  *   - git: verify.sh の事前条件 (verify.sh が確かめる)。
- *   - 版を足す・上げるときは、次を済ませてから、その道具の版の定数 (deno は denoMinor・denoPatches、shellcheck は shellcheckVersion) を変える:
+ *   - 版を足す・上げるときは、次を済ませてから、その道具の版の定数 (deno は denoVersions、shellcheck は shellcheckVersion) を変える:
  *     1. 次を新しい版で測り直す。このファイルが引く canon の事実と、deno info --json の形 (下の「deno.json の imports」)。
  *     2. deno: deno lint の recommended に増えた規則の指摘を直す。
  *     3. 同じ commit で .github/workflows/verify.yml を合わせる:
- *        - deno: deno-version を denoPatches に入る版にする。
+ *        - deno: deno-version を denoVersions に入る版にする。
  *        - shellcheck: SHELLCHECK_VERSION と、取る tar.xz の sha256 を shellcheckVersion の版のものにする。
  * - 名前: git が知る項目を -z で受ける (canon: facts/git/path-output-quoting)。
  *   - 追跡された項目は `git ls-files -s -t --cached` で種類も受け、次の全部を満たすものだけを処理する (canon: facts/git/repository-shapes の「作業ツリーの項目」)。
@@ -302,7 +301,7 @@ const killGroup = (child: Deno.ChildProcess, signal: Deno.Signal) => {
 };
 /** emptyGroup の SIGTERM の後の待ちと、exec の出力の pipe の待ちの上限 (同じ値を使う)。 */
 const graceMs = 2000;
-/** p が graceMs 以内に決着すれば true。 */
+/** p が graceMs 以内に決着すれば true。reject も決着とみなす。 */
 async function settlesWithin(p: Promise<unknown>) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -455,7 +454,6 @@ async function exec(
     // グループの外に残った子孫が pipe を持っていれば閉じないので、上限を置く
     const settled = await settlesWithin(outputs);
     if (!settled) await Promise.all(readers.map((r) => r.cancel()));
-    // 読みの reject でも settlesWithin は決着し、ここで投げる
     const [out, err] = await outputs;
     return settled ? { code, out, err } : {
       code: 1,
@@ -673,15 +671,13 @@ async function deletedFiles(): Promise<Problems> {
     : [];
 }
 
-const denoMinor = 9;
-const denoPatches = [8];
+const denoVersions = ["2.9.8"];
 function denoVersion(): Promise<Problems> {
   const v = Deno.version.deno;
-  const accepted = denoPatches.map((p) => `2.${denoMinor}.${p}`);
   return Promise.resolve(
-    accepted.includes(v) ? [] : [
+    denoVersions.includes(v) ? [] : [
       `deno の版が ${v} で、受ける版 (${
-        accepted.join("・")
+        denoVersions.join("・")
       }) でない。.github/workflows/verify.yml の deno-version の版を入れる: deno upgrade --version <その版>`,
     ],
   );
@@ -861,7 +857,7 @@ const resolutionOf = (modules: InfoModule[]) =>
       .map((m) => [m.specifier, m.error ?? null, m.dependencies ?? []]),
   );
 
-/** 写しに写さない、deno.json の最上位のキー (上の「定義域」の uncopiedKeys)。キーを足すときは、run-checks_test.ts の uncopiedConfigs にも足す。 */
+/** 写しへ入れない、deno.json の最上位のキー (上の「定義域」の uncopiedKeys)。キーを足すときは、run-checks_test.ts の uncopiedConfigs にも足す。 */
 const uncopiedKeys = [
   "$schema",
   "bench",
@@ -886,7 +882,7 @@ const pathValue = (v: unknown) =>
 /**
  * deno info を同時に起動する数の上限 (上の「deno.json の imports の各キー」)。
  * - 8 は、このリポの .ts (2026-10-28 に 5 件) を 1 回で全部並べられる数。
- * - 同時に動く子 1 つにつき、このプロセスは fd を 3 つ持つ (canon: facts/deno/spawn-piped-child-fds)。8 なら 24 個。
+ * - 同時に動く子 1 つにつき、このプロセスは fd を 3 つ持つ。Linux で測り、macOS は測っていない (canon: facts/deno/spawn-piped-child-fds)。8 なら 24 個。
  * - 上げる条件: .ts が増えて、この段の待ちが目立つとき。開ける fd の数の上限 (ulimit -n) の中で上げる。
  */
 const infoLimit = 8;
@@ -972,9 +968,9 @@ async function importKeys(): Promise<Run> {
           ({ modules } = JSON.parse(dec.decode(r.out)));
         } catch (e) {
           problems.push(
-            `${f}: deno info の出力を JSON として読めない。${
-              info.join(" ")
-            } ./${f} を回して出力を見る — ${messageOf(e)}`,
+            `${f}: deno info の出力を JSON として読めない — ${messageOf(e)}\n${
+              dec.decode(r.out)
+            }${dec.decode(r.err)}`,
           );
           return;
         }
