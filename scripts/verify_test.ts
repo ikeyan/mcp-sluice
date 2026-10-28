@@ -16,9 +16,11 @@
  * - 中断の test: 写している最中に SIGTERM を受けると、一時ファイルを残さない。
  * - TMPDIR の値は、canon: facts/shell/string-input-categories の分類から生成して回す。
  * - git rev-parse --local-env-vars の各行の形は、fake の git が出す行を生成して、[A-Z] が ASCII の外の大文字を含む locale で回す (canon: facts/shell/bash-regex-range-locale)。
- *   - 回す前に、その locale の bash で次を確かめる:
+ *   - 回す前に、その locale の bash で次を確かめる (probeRange):
  *     1. locale が効いている: `${#É}` が 1。locale が無ければ bash は C のまま動き、バイトを数えて 2 になる (canon: facts/shell/bash-missing-locale-stays-c)。
  *     2. `[[ É =~ ^[A-Z]$ ]]` が真。
+ *     - 確かめの bash が、1 の偽 (exit 2)・2 の偽 (exit 1)・両方の真 (exit 0) の他で終わる (信号など) と落ちる。
+ *     - Linux では、無い locale で 1 が偽、C.UTF-8 で 1 が真で 2 が偽になることを test で固定する (同じ canon)。
  *   - OS ごとの違い:
  *     - Linux: en_US.UTF-8 を localedef で一時の dir に作り、LOCPATH で指す (canon: facts/glibc/localedef-and-locpath-inputs)。1 か 2 が偽なら、次元を確かめられないので落ちる。
  *     - 他の OS: OS に入っている en_US.UTF-8。
@@ -1105,6 +1107,51 @@ Deno.test("verify.sh の hook の状態と環境", async () => {
 
 /** [A-Z] が ASCII の外の大文字を含む locale の名前 (このファイルの先頭の「OS ごとの違い」)。 */
 const wideLocale = "en_US.UTF-8";
+/**
+ * env を足した環境の bash で、このファイルの先頭の 1・2 を確かめた結果と stderr。
+ * - wide: 1 と 2 が真。
+ * - narrow: 1 が真で、2 が偽。
+ * - noLocale: 1 が偽。
+ */
+async function probeRange(env: Record<string, string>) {
+  const probe = await spawn("bash", {
+    args: ["-c", '[ "${#1}" = 1 ] || exit 2; [[ $1 =~ ^[A-Z]$ ]]', "bash", "É"],
+    env: { ...baseEnv, ...env },
+    clearEnv: true,
+  }).output();
+  const stderr = dec.decode(probe.stderr);
+  switch (probe.code) {
+    case 0:
+      return { kind: "wide", stderr } as const;
+    case 1:
+      return { kind: "narrow", stderr } as const;
+    case 2:
+      return { kind: "noLocale", stderr } as const;
+  }
+  throw new Error(
+    `locale の確かめの bash が exit ${probe.code}${
+      probe.signal === null ? "" : ` (${probe.signal})`
+    } で終わった。0・1・2 の他は、locale の次元を確かめられない (${
+      JSON.stringify(env)
+    })\n${stderr}`,
+  );
+}
+
+Deno.test({
+  name:
+    "locale の確かめ: Linux の bash は、無い locale で locale が効かず、C.UTF-8 で [A-Z] が É を含まない",
+  ignore: Deno.build.os !== "linux",
+  fn: async () => {
+    deepStrictEqual(
+      [
+        (await probeRange({ LC_ALL: "xx_XX.UTF-8" })).kind,
+        (await probeRange({ LC_ALL: "C.UTF-8" })).kind,
+      ],
+      ["noLocale", "narrow"],
+    );
+  },
+});
+
 /** wideLocale を使う子の環境の差分。Linux では dir に locale を作る。 */
 async function wideRangeLocale(dir: string): Promise<Record<string, string>> {
   const linux = Deno.build.os === "linux";
@@ -1128,19 +1175,14 @@ async function wideRangeLocale(dir: string): Promise<Record<string, string>> {
       );
     }
   }
-  // exit 2: locale が効いていない。exit 1: 効いているが [A-Z] が É を含まない
-  const probe = await spawn("bash", {
-    args: ["-c", '[ "${#1}" = 1 ] || exit 2; [[ $1 =~ ^[A-Z]$ ]]', "bash", "É"],
-    env: { ...baseEnv, ...env },
-    clearEnv: true,
-  }).output();
-  if (probe.success) return env;
+  const probe = await probeRange(env);
+  if (probe.kind === "wide") return env;
   const where = linux ? `localedef で作った ${wideLocale}` : wideLocale;
-  if (probe.code === 2) {
+  if (probe.kind === "noLocale") {
     throw new Error(
       `${where} が bash に効かない (\${#É} が 1 でない)。[A-Z] が ASCII の外を含む locale の次元を確かめられない${
         linux ? "" : `。${wideLocale} を OS に入れる`
-      }\n${dec.decode(probe.stderr)}`,
+      }\n${probe.stderr}`,
     );
   }
   if (linux) {

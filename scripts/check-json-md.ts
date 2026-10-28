@@ -61,7 +61,8 @@
  * - anchor (空なら見ない。%-decode できなければ「不正な %-エンコード」違反):
  *   - 辿った先が `.md` の引数: その見出しの id のどれかと一致すること。id は github-slugger の規則で作る (canon: facts/github/heading-anchor-ids)。
  *   - 辿った先が `.md` でないファイル: 行の anchor `L<行番号>` の形だけを受ける。他の形 (範囲の `L10-L20` を含む) は検査できないので違反 (canon: facts/github/blob-line-anchors)。
- *     - 行番号がファイルの行数の範囲内かは見ない。範囲の外の行の anchor を GitHub がどう描画するかは確かめていない。
+ *     - 行番号がファイルの行数の範囲内かは見ない。範囲の外の行番号の扱いは GitHub の docs に無く、描画も測っていない (canon: facts/github/blob-line-anchors の「docs に無いもの」)。
+ *       - 外せる条件: 同じ canon の「確かめ方」で、範囲の外の行番号の描画を確かめたとき。行を示さない描画なら、範囲の外を違反にする。
  *   - 辿った先がディレクトリ: どの形も検査できないので違反 (canon: facts/github/blob-line-anchors の「docs に無いもの」)。直し方は anchor を外すこと。
  *   - 範囲とディレクトリを外せる条件: canon の facts/github/blob-line-anchors の「確かめ方」で GitHub の描画を確かめたとき。効く形を受ける形に足す。
  * - ファイルを読めない (無い、を含む) か UTF-8 として不正なら、そのファイル自身の違反にする。そういう .md への anchor は見ない。
@@ -301,22 +302,11 @@ const resolve = (dir: string[], path: string): Resolved => {
 
 /** parse したトークンと見出しの anchor。 */
 type Parsed = { tokens: Token[]; anchors: Set<string> };
-/** .md の引数ごとの、名前と Parsed (読めなければ undefined)。 */
-const documents: { file: string; parsed?: Parsed }[] = [];
-for (const file of markdownFiles) {
-  const text = await readOrReport(file);
-  const tokens = text === undefined ? undefined : parse(text);
-  documents.push({
-    file,
-    parsed: tokens && { tokens, anchors: anchorsOf(tokens) },
-  });
-}
-
-/** 辿った先の種類 (上の「リンク」)。.md は、その Parsed を持つ。 */
+/** 辿った先の種類 (上の「リンク」)。.md は、その名前と Parsed (読めなければ undefined) を持つ。 */
 type Destination =
   | { kind: "dir" }
   | { kind: "file" }
-  | { kind: "md"; parsed?: Parsed };
+  | { kind: "md"; file: string; parsed?: Parsed };
 /** リンク先として在るもの (引数のファイルと、その親ディレクトリ (ルートを含む)) の鍵 → 種類。 */
 const destinations = new Map<string, Destination>();
 for (const f of Deno.args) {
@@ -328,12 +318,19 @@ for (const f of Deno.args) {
 for (const f of Deno.args) {
   destinations.set(pathKey(f), { kind: "file" });
 }
-for (const { file, parsed } of documents) {
-  destinations.set(pathKey(file), { kind: "md", parsed });
+for (const file of markdownFiles) {
+  const text = await readOrReport(file);
+  const tokens = text === undefined ? undefined : parse(text);
+  destinations.set(pathKey(file), {
+    kind: "md",
+    file,
+    parsed: tokens && { tokens, anchors: anchorsOf(tokens) },
+  });
 }
 
-for (const { file, parsed } of documents) {
-  if (parsed === undefined) continue;
+for (const source of destinations.values()) {
+  if (source.kind !== "md" || source.parsed === undefined) continue;
+  const { file, parsed } = source;
   const dir = file.split("/").slice(0, -1);
   for (const target of targetsOf(parsed.tokens)) {
     if ("uncheckable" in target) {

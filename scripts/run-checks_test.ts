@@ -239,7 +239,6 @@ const notRun = "検査の段は回していない";
 /** 段の見出し。 */
 const failedHead = (name: string) => `== ${name}: 落ちた`;
 const passedHead = (name: string) => `== ${name}: 通った`;
-/** deno.json の imports の段の名前。 */
 const importsStage = "deno.json の imports";
 /** stderr の、落ちた段 name の見出しから次の見出しの前まで。無ければ空。 */
 const sectionOf = (stderr: string, name: string) => {
@@ -884,7 +883,7 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
         expect(
           `deno.json の最上位がオブジェクトでない (${config})`,
           sectionOf(r.stderr, importsStage).includes(
-            `deno.json: 最上位がオブジェクトでない。オブジェクトにする — ${config}`,
+            `deno.json: 最上位がオブジェクトでない。設定の名前から値への対応のオブジェクトにする — ${config}`,
           ),
           r.stderr,
         );
@@ -896,7 +895,7 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
         expect(
           `imports がオブジェクトでない (${imports})`,
           sectionOf(r.stderr, importsStage).includes(
-            `deno.json: imports がオブジェクトでない。指定子から依存への対応のオブジェクトにする — ${imports}`,
+            `deno.json: imports の値がオブジェクトでない。指定子から依存への対応のオブジェクトにする — ${imports}`,
           ),
           r.stderr,
         );
@@ -996,7 +995,7 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
         expect(
           `scopes がオブジェクトでない (${scopes})`,
           sectionOf(r.stderr, importsStage).includes(
-            `deno.json: scopes がオブジェクトでない。scope ごとの、指定子から依存への対応のオブジェクトにする — ${scopes}`,
+            `deno.json: scopes の値がオブジェクトでない。scope ごとの、指定子から依存への対応のオブジェクトにする — ${scopes}`,
           ),
           r.stderr,
         );
@@ -1111,7 +1110,7 @@ const placeBoundLine =
   "deno.json: imports・scopes に次のキーか値があると、imports の各キーが使われているかを確かめられない";
 /**
  * uncopiedKeys の全部のキーを、canon の表の測った値で持つ deno.json の最上位 (canon: facts/deno/info-config-other-location の「写さないキー」)。
- * - 値を 1 つより多く測ったキー (lock・nodeModulesDir) は、各値を 1 回ずつ使う。
+ * - 値を 1 つより多く測ったキー (lock・nodeModulesDir) は、測った値をそれぞれ少なくとも 1 回ずつ使う。
  */
 const uncopiedConfigs = [
   { frozen: true },
@@ -1134,7 +1133,6 @@ const uncopiedConfigs = [
   vendor: true,
   version: "1.0.0",
 }));
-/** npm: の指定子。 */
 const leftPad = "npm:left-pad@1.3.0";
 /**
  * npm: の指定子を持つ fixture で、deno check・deno test の段が npm から取ろうとするのを、すぐ落とす registry (canon: facts/deno/environment-and-config-inputs の「取得だけを変える」)。
@@ -1144,7 +1142,7 @@ const leftPad = "npm:left-pad@1.3.0";
 const unreachableRegistry = { NPM_CONFIG_REGISTRY: "http://127.0.0.1:9/" };
 /**
  * deno info を同時に起動する数の上限の fixture: .ts の数と、開ける fd の数 (ulimit -n)。
- * - 同時に動く子 1 つにつき、run-checks.ts は fd を 3 つ持つ (canon: facts/deno/spawn-piped-child-fds)。manyTs 個の deno info を同時に起動すると、fdLimit を超えて spawn が Too many open files で落ちる。
+ * - manyTs 個の deno info を同時に起動すると、fdLimit を超えて spawn が Too many open files で落ちる (子 1 つあたりの fd の数は run-checks.ts の infoLimit の注釈)。
  */
 const manyTs = 60;
 const fdLimit = 128;

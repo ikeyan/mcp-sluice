@@ -92,9 +92,8 @@
  *     - それを確かめるテスト (run-checks_test.ts の、中断の「deno test の段」の行と、段が普通に終わる test の、deno test の段の TMPDIR の確かめ)。
  *
  * 入力と環境の定義域:
- * - 引数は 1 つで、verify.sh の hook の段の結果。外れていれば理由を出して exit 2。
- *   - 0: 揃えた。
- *   - 1: 揃えられなかったか、写す途中の一時ファイルの rm -f が落ちた (理由は verify.sh が出した)。段は回し、最後に exit 1。
+ * - 引数は 1 つで、verify.sh の hook の段の結果 (値の意味は verify.sh の先頭)。0 か 1 でなければ、理由を出して exit 2。
+ *   - 1 のとき: 段は回し、最後に exit 1 (理由は verify.sh が出した)。
  * - 環境変数 TMPDIR: .ts があるときだけ使い、その下に段の一時ディレクトリを作る。verify.sh は絶対パスにした値を渡す。
  *   - `/` で始まらない (未設定・空を含む) ときは段の前で exit 1。
  *   - その下に作れない (無い・書けないなど) ときは、作る段が落ちる。
@@ -116,7 +115,9 @@
  *     - shellcheck は引数の他に SHELLCHECK_OPTS と .shellcheckrc を読み (canon: facts/shellcheck/environment-and-config-inputs)、利用者の指定で手元と CI の結果が分かれる。
  *     - リポの .shellcheckrc も読まないので、directive は各 script に書く。
  * - 版:
- *   - deno: 2.<denoMinor>.<patch> で、patch が denoPatches (下の定数) のどれか。denoPatches は、このファイルが引く canon の事実と recommended の lint を測った版だけを持つ。このプロセスを動かす deno を見る (段の子も同じ PATH で引く)。
+ *   - deno: 2.<denoMinor>.<patch> で、patch が denoPatches (下の定数) のどれか。このプロセスを動かす deno を見る (段の子も同じ PATH で引く)。
+ *     - denoPatches は、recommended の lint を通し、このファイルが引く canon の事実を測った版だけを持つ。2.9.8 だけで測った事実 (uncopiedKeys の根拠など) があるので、2.9.8 だけ。
+ *     - 例外: 2.9.7 だけで測った事実 (canon: facts/deno/check-double-dash など) は、2.9.8 で測り直していない。
  *   - shellcheck: shellcheckVersion だけ。版で出す指摘が違う (canon: facts/shellcheck/sc2015-version-difference)。
  *   - git: verify.sh の事前条件 (verify.sh が確かめる)。
  *   - 版を足す・上げるときは、次を済ませてから、その道具の版の定数 (deno は denoMinor・denoPatches、shellcheck は shellcheckVersion) を変える:
@@ -193,16 +194,17 @@
  *     - deno を起動する数は (キーの数 + 1) × .ts の数。同時に起動するのは infoLimit まで。写しは 1 つずつ試すので、待ちは (キーの数 + 1) 回分の、.ts を infoLimit ずつ並べた時間になる。
  *   - 定義域。外れれば、理由を出して落ちる:
  *     - deno.json の最上位のキーは、imports・scopes と uncopiedKeys だけ。
- *       - uncopiedKeys: 写さなくても deno info の解決が変わらないと測ったキー (canon: facts/deno/info-config-other-location の「写さないキー」)。
- *         - 根拠は、canon の表の測った値だけ。他の値 (nodeModulesDir の "manual" など) は測っていない。
+ *       - uncopiedKeys: 写さなくても deno info の解決が変わらないと測ったキー (canon: facts/deno/info-config-other-location の「写さないキー」)。値を問わず処理する。
+ *         - 測ったのは canon の表の値だけ。
+ *         - nodeModulesDir の "manual" は、写さないと deno info の出力が変わると測った (dependencies の code の resolutionMode。同じ canon)。未使用の判定が変わるかは確かめていない。
  *         - deno の版を上げるときと、測っていない値を使うときは、canon の手順で測り直す。
- *       - 他のキーはキーごと落とす。写さないと解決が変わると測ったもの (同じ canon):
+ *       - 他のキーは、在れば落ちる。写さないと解決が変わると測ったもの (同じ canon):
  *         - workspace
  *         - links
  *         - importMap
  *         - name
  *         - unstable の sloppy-imports
- *         - compilerOptions の types。compilerOptions の他の値 (strict など) は測った範囲で変わらないが、キーごと落とす。
+ *         - compilerOptions の types。compilerOptions は値を問わず、在れば落ちる。
  *     - imports と scopes が、写しの場所で解決が変わる形を持たない:
  *       - `./`・`../` で始まるキー (scopes のキーを含む): 写しの場所から解決される (canon: facts/deno/info-config-other-location)。
  *       - パスの形の値: 値の先を治める deno.json (リポのファイルならリポの deno.json) を deno が自動で link し、その imports が写しの差に関わらず当たる (canon: facts/deno/info-config-other-location の「自動の link」)。パスの形は、次で始まる値:
@@ -450,9 +452,10 @@ async function exec(
   try {
     const { code } = await child.status;
     await empty();
-    // グループの外に残った子孫が pipe を持っていれば閉じないので、上限を置く。読みの reject でも決着し、下の await outputs が投げる
+    // グループの外に残った子孫が pipe を持っていれば閉じないので、上限を置く
     const settled = await settlesWithin(outputs);
     if (!settled) await Promise.all(readers.map((r) => r.cancel()));
+    // 読みの reject でも settlesWithin は決着し、ここで投げる
     const [out, err] = await outputs;
     return settled ? { code, out, err } : {
       code: 1,
@@ -671,7 +674,7 @@ async function deletedFiles(): Promise<Problems> {
 }
 
 const denoMinor = 9;
-const denoPatches = [7, 8];
+const denoPatches = [8];
 function denoVersion(): Promise<Problems> {
   const v = Deno.version.deno;
   const accepted = denoPatches.map((p) => `2.${denoMinor}.${p}`);
@@ -811,6 +814,13 @@ const denoFiles = (args: string[], targets: string[], tmp?: string) =>
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
+/** deno.json の where がオブジェクトでないときの失敗。v はその値、shape は直した後のオブジェクトが表す対応。 */
+const notObject = (where: string, shape: string, v: unknown) =>
+  fail(
+    `deno.json: ${where}がオブジェクトでない。${shape}のオブジェクトにする — ${
+      JSON.stringify(v)
+    }`,
+  );
 
 /** items の各要素に fn を、同時に limit 個までで回す。全部が決着するまで待つ。 */
 async function settleLimited<T, R>(
@@ -851,7 +861,7 @@ const resolutionOf = (modules: InfoModule[]) =>
       .map((m) => [m.specifier, m.error ?? null, m.dependencies ?? []]),
   );
 
-/** 写さなくても deno info の解決が変わらなかった、deno.json の最上位のキー。根拠は canon の表で測った値だけ (上の「定義域」。canon: facts/deno/info-config-other-location の「写さないキー」)。 */
+/** 写しに写さない、deno.json の最上位のキー (上の「定義域」の uncopiedKeys)。キーを足すときは、run-checks_test.ts の uncopiedConfigs にも足す。 */
 const uncopiedKeys = [
   "$schema",
   "bench",
@@ -876,7 +886,7 @@ const pathValue = (v: unknown) =>
 /**
  * deno info を同時に起動する数の上限 (上の「deno.json の imports の各キー」)。
  * - 8 は、このリポの .ts (2026-10-28 に 5 件) を 1 回で全部並べられる数。
- * - 同時に動く子 1 つにつき、このプロセスは fd を 3 つ持つ (canon: facts/deno/spawn-piped-child-fds)。8 なら 24 個で、run-checks_test.ts は開ける fd の数が 128 でも判定できることを確かめる。
+ * - 同時に動く子 1 つにつき、このプロセスは fd を 3 つ持つ (canon: facts/deno/spawn-piped-child-fds)。8 なら 24 個。
  * - 上げる条件: .ts が増えて、この段の待ちが目立つとき。開ける fd の数の上限 (ulimit -n) の中で上げる。
  */
 const infoLimit = 8;
@@ -886,25 +896,17 @@ const importsStage = "deno.json の imports";
 async function importKeys(): Promise<Run> {
   const config = JSON.parse(await Deno.readTextFile("deno.json"));
   if (!isObject(config)) {
-    return fail(
-      `deno.json: 最上位がオブジェクトでない。オブジェクトにする — ${
-        JSON.stringify(config)
-      }`,
-    );
+    return notObject("最上位", "設定の名前から値への対応", config);
   }
   const { imports = {}, scopes = {} } = config;
   if (!isObject(imports)) {
-    return fail(
-      `deno.json: imports がオブジェクトでない。指定子から依存への対応のオブジェクトにする — ${
-        JSON.stringify(imports)
-      }`,
-    );
+    return notObject("imports の値", "指定子から依存への対応", imports);
   }
   if (!isObject(scopes)) {
-    return fail(
-      `deno.json: scopes がオブジェクトでない。scope ごとの、指定子から依存への対応のオブジェクトにする — ${
-        JSON.stringify(scopes)
-      }`,
+    return notObject(
+      "scopes の値",
+      "scope ごとの、指定子から依存への対応",
+      scopes,
     );
   }
   const unhandled = Object.keys(config).filter((k) =>
@@ -970,7 +972,9 @@ async function importKeys(): Promise<Run> {
           ({ modules } = JSON.parse(dec.decode(r.out)));
         } catch (e) {
           problems.push(
-            `${f}: deno info の出力を JSON として読めない — ${messageOf(e)}`,
+            `${f}: deno info の出力を JSON として読めない。${
+              info.join(" ")
+            } ./${f} を回して出力を見る — ${messageOf(e)}`,
           );
           return;
         }
