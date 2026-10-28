@@ -16,11 +16,16 @@
  * 4. どれかの段が落ちたか、引数が 1 なら exit 1。
  *
  * 段の子のプロセスグループ:
- * - exec が起動する子は、それぞれ自分のプロセスグループの先頭になる (Deno.Command の detached。canon: facts/deno/command-spawn)。
- * - グループを空にする操作 (emptyGroup): グループに SIGTERM を送り、先頭が終わって出力の pipe が閉じるまで (上限 graceMs) 待ち、残るものに SIGKILL を送って先頭を回収する。SIGTERM の送信が投げても SIGKILL を送る。
- * - exec は、起動の直後から結果を返すまでを try/finally で包み、どの経路でも emptyGroup を 1 回だけ行ってから記録を外す。先頭が終わった後に残る孫も、段が終わる前に止まる。
- * - 状態: 起動から emptyGroup の終わりまで、子を記録する。鍵は子 (pgid は子の pid)。
- * - 自分で setsid してグループを抜けた子孫は止めない。
+ * - 子は各自のプロセスグループで起動し (Deno.Command の detached。canon: facts/deno/command-spawn)、exec は正常終了でも中断でも、戻る前にグループを空にする (emptyGroup)。先頭が終わった後に残る孫も、段が終わる前に止まる。自分で setsid してグループを抜けた子孫は止めない。
+ * - exec が待つものと、その上限:
+ *   - 先頭の終わり: 上限を置かない (段の実行そのもの)。中断では emptyGroup の SIGKILL で終わる。
+ *   - emptyGroup: SIGTERM の後、先頭の終わりと出力の pipe が閉じるのを graceMs まで待つ。SIGKILL の後の先頭の回収は、SIGKILL を捕まえられないので返る。
+ *   - 出力の pipe: emptyGroup の後、graceMs まで待つ。閉じなければ読み端を cancel し (読めた分が返る。canon: facts/deno/command-spawn の「出力の pipe を持ったまま残る子孫と、読み端の cancel」)、その子を「pipe が閉じない」の失敗にする。
+ * - pipe の書き端を持ちうるもの: 先頭 (終われば閉じる)、グループの中の子孫 (emptyGroup が止める)、グループを抜けた子孫 (止めない。cancel の後の書き込みは EPIPE になる)。
+ * - 状態 (groups):
+ *   - 対象: exec が起動した子のプロセスグループ。起動から emptyGroup の終わりまで記録する。
+ *   - 鍵: 子 (pgid は子の pid)。
+ *   - 等しいとみなす条件: 同じ exec の呼び出し。
  *
  * 中断 (SIGHUP・SIGINT・SIGTERM。終了コードは 128 + シグナルの番号で、下の signals):
  * - 最初の 1 回で、記録している全部のグループを同時に空にし、deno test の段の TMPDIR を消し、そのシグナルの終了コードで終わる。TMPDIR を消せなければ、理由を stderr に出してから同じ終了コードで終わる。
@@ -121,34 +126,43 @@ const signals: [Deno.Signal, number][] = [
   ["SIGINT", 130],
   ["SIGTERM", 143],
 ];
-/** 動いている子ごとの、そのグループを空にする操作 (emptyGroup を 1 回だけ行い、2 回目以降の呼び出しには同じ Promise を返す)。 */
 const groups = new Set<() => Promise<void>>();
 const killGroup = (child: Deno.ChildProcess, signal: Deno.Signal) => {
   try {
     Deno.kill(-child.pid, signal);
   } catch (e) {
-    // ESRCH: グループに誰も残っていない。EPERM: 終わりかけのものだけ (macOS。canon: facts/deno/command-spawn の「Deno.kill」。macOS が EPERM を返さなくなったら PermissionDenied を外せる)
+    // ESRCH: グループに誰も残っていない
+    if (e instanceof Deno.errors.NotFound) return;
+    // EPERM: macOS で終わりかけのものだけのグループでだけ観測した (canon: facts/deno/command-spawn の「Deno.kill」)。機構は未確認。macOS が EPERM を返さなくなったら外せる
     if (
-      !(e instanceof Deno.errors.NotFound ||
-        e instanceof Deno.errors.PermissionDenied)
-    ) throw e;
+      Deno.build.os === "darwin" && e instanceof Deno.errors.PermissionDenied
+    ) return;
+    throw e;
   }
 };
-/** SIGTERM を送ってから SIGKILL を送るまで、先頭の終わりと出力の pipe が閉じるのを待つ上限。 */
+/** SIGTERM の後に先頭の終わりと出力の pipe が閉じるのを待つ上限と、emptyGroup の後に pipe が閉じるのを待つ上限。 */
 const graceMs = 2000;
+/** p が ms 以内に決着すれば true。 */
+async function settlesWithin(p: Promise<unknown>, ms: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      p.then(() => true, () => true),
+      new Promise<boolean>((r) => timer = setTimeout(() => r(false), ms)),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 async function emptyGroup(
   child: Deno.ChildProcess,
   outputs: Promise<unknown>,
 ) {
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  // SIGTERM の送信が投げても SIGKILL を送る
   try {
     killGroup(child, "SIGTERM");
-    await Promise.race([
-      Promise.allSettled([child.status, outputs]),
-      new Promise((r) => timer = setTimeout(r, graceMs)),
-    ]);
+    await settlesWithin(Promise.allSettled([child.status, outputs]), graceMs);
   } finally {
-    clearTimeout(timer);
     try {
       killGroup(child, "SIGKILL");
     } finally {
@@ -186,6 +200,26 @@ interface EnvChange {
   unset?: string[];
 }
 
+const concat = (chunks: Uint8Array[]) => {
+  const all = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+  let i = 0;
+  for (const c of chunks) {
+    all.set(c, i);
+    i += c.length;
+  }
+  return all;
+};
+
+/** 閉じるか cancel されるまで読む。Response の読みは cancel できない (canon: facts/deno/command-spawn の「出力の pipe を持ったまま残る子孫と、読み端の cancel」)。 */
+async function readAll(reader: ReadableStreamDefaultReader<Uint8Array>) {
+  const chunks: Uint8Array[] = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return concat(chunks);
+    chunks.push(value);
+  }
+}
+
 /** 子を自分のプロセスグループで起動し、終わってグループを空にするまで待つ。 */
 async function exec(
   cmd: string,
@@ -204,20 +238,30 @@ async function exec(
     stderr: "piped",
     detached: true,
   }).spawn();
-  const outputs = Promise.all([
-    new Response(child.stdout).bytes(),
-    new Response(child.stderr).bytes(),
-  ]);
+  const readers = [child.stdout.getReader(), child.stderr.getReader()];
+  const outputs = Promise.all(readers.map(readAll));
   // 待つまでに reject すると unhandled rejection でこのプロセスが落ち、グループが残る
   outputs.catch(() => {});
   let emptied: Promise<void> | undefined;
+  // 中断の経路と exec の finally の両方が呼ぶので、2 回目以降は同じ Promise を返す
   const empty = () => emptied ??= emptyGroup(child, outputs);
   groups.add(empty);
   try {
     const { code } = await child.status;
     await empty();
+    const closed = await settlesWithin(outputs, graceMs);
+    if (!closed) await Promise.all(readers.map((r) => r.cancel()));
     const [out, err] = await outputs;
-    return { code, out, err };
+    return closed ? { code, out, err } : {
+      code: 1,
+      out,
+      err: concat([
+        err,
+        enc.encode(
+          `${self}: ${cmd} の出力の pipe が閉じない (グループを抜けた子孫が保持している)\n`,
+        ),
+      ]),
+    };
   } finally {
     try {
       await empty();

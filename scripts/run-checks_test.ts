@@ -763,3 +763,42 @@ Deno.test("段が普通に終わると、残った孫を止め、deno test の�
     );
   });
 });
+
+Deno.test("段の子孫がグループを抜けて出力の pipe を持ったまま残っても、段は上限の内に落ちる", async () => {
+  await withRepo({ "a.sh": "#!/bin/sh\n" }, async (dir) => {
+    const pidFile = `${dir}/.git/escaped.pid`;
+    // setsid のコマンドは macOS に無いので、deno の detached (子で setsid する) で抜ける
+    const escape = [
+      'const c = new Deno.Command("sleep", { args: ["30"], detached: true, stdin: "null" }).spawn();',
+      `Deno.writeTextFileSync("${pidFile}", String(c.pid));`,
+      "c.unref();",
+    ].join(" ");
+    const bin = await fakePath(dir, {
+      shellcheck: ["#!/bin/sh", version, `deno eval '${escape}'`, "exit 0"]
+        .join("\n"),
+    });
+    try {
+      const start = performance.now();
+      const r = await runChecks(dir, "0", { PATH: `${bin}:${baseEnv.PATH}` });
+      const secs = (performance.now() - start) / 1000;
+      deepStrictEqual(
+        {
+          code: r.code,
+          failed: r.stderr.includes("== shellcheck: 落ちた"),
+          message: r.stderr.includes(
+            "shellcheck の出力の pipe が閉じない (グループを抜けた子孫が保持している)",
+          ),
+          bounded: secs < 15,
+        },
+        { code: 1, failed: true, message: true, bounded: true },
+        `${secs}s\n${r.stderr}`,
+      );
+    } finally {
+      try {
+        Deno.kill(Number(await Deno.readTextFile(pidFile)), "SIGKILL");
+      } catch (e) {
+        if (!(e instanceof Deno.errors.NotFound)) throw e;
+      }
+    }
+  });
+});
