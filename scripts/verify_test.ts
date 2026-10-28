@@ -1116,7 +1116,9 @@ const wideLocale = "en_US.UTF-8";
  * - 3: noLocale (1 が偽)。
  * - 他: 投げる。bash の構文・正規表現の誤りの 2 (canon: facts/shell/bash-regex-match-exit-status) と、信号で終わったときの 128 + 信号の番号 (canon: facts/deno/command-spawn) を含む。
  */
-async function probeRange(env: Record<string, string>) {
+async function probeRange(
+  env: Record<string, string>,
+): Promise<{ kind: "wide" | "narrow" | "noLocale"; stderr: string }> {
   const probe = await spawn("bash", {
     args: ["-c", '[ "${#1}" = 1 ] || exit 3; [[ $1 =~ ^[A-Z]$ ]]', "bash", "É"],
     env: { ...baseEnv, ...env },
@@ -1158,24 +1160,30 @@ Deno.test({
   },
 });
 
-Deno.test("locale の確かめ: bash が 0・1・3 の他で終われば、終了コードと信号を出して投げる", async () => {
-  // 非対話の bash は -c の文字列より先に BASH_ENV のファイルを回す (canon: facts/shell/bash-env-read-by-noninteractive-bash)
-  await withTempDir(async (dir) => {
-    const ends: [string, string][] = [
-      ["exit 2", "exit 2 で終わった"],
-      ["kill -TERM $$", "exit 143 (SIGTERM) で終わった"],
-    ];
-    const unmet = await Promise.all(ends.map(async ([script, want], i) => {
-      const path = `${dir}/${i}.sh`;
-      await Deno.writeTextFile(path, `${script}\n`);
-      const got = await probeRange({ BASH_ENV: path }).then(
-        (r) => `投げなかった (${r.kind})`,
-        (e: Error) => e.message,
-      );
-      return got.includes(want) ? [] : [`${script}: ${got}`];
-    }));
-    deepStrictEqual(unmet.flat(), []);
-  });
+Deno.test({
+  name:
+    "locale の確かめ: bash が 0・1・3 の他で終われば、終了コードと信号を出して投げる",
+  // 下の BASH_ENV の順を測ったのは Linux の bash だけ。macOS の bash で測れば外す
+  ignore: Deno.build.os !== "linux",
+  fn: async () => {
+    // 非対話の bash は -c の文字列より先に BASH_ENV のファイルを回す (canon: facts/shell/bash-env-read-by-noninteractive-bash)
+    await withTempDir(async (dir) => {
+      const ends: [string, string][] = [
+        ["exit 2", "exit 2 で終わった"],
+        ["kill -TERM $$", "exit 143 (SIGTERM) で終わった"],
+      ];
+      const unmet = await Promise.all(ends.map(async ([script, want], i) => {
+        const path = `${dir}/${i}.sh`;
+        await Deno.writeTextFile(path, `${script}\n`);
+        const got = await probeRange({ BASH_ENV: path }).then(
+          (r) => `投げなかった (${r.kind})`,
+          (e: Error) => e.message,
+        );
+        return got.includes(want) ? [] : [`${script}: ${got}`];
+      }));
+      deepStrictEqual(unmet.flat(), []);
+    });
+  },
 });
 
 /** wideLocale を使う子の環境の差分。Linux では dir に locale を作る。 */

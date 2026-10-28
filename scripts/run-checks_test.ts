@@ -1060,7 +1060,7 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
           deno: [
             "#!/bin/sh",
             'case " $* " in',
-            `*" info "*" ./bad.ts "*) echo notjson; exit 0 ;;`,
+            `*" info "*" ./bad.ts "*) echo notjson; echo warn >&2; exit 0 ;;`,
             `*" info "*" ./slow.ts "*) echo $$ > "${
               requireVar("FAKE_MARKS")
             }/slow-pid"; sleep 2 ;;`,
@@ -1076,11 +1076,16 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
         env: baseEnv,
         clearEnv: true,
       }).output();
+      const section = sectionOf(r.stderr, importsStage);
+      // 間の JSON.parse の文言は言語の仕様が決めず、deno の版で変わりうる
       expect(
-        "deno info の出力が JSON として読めなければ落ち、並べた兄弟の deno info は run-checks.ts の終了の後に残らない",
-        sectionOf(r.stderr, importsStage).includes(
-          `bad.ts: deno info の出力を JSON として読めない — Unexpected token 'o', "notjson\n" is not valid JSON\nnotjson\n\ndeno.json: imports の未使用の判定をしていない。上を直してから回す\n`,
-        ) && !alive.success,
+        "deno info の出力が JSON として読めなければ、stdout と stderr を出して落ち、並べた兄弟の deno info は run-checks.ts の終了の後に残らない",
+        section.includes(
+          "\nbad.ts: deno info の出力を JSON として読めない。下の出力を見て原因を直す — ",
+        ) &&
+          section.includes(
+            "\n-- deno info の stdout:\nnotjson\n-- deno info の stderr:\nwarn\ndeno.json: imports の未使用の判定をしていない。上を直してから回す\n",
+          ) && !alive.success,
         r.stderr,
       );
     }),

@@ -61,11 +61,11 @@
  * - anchor (空なら見ない。%-decode できなければ「不正な %-エンコード」違反):
  *   - 辿った先が `.md` の引数: その見出しの id のどれかと一致すること。id は github-slugger の規則で作る (canon: facts/github/heading-anchor-ids)。
  *   - 辿った先が `.md` でないファイル: 行の anchor `L<行番号>` の形だけを受ける。他の形 (範囲の `L10-L20` を含む) は検査できないので違反 (canon: facts/github/blob-line-anchors)。
- *     - 行番号がファイルの行数を超えるかは見ない。行数を超える行番号の扱いは未確認 (canon: facts/github/blob-line-anchors の「docs に無いもの」)。
- *   - 辿った先がディレクトリ: どの形も検査できないので違反 (canon: facts/github/blob-line-anchors の「docs に無いもの」)。直し方は anchor を外すこと。
- *   - 範囲・ディレクトリ・行数を超える行番号の扱いを外せる条件: canon の facts/github/blob-line-anchors の「確かめ方」で GitHub の描画を確かめたとき。
- *     - 範囲とディレクトリ: 効く形を受ける形に足す。
- *     - 行数を超える行番号: 行を示さない描画なら違反にする。
+ *     - 行番号がファイルの行数を超えるかは見ない。行数を超える行番号の扱いは未確認 (同じ canon の「docs に無いもの」)。
+ *   - 辿った先がディレクトリ: どの形も検査できないので違反 (同じ canon の「docs に無いもの」)。直し方は anchor を外すこと。
+ * - 上の anchor の次の扱いは、canon の facts/github/blob-line-anchors の「確かめ方」で GitHub の描画を確かめたときに外せる。外し方:
+ *   - 範囲とディレクトリ: 効く形を受ける形に足す。
+ *   - 行数を超える行番号: 行を示さない描画なら違反にする。
  * - ファイルを読めない (無い、を含む) か UTF-8 として不正なら、そのファイル自身の違反にする。そういう .md への anchor は見ない。
  * - 違反の行は `<file>: <何が>。<どう直すか> — <リンクか原因の文言>`。
  */
@@ -319,19 +319,17 @@ for (const f of Deno.args) {
 for (const f of Deno.args) {
   destinations.set(pathKey(f), { kind: "file" });
 }
+const markdownParsed: [string, Parsed | undefined][] = [];
 for (const file of markdownFiles) {
   const text = await readOrReport(file);
   const tokens = text === undefined ? undefined : parse(text);
-  destinations.set(pathKey(file), {
-    kind: "md",
-    parsed: tokens && { tokens, anchors: anchorsOf(tokens) },
-  });
+  const parsed = tokens && { tokens, anchors: anchorsOf(tokens) };
+  destinations.set(pathKey(file), { kind: "md", parsed });
+  markdownParsed.push([file, parsed]);
 }
 
-for (const file of markdownFiles) {
-  const source = destinations.get(pathKey(file));
-  if (source?.kind !== "md" || source.parsed === undefined) continue;
-  const { parsed } = source;
+for (const [file, parsed] of markdownParsed) {
+  if (parsed === undefined) continue;
   const dir = file.split("/").slice(0, -1);
   for (const target of targetsOf(parsed.tokens)) {
     if ("uncheckable" in target) {
