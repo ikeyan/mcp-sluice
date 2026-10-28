@@ -338,7 +338,7 @@ Deno.test("引数・TMPDIR・出力の経路と順", async () => {
       const r = await runChecks(dir, "2");
       expect(
         "引数が 0 か 1 でない",
-        r.code === 2 && r.stderr.includes("引数は hook を揃えた結果"),
+        r.code === 2 && r.stderr.includes("引数は hook の段の結果"),
         r.stderr,
       );
     }),

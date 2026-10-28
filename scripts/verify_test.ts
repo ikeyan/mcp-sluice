@@ -1,6 +1,6 @@
 /**
  * verify.sh を子として、TMPDIR の下の一時ディレクトリの fixture のリポで回す。
- * - fixture は verify.sh・hooks/pre-push・deno.json・deno.lock の写しと、scripts/run-checks.ts の stub。stub は次を JSON で出し、引数 (hook を揃えた結果) で終わる。
+ * - fixture は verify.sh・hooks/pre-push・deno.json・deno.lock の写しと、scripts/run-checks.ts の stub。stub は次を JSON で出し、引数 (hook の段の結果) で終わる。
  *   - git が指す git dir。
  *   - 環境に残っている GIT_ の変数の名前 (比べるのは --local-env-vars の一覧に載るものだけ)。
  *   - TMPDIR と、自分の許可 (Deno.permissions.querySync)。
@@ -359,11 +359,11 @@ const pathTools = [
   "env",
 ];
 /** dir の .git/partial-bin に、missing を除いた pathTools の symlink を置き、その dir を返す。 */
-const pathWithout = async (dir: string, missing: string) => {
+const pathWithout = async (dir: string, missing: string[]) => {
   const bin = `${dir}/.git/partial-bin`;
   await Deno.mkdir(bin);
   for (const name of pathTools) {
-    if (name !== missing) await ln(await which(name), `${bin}/${name}`);
+    if (!missing.includes(name)) await ln(await which(name), `${bin}/${name}`);
   }
   return bin;
 };
@@ -446,44 +446,41 @@ const otherHooks = {
 const copied = { code: 0, hooks: copiedHooks, tmpdir: realTmpdir };
 /** bash が PATH に無いコマンドに出す行。 */
 const notFound = (tool: string) => `: ${tool}: command not found`;
-/** 道具が無いときの外れ方 (verify.sh の先頭の「PATH にあるもの」)。state は、その道具を使う写す先の状態。 */
+/** 写せないときの stderr の、写す先の後からコマンドの先頭まで。 */
+const cannotCopy =
+  "/pre-push: hooks/pre-push を写せない (理由は上)。Execute: mkdir -p";
+/** 道具が無いときの外れ方 (verify.sh の先頭の「PATH にあるもの」)。tools は PATH に無い道具、state は写す先の状態。 */
 const missingTools: (
-  & { tool: string; state: HookState }
+  & { tools: string[]; state: HookState }
   & Omit<Case, "name" | "prepare" | "env">
 )[] = [
   ...["uname", "dirname", "git"].map((tool) => ({
-    tool,
+    tools: [tool],
     state: "無い" as const,
     code: 127,
     hooks: {},
     stderr: notFound(tool),
   })),
   {
-    tool: "mkdir",
+    tools: ["mkdir"],
     state: "hooks が無い",
     code: 1,
     hooks: null,
     tmpdir: realTmpdir,
-    stderr: [
-      notFound("mkdir"),
-      "/pre-push: hooks/pre-push を写せない (理由は上)。Execute: mkdir -p",
-    ],
+    stderr: [notFound("mkdir"), cannotCopy],
     fix: true,
   },
   ...["install", "ln"].map((tool) => ({
-    tool,
+    tools: [tool],
     state: "無い" as const,
     code: 1,
     hooks: {},
     tmpdir: realTmpdir,
-    stderr: [
-      notFound(tool),
-      "/pre-push: hooks/pre-push を写せない (理由は上)。Execute: mkdir -p",
-    ],
+    stderr: [notFound(tool), cannotCopy],
     fix: true as const,
   })),
   {
-    tool: "rm",
+    tools: ["rm"],
     state: "無い",
     code: 1,
     hooks: { ...copiedHooks, "pre-push.verify-PID": copiedHook },
@@ -495,8 +492,22 @@ const missingTools: (
     ],
     fix: true,
   },
+  // 一時ファイルは作られないが、在るかを見ずに消すので、消せないことも出す
   {
-    tool: "cmp",
+    tools: ["rm", "install"],
+    state: "無い",
+    code: 1,
+    hooks: {},
+    tmpdir: realTmpdir,
+    stderr: [
+      notFound("rm"),
+      notFound("install"),
+      ": 一時ファイルを消せない (理由は上の rm)。Execute: rm -f",
+      cannotCopy,
+    ],
+  },
+  {
+    tools: ["cmp"],
     state: "同じ",
     code: 1,
     hooks: copiedHooks,
@@ -507,7 +518,7 @@ const missingTools: (
     ],
   },
   {
-    tool: "chmod",
+    tools: ["chmod"],
     state: "同じで実行可能でない",
     code: 1,
     hooks: { "pre-push": { ...copiedHook, executable: false } },
@@ -519,15 +530,26 @@ const missingTools: (
     fix: true,
   },
   // hook は deno の exec より前に揃える
+  // 使わない状態では、無くても揃う。写す先に pre-push が在れば cmp は使う
+  ...([
+    { tools: ["cmp", "chmod"], state: "無い" },
+    { tools: ["chmod"], state: "同じ" },
+  ] as const).map(({ tools, state }) => ({
+    tools: [...tools],
+    state,
+    code: 0,
+    hooks: copiedHooks,
+    tmpdir: realTmpdir,
+  })),
   {
-    tool: "deno",
+    tools: ["deno"],
     state: "無い",
     code: 127,
     hooks: copiedHooks,
     stderr: "exec: deno: not found",
   },
   {
-    tool: "bash",
+    tools: ["bash"],
     state: "無い",
     invoke: (dir) => Promise.resolve({ ...direct(dir), exec: true }),
     code: 127,
@@ -785,8 +807,7 @@ cases.push(
     code: 1,
     hooks: {},
     tmpdir: realTmpdir,
-    stderr:
-      "/pre-push: hooks/pre-push を写せない (理由は上)。Execute: mkdir -p",
+    stderr: cannotCopy,
     fix: true,
   },
   {
@@ -952,11 +973,11 @@ cases.push(
     hooks: copiedHooks,
     stderr: "が , を含む",
   },
-  ...missingTools.map(({ tool, state, ...rest }): Case => ({
-    name: `${tool} が PATH に無い`,
+  ...missingTools.map(({ tools, state, ...rest }): Case => ({
+    name: `${tools.join("・")} が PATH に無い (写す先は ${state})`,
     prepare: async (dir) => {
       await setHook(dir, state);
-      await pathWithout(dir, tool);
+      await pathWithout(dir, tools);
     },
     env: (_, dir) => ({ PATH: `${dir}/.git/partial-bin` }),
     ...rest,

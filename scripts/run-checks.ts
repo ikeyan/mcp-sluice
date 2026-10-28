@@ -89,9 +89,9 @@
  *     - それを確かめるテスト (run-checks_test.ts の、中断の「deno test の段」の行と、段が普通に終わる test の、deno test の段の TMPDIR の確かめ)。
  *
  * 入力と環境の定義域:
- * - 引数は 1 つで、verify.sh が hook を揃えた結果。外れていれば理由を出して exit 2。
+ * - 引数は 1 つで、verify.sh の hook の段の結果。外れていれば理由を出して exit 2。
  *   - 0: 揃えた。
- *   - 1: 揃えられなかった (理由は verify.sh が出した)。段は回し、最後に exit 1。
+ *   - 1: 揃えられなかったか、写す途中の一時ファイルを消せなかった (理由は verify.sh が出した)。段は回し、最後に exit 1。
  * - 環境変数 TMPDIR: .ts があるときだけ使い、その下に段の一時ディレクトリを作る。verify.sh は絶対パスにした値を渡す。
  *   - 次のときは段の前で exit 1:
  *     - 未設定。
@@ -358,7 +358,7 @@ const failBeforeSteps = async (problems: string[]): Promise<never> => {
 const [state] = Deno.args;
 if (Deno.args.length !== 1 || (state !== "0" && state !== "1")) {
   console.error(
-    `${self}: 引数は hook を揃えた結果 (0 か 1) の 1 つだけ。./verify.sh から起動する (${
+    `${self}: 引数は hook の段の結果 (0 か 1) の 1 つだけ。./verify.sh から起動する (${
       Deno.args.join(" ")
     })`,
   );
