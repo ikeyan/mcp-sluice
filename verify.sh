@@ -8,17 +8,19 @@
 #   - 次は git 2.43.0 で測った。2.32〜2.42 は測っていない。
 #     - hook の判定が読む config -z --show-origin の並び (canon: facts/git/config-sources-and-scopes)。
 #     - run-checks.ts が読む ls-files -s -t の形 (canon: facts/git/repository-shapes)。
-#     - verify.sh と run-checks.ts が読む rev-parse --local-env-vars の一覧 (canon: facts/git/local-env-vars-and-hook-env)。
-#       - 各行が ^GIT_[A-Z_]+$ に合わなければ、変数の名前として使わずに落ちる。リポの中の git は、知らない option を名前のまま出して exit 0 で終わる (同じ canon の「知らない option」)。
+#   - verify.sh と run-checks.ts が読む rev-parse --local-env-vars の一覧 (canon: facts/git/local-env-vars-and-hook-env)。測った版での出方 (2.32〜2.42 は測っていない):
+#     - git 2.43.0: GIT_DIR に存在しないパスを入れても、同じ 15 個を同じ順で出した。測ったのは GIT_DIR だけ。
+#     - git 2.55.0 (macOS): 値を変えずに一覧を出した。
+#   - 一覧の各行が ^GIT_[A-Z_]+$ (A-Z は ASCII の大文字だけ) に合わなければ、変数の名前として使わずに落ちる。リポの中の git は、知らない option を名前のまま出して exit 0 で終わる (同じ canon の「知らない option」)。
 # - このファイルの dir の状態ごとの扱い (canon: facts/git/repository-shapes の「スクリプトを置いた dir の位置」):
 #   - 本体の作業ツリーのルート: 回す。
 #   - linked worktree のルート: 回す。hook は common git dir に写す (下の「hook」)。
 #   - 親のリポの subdirectory (git が追跡するディレクトリに展開した写しなど): 落ちる。そのまま回すと git は親のリポを見て、hook を親のリポに写し、検査の対象も subdirectory の下に限られる。
-#   - git の作業ツリーでない: 落ちる。次のどれか:
-#     - リポの外 (理由は git rev-parse が出す)。
+#   - git の作業ツリーでない: 落ちる。次のどれか (リポの外と持ち主の違いは、理由を git rev-parse が出す):
+#     - リポの外。
 #     - git dir の中。
 #     - bare のリポ。
-#     - safe.directory が要る持ち主の違い (理由は git rev-parse が出す)。
+#     - safe.directory が要る持ち主の違い。
 # - PATH にあるもの:
 #   - cmp・install: 無ければ hook を揃えられないとする。
 #   - shellcheck: run-checks.ts が確かめる。
@@ -70,7 +72,7 @@
 # - 無い・ディレクトリでない・入れない: 落ちる。理由は cd が出す。
 # - 在る、入れるディレクトリ (symlink を含む): symlink を解決した絶対パスにする。
 #   - それが `,` を含む: --allow-write の区切りと読まれる (canon: facts/deno/allow-flag-comma-separates-values) ので落ちる。deno が --allow-write の値の `,` を escape できるようになったら外せる。
-#   - 書けるかは、deno test の段の TMPDIR を作れるかで run-checks.ts が判定する (作れなければ落ちる)。
+#   - 書けるかは、`*_test.ts` があるときだけ、deno test の段の TMPDIR を作れるかで run-checks.ts が判定する (作れなければ落ちる)。
 set -euo pipefail
 # $2 は終了コード (既定は 1)
 die() {
@@ -92,7 +94,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 3 ] ||
   { [ "${BASH_VERSINFO[0]}" -eq 3 ] && [ "${BASH_VERSINFO[1]}" -lt 2 ]; }; then
   die "bash が 3.2 以降でない ($BASH_VERSION)。bash 3.2 以降で回す"
 fi
-# dirname が - だけのとき、/. が無いと cd は OLDPWD に移る
+# dirname が - だけのとき、/. が無いと cd は OLDPWD に移る (canon: facts/shell/cd-operand-inputs)
 CDPATH='' cd -- "$(dirname -- "$0")/."
 git_version=$(git --version)
 version_re='^git version ([0-9]+)\.([0-9]+)'
@@ -101,8 +103,10 @@ if ! [[ $git_version =~ $version_re ]] || [ "${BASH_REMATCH[1]}" -lt 2 ] ||
   die "git が 2.32 以降でない ($git_version)。git 2.32 以降を PATH の先に置く"
 fi
 local_env=$(git rev-parse --local-env-vars)
+# 範囲 (A-Z) は locale で ASCII の外の文字を含みうる (glob の範囲の実測は canon: facts/shell/locale-dependent-ranges) ので、文字を並べる
+name_re='^GIT_[ABCDEFGHIJKLMNOPQRSTUVWXYZ_]+$'
 while IFS= read -r v; do
-  [[ $v =~ ^GIT_[A-Z_]+$ ]] ||
+  [[ $v =~ $name_re ]] ||
     die "git rev-parse --local-env-vars の出力に、変数の名前でない行がある ($v)。git の版を確かめる"
   unset "$v"
 done <<<"$local_env"
@@ -200,7 +204,7 @@ handle_existing() {
     cmp "$src" "$hook" >/dev/null || compared=$?
     case $compared in
     0)
-      # 実行可能なら chmod しない: 他の uid が持つファイルへの chmod は EPERM で落ちる
+      # 実行可能なら chmod しない: 他の uid が持つファイルへの chmod は EPERM で落ちる (canon: facts/shell/chmod-non-owner-eperm)
       if [ ! -x "$hook" ] && ! chmod +x "$hook"; then
         fix_by "$hook: 実行可能にできない (理由は上の chmod)" "chmod +x $q_hook"
       fi
@@ -249,11 +253,13 @@ case $TMPDIR in
 *,*) die "TMPDIR ($TMPDIR) が , を含む。, を含まないディレクトリを TMPDIR に設定する" ;;
 esac
 export TMPDIR
+# 段の子の deno は別のプロセスで、下の許可を受けない (run-checks.ts の先頭の規則)
 # Deno.kill で段のプロセスグループに送るには、パスを付けない --allow-run が要る (canon: facts/deno/command-spawn の「Deno.kill」)。パスで絞った --allow-run で通るようになったら、段が起動するもの (git・shellcheck・deno) に絞る。
 flags=(--allow-run)
 # 段の子の環境から変数を消すには、Deno.env.toObject で環境を丸ごと写す。それには変数を絞らない --allow-env が要る (canon: facts/deno/env-to-object-requires-unscoped-allow-env)。
 flags+=(--allow-env)
-# 段の子の deno は別のプロセスで、この許可を受けない (run-checks.ts の先頭の規則)
+# deno test の段の TMPDIR を作って消す
 flags+=("--allow-write=$TMPDIR")
+# deno.json の imports を読む
 flags+=(--allow-read=deno.json)
 exec deno run "${flags[@]}" scripts/run-checks.ts "$hook_failed"

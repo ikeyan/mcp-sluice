@@ -954,6 +954,76 @@ Deno.test("verify.sh の hook の状態と環境", async () => {
   deepStrictEqual((await Promise.all(cases.map(runCase))).flat(), []);
 });
 
+Deno.test("git rev-parse --local-env-vars の各行が ^GIT_[A-Z_]+$ に合うときだけ受ける", async () => {
+  // 次元: 大文字・小文字・数字・-・空白・\r・ASCII の外 (canon: facts/shell/string-input-categories)、空の行、GIT_ だけの行
+  const fake =
+    `#!/bin/sh\n[ "$*" = "rev-parse --local-env-vars" ] && { cat "\${FAKE_LINES?FAKE_LINES が無い}"; exit 0; }\nexec '${realGit}' "$@"\n`;
+  /** fake の git が lines を出したときの、期待との違い。 */
+  const runLines = (lines: string[]) => {
+    // verify.sh は $(...) で受け (末尾の改行を落とす)、<<< で行に割る (空の出力は 1 つの空の行)
+    const read = lines.join("\n").replace(/\n+$/, "").split("\n");
+    return runCase({
+      name: `--local-env-vars が ${JSON.stringify(lines)}`,
+      // 改行を含む値を環境変数で渡すと、stub が読む env の出力の行が増える
+      prepare: (dir) =>
+        Deno.writeTextFile(`${dir}/.git/lines`, lines.join("\n")),
+      fakes: { git: fake },
+      env: (_, dir) => ({ FAKE_LINES: `${dir}/.git/lines` }),
+      ...(read.every((l) => /^GIT_[A-Z_]+$/.test(l)) ? copied : {
+        code: 1,
+        hooks: null,
+        stderr:
+          "verify.sh: git rev-parse --local-env-vars の出力に、変数の名前でない行がある (",
+      }),
+    });
+  };
+  const rows = [
+    ["GIT_DIR", "GIT_WORK_TREE"],
+    ["GIT__"],
+    [""],
+    ["GIT_"],
+    ["GIT_DIR", "", "GIT_PREFIX"],
+    ["GIT_DIR", ""],
+    ["GIT_DIR\r"],
+    ["git_dir"],
+    ["GIT_dir"],
+    ["GIT_1"],
+    ["GIT_A-B"],
+    ["GIT_A B"],
+    [" GIT_DIR"],
+    ["GIT_é"],
+    ["GIT_ｚ"],
+  ];
+  deepStrictEqual((await Promise.all(rows.map(runLines))).flat(), []);
+  const line = fc.oneof(
+    fc.constantFrom("", "GIT_", "GIT_DIR", "git_dir", "--local-env-vars"),
+    fc.array(
+      fc.constantFrom(
+        "A",
+        "Z",
+        "_",
+        "a",
+        "z",
+        "0",
+        "9",
+        "-",
+        " ",
+        "\r",
+        "é",
+        "ｚ",
+      ),
+      { minLength: 1, maxLength: 4 },
+    ).map((cs) => `GIT_${cs.join("")}`),
+  );
+  await fc.assert(
+    fc.asyncProperty(
+      fc.array(line, { minLength: 1, maxLength: 3 }),
+      async (lines) => deepStrictEqual(await runLines(lines), []),
+    ),
+    { numRuns: 10, includeErrorInReport: true },
+  );
+});
+
 Deno.test("TMPDIR の値の文字", async () => {
   // 次元: canon: facts/shell/string-input-categories の全分類と、glob の ? [、改行。`,` は cases の行で検査する
   const chars = [
