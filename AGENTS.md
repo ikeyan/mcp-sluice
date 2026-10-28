@@ -60,7 +60,7 @@
   - `shellcheck`
   - `deno`
   - `git`
-- `deno.json` は `"lock": true` で、依存は完全な版で固定する。`minimumDependencyAge` は `P3D` (canon: facts/deno/minimum-dependency-age)。`./verify.sh` は `--frozen-lockfile` で回し、`deno.lock` が `deno.json` と食い違えば書き換えず落ちる (直すのは `deno install --frozen=false`)。
+- `deno.json` は `"lock": true` で、依存は完全な版で固定する。`minimumDependencyAge` は `P3D` (canon: facts/deno/minimum-dependency-age)。`./verify.sh` は `--frozen-lockfile` で回し、`deno.lock` が `deno.json` と食い違えば落ちる (直すのは `deno install --frozen=false`)。
 
 ## このリポの言語
 
@@ -72,7 +72,7 @@
 
 ## 外部依存の事実
 
-- 確定した契約は canon (`ikeyan/canon` の `facts/<topic>/`) に置き、そこから引く。このリポの中には事実の本文を置かない (design.md の根拠の記述を除く)。
+- 確定した契約は canon (`ikeyan/canon` の `facts/<topic>/`) に置き、そこから引く。
 - canon を読めない環境では、一次情報 (仕様・ソース・公式 docs) を直接確かめる。
 
 ## 文書の言語

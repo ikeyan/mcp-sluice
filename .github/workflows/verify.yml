@@ -17,7 +17,7 @@ jobs:
         with:
           # scripts/run-checks.ts の denoRange の中の版。上げるときは run-checks.ts の先頭の「版」の手順に従う
           deno-version: "2.9.8"
-      # runner image 同梱の shellcheck は scripts/run-checks.ts の shellcheckVersion と版が違い、指摘の出方が違う (canon: facts/shellcheck/sc2015-version-difference) ので、その版を /usr/local/bin に入れて先に引かせる。
+      # runner image 同梱の shellcheck は scripts/run-checks.ts の shellcheckVersion と版が違い、指摘の出方が違う (canon: facts/shellcheck/sc2015-version-difference) ので、その版を同梱版より先に PATH で引かせる。
       # 外せる条件: ubuntu-latest の同梱の shellcheck が shellcheckVersion と同じ版になったとき。
       - env:
           # scripts/run-checks.ts の shellcheckVersion と同じ版

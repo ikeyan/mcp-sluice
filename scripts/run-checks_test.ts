@@ -1,9 +1,7 @@
 /**
  * run-checks.ts を子として、TMPDIR の下の一時ディレクトリの fixture のリポで回す。
  * - fixture は git のリポ。run-checks.ts が読む deno.json を必ず置く。
- * - run-checks.ts に渡す deno の引数は、verify.sh が exec する引数 (verifyFlags) を使う。PATH の先に置いた fake の deno に、verify.sh の exec の引数を書かせて得る。
- * - fake (shellcheck・git) は git・deno・sleep の symlink と同じ dir に置き、PATH の先頭にする。PATH から本物の shellcheck を外す test (段より前の確かめ) は、PATH をその dir だけにする。
- * - symlink は ln -s で作る。deno test の段の --allow-write は TMPDIR に絞ってあり、Deno.symlink は絞らない read・write を要る (canon: facts/deno/symlink-requires-unscoped-permissions)。
+ * - run-checks.ts に渡す deno の引数は、verify.sh が exec するもの (verifyFlags) と同じにする。
  * - test が起動したもの (run-checks.ts の子、fake の段のグループ、fixture の常駐ループ、グループを抜けた sleep) は、test の finally で止める。pid は fake と fixture に書かせる。
  * - 子の環境は、このプロセスの環境から git の場所を決める変数 (canon: facts/git/local-env-vars-and-hook-env) を消し、利用者の git の設定を読まないもの。
  */
@@ -68,6 +66,7 @@ async function run(cmd: string, args: string[], cwd?: string) {
   return dec.decode(r.stdout);
 }
 
+// deno test の段は --allow-write を段の TMPDIR に絞り、Deno.symlink は絞らない read・write を要る (canon: facts/deno/symlink-requires-unscoped-permissions)
 const ln = (target: string, path: string) => run("ln", ["-s", target, path]);
 
 async function writeFiles(dir: string, files: Record<string, string>) {
@@ -150,7 +149,7 @@ async function runChecks(dir: string, state: string, env: EnvChange = {}) {
   };
 }
 
-/** git・deno・sleep と、fakes (名前 → 中身) だけを置いた PATH の dir を作る。 */
+/** git・deno・sleep と、fakes (名前 → 中身) だけを置いた PATH の dir を作る。本物の shellcheck を外すには、PATH をその dir だけにする。 */
 async function fakePath(dir: string, fakes: Record<string, string>) {
   const bin = `${dir}/.git/fake-bin`;
   await Deno.mkdir(bin);
@@ -450,7 +449,7 @@ Deno.test("段より前の確かめ: shellcheck の版、作業ツリーに無�
   deepStrictEqual(failures, []);
 });
 
-/** run-checks.ts と同じ escape (印字できる ASCII (空白と \ を除く) の他のバイトを \xHH)。 */
+/** run-checks.ts の escapeBytes と同じ変換。両方を同時に直す。 */
 const escapeBytes = (b: Uint8Array) =>
   Array.from(
     b,
@@ -463,7 +462,7 @@ const escapeBytes = (b: Uint8Array) =>
 /** 名前の先頭の U+FEFF を落とさない (canon: facts/git/path-output-quoting)。 */
 const keepBom = new TextDecoder("utf-8", { ignoreBOM: true });
 
-Deno.test("名前: 処理できない名前があれば段を回さずに名前を出し、他は ./ を前置して検査する", async () => {
+Deno.test("名前: 処理できない名前があれば段の前で名前を出して落ち、他は ./ を前置して検査する", async () => {
   // 次元: canon: facts/git/path-output-quoting (UTF-8 として不正・改行・BOM) と facts/deno/check-file-args-glob (* ?・先頭の - ! npm:)
   const nameArb = fc.record({
     prefix: fc.constantFrom("", "﻿", "-", "!", "npm:"),

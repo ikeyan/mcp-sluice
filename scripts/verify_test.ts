@@ -12,7 +12,6 @@
  *   - deno.lock を書き換えなかったか。
  * - 落ちる hook の状態の行は、示したコマンドを実行してから回し直し、exit 0 で hook が写ることも比べる。
  * - linked worktree の test: worktree で回すと、hook は common git dir の hooks にだけ写る。
- * - symlink は ln -s で作る。deno test の段の --allow-write は TMPDIR に絞ってあり、Deno.symlink は絞らない read・write を要る (canon: facts/deno/symlink-requires-unscoped-permissions)。
  * - 子の環境は、このプロセスの環境から git の場所を決める変数 (canon: facts/git/local-env-vars-and-hook-env) を消し、利用者の git の設定を読まないもの。
  */
 import { deepStrictEqual } from "node:assert/strict";
@@ -90,6 +89,7 @@ async function git(dir: string, ...args: string[]) {
   if (!r.success) throw new Error(dec.decode(r.stderr));
 }
 
+// deno test の段は --allow-write を段の TMPDIR に絞り、Deno.symlink は絞らない read・write を要る (canon: facts/deno/symlink-requires-unscoped-permissions)
 const ln = async (target: string, path: string) => {
   const r = await spawn("ln", { args: ["-s", target, path] }).output();
   if (!r.success) throw new Error(dec.decode(r.stderr));

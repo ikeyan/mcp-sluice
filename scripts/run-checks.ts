@@ -2,11 +2,11 @@
  * run-checks.ts — verify.sh の検査の段を並行に回す。verify.sh が hook を揃えた後に exec で起動する。
  *
  * 流れ:
- * 1. 段より前の確かめ。並行に回し、外れたものを全部出して、段を回さずに exit 1。
+ * 1. 段より前の確かめ。外れたものを全部出して、段の前で exit 1 する。
  *    - git が知るファイルの一覧と、その名前 (下の「名前」)。
  *    - 作業ツリーに無い追跡ファイル (`git ls-files --deleted`)。deno lint はその名前を黙って飛ばす (canon: facts/deno/missing-file-args)。deno lint が存在しない引数を error にするようになったら外せる。
  *    - deno と shellcheck の版 (下の「版」)。
- * 2. 段 (下の steps) を全部同時に始め、全部を待つ。段が共有して書くのは deno の cache (DENO_DIR) だけ。deno.lock は `--frozen-lockfile` で読むだけ。
+ * 2. 段 (下の steps) を回し、全部を待つ。段が共有して書くのは deno の cache (DENO_DIR) だけ。deno.lock は `--frozen-lockfile` で読むだけ。
  * 3. 段の出力を steps の順に出す。
  *    - 通った段: 見出しと標準出力を stdout へ、標準エラーを stderr へ。
  *    - 落ちた段: 見出しと両方を stderr へ。
@@ -31,7 +31,7 @@
  * - 最初の 1 回で、記録している全部のグループを同時に空にし、deno test の段の TMPDIR を消し、そのシグナルの終了コードで終わる。TMPDIR を消せなければ、理由を stderr に出してから同じ終了コードで終わる。
  * - 終了を決めるのはこの経路だけ。中断の後の本流は何も出さず、この経路の exit を待つ。
  * - 2 回目以降のシグナルは何もしない。
- * - 中断の後は子を起動しない (exec が投げる)。
+ * - 中断の後は子を起動しない。
  * - 中断の時点ごとの扱い (run-checks_test.ts が固定する):
  *   - 段より前 (git ls-files などの最中): その子のグループを空にして終わる。
  *   - 段の最中: 全部の段のグループを空にし、TMPDIR を消して終わる。
@@ -58,7 +58,7 @@
  *   - 範囲を広げる・版を上げるとき: 次を新しい版で測り直し、同じ commit で .github/workflows/verify.yml・AGENTS.md・この定数を揃える。
  *     - このファイルが引く canon の事実。
  *     - deno lint の `--rules-tags=` (空の値) の挙動と、deno info --json の形 (どちらも下の「deno lint」「deno.json の imports」)。
- * - 名前: git が知るファイル (追跡と、無視されない未追跡) を -z で受ける (canon: facts/git/path-output-quoting)。次の述語を全部満たす名前だけを処理する。外れる名前が 1 つでもあれば、理由と名前 (バイトを escape したもの) を出して、段を回さずに落ちる。
+ * - 名前: git が知るファイル (追跡と、無視されない未追跡) を -z で受ける (canon: facts/git/path-output-quoting)。次の述語を全部満たす名前だけを処理する。外れる名前が 1 つでもあれば、理由と名前 (バイトを escape したもの) を出して、段の前で落ちる。
  *   - UTF-8 として正しい。不正な名前はコマンドへ渡す引数 (文字列) で表せない。
  *   - 改行を含まない。
  *   - `*`・`?` を含まない。deno check・fmt・lint・test は引数の `*`・`?` を glob として展開し、git が知らないファイルまで検査する。エスケープの手段は無い (canon: facts/deno/check-file-args-glob、facts/deno/lint-file-args-and-rules)。deno がファイルの引数を文字どおりに受ける手段を持てば、この述語は外せる。
@@ -66,19 +66,19 @@
  * - 名前の渡し方:
  *   - shellcheck・git・deno (check-json-md.ts を除く): 名前に `./` を前置する。先頭の `-` (option)・`!` (deno の除外)・`npm:` など (deno の URL) が名前として読まれる。deno check は `--` の後の名前を無視して cwd 全体を検査する (canon: facts/deno/check-double-dash)。
  *   - check-json-md.ts: 名前を全部、そのまま渡す (canon: facts/deno/run-args-passthrough)。check-json-md.ts はこのファイルの隣のものを起動する。
- * - 拡張子で対象を決める: shellcheck は `*.sh`、deno は `*.ts` (test は `*_test.ts`)。拡張子の無い shell は検査しないので、このリポの shell は `*.sh` と名付ける。対象が無い段は回さずに通す (shellcheck は引数が無いと落ちる。canon: facts/shellcheck/no-files-argument)。
- * - deno lint は cwd の deno.json の lint 設定を読む (canon: facts/deno/lint-file-args-and-rules)。この段は lint が空であることを前提にし、規則を no-unused-vars 1 つに絞る。recommended は deno の版で規則が増え、コードを変えていない CI が落ちうるため。足すときは `--rules-include` を足す。
+ * - 拡張子で対象を決める: shellcheck は `*.sh`、deno は `*.ts` (test は `*_test.ts`)。拡張子の無い shell は検査しないので、このリポの shell は `*.sh` と名付ける。対象が無い段は通す (shellcheck は引数が無いと落ちる。canon: facts/shellcheck/no-files-argument)。
+ * - deno lint は cwd の deno.json の lint 設定を読む (canon: facts/deno/lint-file-args-and-rules)。この段は deno.json に lint の設定が無いことを前提にし、規則を no-unused-vars 1 つに絞る。recommended は deno の版で規則が増え、コードを変えていない CI が落ちうるため。足すときは `--rules-include` を足す。
  *   - `--rules-tags=` (空の値) で recommended を外せるのは、文書に無い実測の挙動。この段の試験 (run-checks_test.ts) が固定し、deno の版を上げたら測り直す。recommended に戻すのは、版を上げて増えた規則の修正が済んだとき。
  * - deno test の許可:
  *   - write: 段の TMPDIR だけ (canon: facts/deno/make-temp-dir-permissions)。Deno.symlink は絞らない write を要る (canon: facts/deno/symlink-requires-unscoped-permissions) ので、test は symlink を ln -s で作る。
- *   - read・env・run: 絞らない。test は fixture から verify.sh・run-checks.ts・check-json-md.ts と、PATH を差し替えた fake を子として回す。run を許すと、test は子を通して net の既定の拒否も迂回できる。
+ *   - read・env・run: 絞らない。test はリポのファイル (verify.sh・hooks/pre-push など) を読み、環境を丸ごと子に渡し、verify.sh・run-checks.ts・check-json-md.ts と PATH を差し替えた fake を子として起動する。
  *   - 外せる条件: `--allow-run=deno` で、差し替えた PATH の dir の deno を起動できるようになったら (canon: facts/deno/allow-run-name-with-child-path)、run を起動するものに絞る。
  * - deno.json の imports の各キー (importKeys 段): git が知る .ts のそれぞれに `deno info --json` を回し (canon: facts/deno/info-json-dependencies)、graph の esm の module (相対 import で辿った先を含む) の dependencies[].specifier のどれかと一致するとき使われているとみなす。末尾が / のキーは、指定子がその接頭辞のときも使われているとみなす。
  *   - 指定子に入る構文: 静的 import (`import x from "a"`・`import "a"`)、`export … from "a"`、`import type`、リテラルの動的 import (`import("a")`)。入らないもの: コメント・文字列の中、`/// <reference>`、JSDoc の `@import`、リテラルでない動的 import。
  *   - deno info --json の形 (modules[].dependencies[].specifier・modules[].error) は文書の schema が無い。この段の試験が固定し、deno の版を上げたら測り直す。
- *   - deno info には `--no-config --no-lock --no-npm --no-remote` を付け、deno.json・deno.lock・ネットワークを使わずに回す。指定子は書かれた文字列のまま出る。
- *   - deno info が落ちるか、graph の file: の module に error (ファイルが無い、構文が壊れている、相対 import 先が無い。deno info は exit 0) があれば、それを報告し、未使用の判定をせずに落ちる。
- *   - 数える参照は .ts の import の指定子だけ (deno.json の tasks などは数えない)。
+ *   - deno info は `--no-config` (deno.json を読まない)・`--no-lock` (deno.lock を読み書きしない)・`--no-npm`・`--no-remote` (ネットワークに出ない) で回す。指定子は書かれた文字列のまま出る。
+ *   - deno info が落ちるか、graph の file: の module に error (ファイルが無い、構文が壊れている、相対 import 先が無い。deno info は exit 0) があれば、それを報告して落ちる。
+ *   - 数える参照は .ts の import の指定子だけ。
  */
 
 const self = "run-checks.ts";
@@ -116,7 +116,7 @@ const pass = (message: string): Run => ({
   err: new Uint8Array(),
 });
 
-/** deno test の段の TMPDIR。中断の経路が作りかけを見落とさないように、同期で作る。 */
+/** deno test の段の TMPDIR。 */
 let testTmp: string | undefined;
 let testTmpRemoval: Promise<void> | undefined;
 /** 並行に 2 回消さないように、2 回目以降の呼び出しには同じ Promise を返す。 */
@@ -443,6 +443,7 @@ const ts = withExt(".ts");
 const tests = ts.filter((f) => f.endsWith("_test.ts"));
 const frozen = "--frozen-lockfile";
 if (tests.length) {
+  // 中断の経路が作りかけを見落とさないように、同期で作る
   testTmp = Deno.makeTempDirSync({ dir: tmpdir, prefix: "run-checks-" });
 }
 
@@ -541,7 +542,6 @@ const steps: [string, () => Promise<Run>][] = [
       ),
   ],
   ["deno fmt", () => onFiles("deno", ["fmt", "--check"], ts)],
-  // --rules-tags= で recommended を外し、no-unused-vars だけを走らせる (canon: facts/deno/lint-file-args-and-rules)
   [
     "deno lint",
     () =>

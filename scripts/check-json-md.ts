@@ -46,7 +46,7 @@ if (Deno.args.length === 0 || nonCanonical.length > 0) {
 const jsonFiles = Deno.args.filter((f) => f.endsWith(".json"));
 const markdownFiles = Deno.args.filter((f) => f.endsWith(".md"));
 
-/** segment の列の鍵。segment は decode した `/` や NUL を含みうるので、join でなく JSON にする。 */
+/** segment の列の鍵は JSON にする (segment は decode した `/` や NUL を含みうるので)。 */
 const key = (segments: string[]) => JSON.stringify(segments);
 const knownFiles = new Set(Deno.args.map((f) => key(f.split("/"))));
 const knownDirs = new Set(
@@ -82,9 +82,10 @@ for (const file of jsonFiles) {
 const md = new MarkdownIt({ html: true });
 type Token = ReturnType<typeof md.parse>[number];
 
-/** 先頭の --- のブロックは、空でも YAML として読めなくても GitHub が本文から外す (canon: facts/github/heading-anchor-ids)。残すと --- が見出しの下線になる。 */
+/** 先頭の --- のブロックは、空でも YAML として読めなくても GitHub が本文から外す (canon: facts/github/heading-anchor-ids)。 */
 const parse = (markdown: string): Token[] =>
   md.parse(
+    // 残すと --- が見出しの下線になる
     markdown.replace(/^---\r?\n(?:[\s\S]*?\r?\n)?---(?:\r?\n|$)/, ""),
     {},
   );
