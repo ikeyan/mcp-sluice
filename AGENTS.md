@@ -48,7 +48,7 @@
         - cwd の位置: リポの subdirectory
       - 確かめていないもの:
         - OS: macOS
-        - cwd の祖先: 既存の `.claude/settings.json` がある
+        - cwd の祖先の `.claude/settings.json`: 在る
 
 ## このリポの仕様
 
@@ -58,9 +58,7 @@
 ## このリポの検証
 
 - clone したら、まず `./verify.sh` を 1 回回す。pre-push の hook (`PUSH_OK=1` の判定) は、このとき入る。
-- `hooks/pre-push` を変える checkout・pull の後も、`./verify.sh` を回す。写しが前の版なら、`./verify.sh` は上書きせずに落ちて置き換えのコマンドを示すので、それを実行する。
-  - git が呼ぶ hook は common git dir の写しで、置き換えるまで前のまま。それまでの push は、前の写しで判定される。
-  - 写しの状態ごとの扱いは、`verify.sh` の先頭の「hook」にある。
+- `hooks/pre-push` を変える checkout・pull の後も、`./verify.sh` を回す。git が呼ぶ hook の写しの状態ごとの扱い (前の版の写しを置き換えるコマンドを示すことを含む) は、`verify.sh` の先頭の「hook」にある。
 - 単一検証コマンドは `./verify.sh`。CI も同じものを回す。
 - 規則の本文は次のファイルの先頭にある。変えるときはそこを直す:
   - `verify.sh`:
@@ -87,7 +85,9 @@
     - git が知る項目の種類と名前。
     - 作業ツリーに無い追跡ファイル。
     - deno と shellcheck の版。
-    - .ts があるとき、TMPDIR が設定されていて `/` で始まること。
+    - .ts があるとき、TMPDIR が `/` で始まること。
+      - TMPDIR が未設定か空なら、`verify.sh` が `/tmp` にして渡す。
+      - その下に段の一時ディレクトリを作れるかは、作る段が判定する。
   - `shellcheck`: このリポが持つ `*.sh`。
   - 次の 3 つは git が知る `.ts`:
     - `deno fmt --check`
