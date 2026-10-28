@@ -60,7 +60,8 @@
   - `shellcheck`
   - `deno`
   - `git`
-- `deno.json` は `"lock": true` で、依存は完全な版で固定する。`minimumDependencyAge` は `P3D` (canon: facts/deno/minimum-dependency-age)。`./verify.sh` は `--frozen-lockfile` で回し、`deno.lock` が `deno.json` と食い違えば落ちる (直すのは `deno install --frozen=false`)。
+- 依存は `deno.json` に完全な版で書き、`deno.lock` で固定する。新しすぎる版を避ける `minimumDependencyAge` の意味は canon: facts/deno/minimum-dependency-age。
+- `./verify.sh` は `--frozen-lockfile` で回し、`deno.lock` が `deno.json` と食い違えば落ちる (直すのは `deno install --frozen=false`)。
 
 ## このリポの言語
 
@@ -68,6 +69,7 @@
 - shell は次だけ:
   - `verify.sh`: 入口と、pre-push の hook の写し。
   - agent-sync が置くもの (`hooks/pre-push`・`.agent-sync/sync.sh`・`.claude/skills/pr-workflow/` の shell)。
+  - `.github/workflows/verify.yml` の `run`: CI の shellcheck の入手 (sha256 の確かめを含む) と、`./verify.sh` の起動。
 - deno で hook を写すには、run-checks.ts の許可に common git dir への write が要る。hook の写しを `verify.sh` に置くのは、この許可を足さないため。
 
 ## 外部依存の事実
