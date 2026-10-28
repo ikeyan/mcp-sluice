@@ -1,0 +1,30 @@
+name: verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.x
+      # runner image 同梱の shellcheck (ubuntu-24.04 は 0.9.0) は SC2015 などの出方が手元と違うので、verify.sh が要求する版を /usr/local/bin に入れて先に引かせる。
+      - run: |
+          curl -fsSLo "$RUNNER_TEMP/shellcheck.tar.xz" https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  $RUNNER_TEMP/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/shellcheck.tar.xz" -C "$RUNNER_TEMP"
+          sudo install -m 755 "$RUNNER_TEMP/shellcheck-v0.11.0/shellcheck" /usr/local/bin/shellcheck
+      # .git/hooks は checkout に入らない。verify.sh が写すのと同じ写しを置いてから、直さないモードで検査する。
+      - run: hooks=$(git rev-parse --path-format=absolute --git-common-dir)/hooks && mkdir -p "$hooks" && install -m 755 hooks/pre-push "$hooks/pre-push"
+      - run: ./verify.sh
+        env:
+          # CI は作業ツリーを直さない。hook の写しのずれは違反として落とす。
+          VERIFY_READONLY: "1"
