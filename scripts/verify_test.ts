@@ -156,6 +156,23 @@ async function makeRepo(dir: string) {
   await placeFixture(dir);
 }
 
+/** dir の fixture を commit し、wt に linked worktree を作る。 */
+async function addWorktree(dir: string, wt: string) {
+  await git(dir, "add", "-A");
+  await git(
+    dir,
+    "-c",
+    "user.name=t",
+    "-c",
+    "user.email=t@example.com",
+    "commit",
+    "-q",
+    "-m",
+    "x",
+  );
+  await git(dir, "worktree", "add", "-q", wt);
+}
+
 /**
  * 写す先の hooks と pre-push の状態 (verify.sh の先頭の写す先の表の行)。
  * 「読めない」は mode 000 にし、PATH の先の fake の cmp が mode 000 を比べられないとする。root は mode 000 も読める (canon: facts/capabilities/root-reads-mode-000-files)。
@@ -407,6 +424,8 @@ interface Case {
   hooks: Awaited<ReturnType<typeof readHooks>>;
   /** stub が起動されないなら undefined。関数なら、dir を解決したパスから決める。 */
   tmpdir?: string | ((realDir: string) => string);
+  /** stub が報告する git dir の、dir を解決したパスの後。既定は /.git。 */
+  gitDir?: string;
   /** stderr が含むこと (配列なら全部)。 */
   stderr?: string | string[];
   /** stderr が含まないこと。 */
@@ -723,6 +742,27 @@ cases.push(
     ...hooksPathSet,
     stderr:
       "core.hooksPath が設定されている (worktree file:.git/config.worktree elsewhere)。",
+  },
+  {
+    // linked worktree の cwd からは、local・worktree の出どころが絶対パスで出る (canon: facts/git/config-sources-and-scopes の「--show-origin の出力の形」)。示すコマンドを fixture のリポで実行しても両方が消えること (fix) で、絶対パスで指すことを確かめる
+    name:
+      "linked worktree で、core.hooksPath を local と worktree の scope に書いた",
+    invoke: async (dir, e) => {
+      const wt = `${e}/wt`;
+      await addWorktree(dir, wt);
+      await git(wt, "config", "core.hooksPath", "elsewhere");
+      await git(wt, "config", "extensions.worktreeConfig", "true");
+      await git(wt, "config", "--worktree", "core.hooksPath", "elsewhere");
+      return viaBash(wt);
+    },
+    ...hooksPathSet,
+    gitDir: "/.git/worktrees/wt",
+    stderr: [
+      "/.git/config elsewhere; worktree file:/",
+      "/.git/worktrees/wt/config.worktree elsewhere)。消す。",
+      "Execute: git config --file /",
+      "/.git/config --unset-all core.hooksPath && git config --file /",
+    ],
   },
   {
     name: "core.hooksPath を GIT_CONFIG_SYSTEM のファイルに書いた",
@@ -1072,7 +1112,7 @@ const runCase = (c: Case): Promise<string[]> =>
         strayHooks: null,
         strayStdout: false,
         report: c.tmpdir === undefined ? undefined : {
-          gitDir: `${await Deno.realPath(dir)}/.git`,
+          gitDir: `${await Deno.realPath(dir)}${c.gitDir ?? "/.git"}`,
           gitVars: [],
           tmpdir: typeof c.tmpdir === "string"
             ? c.tmpdir
@@ -1366,19 +1406,7 @@ Deno.test("linked worktree で回すと、hook は common git dir の hooks に�
   await withTempDir((dir) =>
     withTempDir(async (outside) => {
       await makeRepo(dir);
-      await git(dir, "add", "-A");
-      await git(
-        dir,
-        "-c",
-        "user.name=t",
-        "-c",
-        "user.email=t@example.com",
-        "commit",
-        "-q",
-        "-m",
-        "x",
-      );
-      await git(dir, "worktree", "add", "-q", `${outside}/wt`);
+      await addWorktree(dir, `${outside}/wt`);
       const r = await verify(viaBash(`${outside}/wt`), {});
       const real = await Deno.realPath(dir);
       deepStrictEqual(

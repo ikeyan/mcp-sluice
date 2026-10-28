@@ -1,11 +1,11 @@
 /**
  * check-json-md.ts を子として、TMPDIR の下の一時ディレクトリの fixture に回す。
  * - 表の各行: fixture のファイルと引数に対し、終了コードと stderr の違反の行 (順を問わない集合) が一致すること。
- * - 性質: 生成した相対パスへのリンクと、生成した a/c.json の中身について、報告がモデルと一致すること。モデルは:
+ * - 性質: 生成した相対パスへのリンクと、a/c.txt への行の anchor (固定の列と生成した列) について、生成した a/c.txt の中身 (バイト列) で、報告がモデルと一致すること。モデルは:
  *   1. 最初の # と、その前の最初の ? で割る。
  *   2. パスを segment ごとに decode して辿る。
  *   3. anchor を decode する。
- *   4. a/c.json への行の anchor を、形・CR の有無・行数で判定する。
+ *   4. a/c.txt への行の anchor を、形で判定し、次に中身を空・不正な UTF-8・NUL・CR の順に見て最初に当たる類で判定し、どれでもなければ行数で判定する。
  * - 属性の値の前処理: 前・中・後と U+0000〜U+0020 の全部の組 (そのままの文字と文字参照) で、報告が URL の前処理のモデルと一致すること。
  */
 import fc from "fast-check";
@@ -78,6 +78,8 @@ const assignable = (got: string[], want: string[], prefix: boolean) => {
   });
 };
 
+/** 検査できない形の anchor の違反の、先の名詞の後から — の前まで。 */
+const uncheckableAnchor = "への anchor は検査できない。anchor を外す";
 /** 違反の行の、ファイルの後から — の前まで。 */
 const labels = {
   malformed:
@@ -87,18 +89,19 @@ const labels = {
   anchor: "anchor が見出しに無い。リンク先の見出しの id に合わせる",
   notMd:
     ".md でないファイルへの anchor は、L<行番号> の形 (先頭に 0 を置かない) だけ検査できる。L<行番号> にするか、anchor を外す",
-  emptyAnchor: "空のファイルへの anchor は検査できない。anchor を外す",
-  nonUtf8Anchor:
-    "UTF-8 として不正なファイルへの anchor は検査できない。anchor を外す",
-  nulAnchor: "NUL を含むファイルへの anchor は検査できない。anchor を外す",
-  crAnchor: "CR を含むファイルへの anchor は検査できない。anchor を外す",
-  dirAnchor: "ディレクトリへの anchor は検査できない。anchor を外す",
+  emptyAnchor: `空のファイル${uncheckableAnchor}`,
+  nonUtf8Anchor: `UTF-8 として不正なファイル${uncheckableAnchor}`,
+  nulAnchor: `NUL を含むファイル${uncheckableAnchor}`,
+  crAnchor: `CR を含むファイル${uncheckableAnchor}`,
+  dirAnchor: `ディレクトリ${uncheckableAnchor}`,
   noLine:
     "行の anchor の行がファイルに無い。1 から行数までの番号にするか、anchor を外す",
 };
 /** file の、link のリンク先が無い違反の行。 */
 const missingLine = (link: string, file = "a.md") =>
   `${file}: ${labels.missing} — ${link}`;
+/** links のそれぞれを 1 行の Markdown のリンクにした文書。 */
+const linkLines = (links: string[]) => links.map((l) => `[l](${l})\n`).join("");
 
 const heading = "# x\n\n## a\n\n## a\n";
 /** 不正な引数の違反の、引数の後から。 */
@@ -574,7 +577,7 @@ const cases: {
       "nolf.txt": "a\nb",
       "onlylf.txt": "\n",
       "ja.txt": "日本語\n",
-      "a.md": [
+      "a.md": linkLines([
         "lf.txt#L2",
         "lf.txt#L3",
         "lf.txt#L0",
@@ -584,7 +587,7 @@ const cases: {
         "onlylf.txt#L2",
         "ja.txt#L1",
         "ja.txt#L2",
-      ].map((l) => `[l](${l})\n`).join(""),
+      ]),
     },
     code: 1,
     stderr: [
@@ -600,17 +603,17 @@ const cases: {
       "行の anchor: 空のファイル、UTF-8 として不正なファイル、NUL を含むファイル、CR を含むファイルは検査できない",
     files: {
       "empty.txt": "",
-      // UTF-8 として不正なものの類: 単独の継続バイト、EOF で切れた列、過長形、サロゲート、U+10FFFF を超えるもの
-      "ff.dat": new Uint8Array([0x61, 0xff, 0x0a]),
-      "cont.dat": new Uint8Array([0x61, 0x80, 0x0a]),
-      "cut.dat": new Uint8Array([0x61, 0x0a, 0xe3, 0x81]),
-      "overlong.dat": new Uint8Array([0xc0, 0xaf, 0x0a]),
-      "surrogate.dat": new Uint8Array([0xed, 0xa0, 0x80, 0x0a]),
-      "beyond.dat": new Uint8Array([0xf4, 0x90, 0x80, 0x80, 0x0a]),
+      // 次の 6 つは UTF-8 として不正。不正の類は各行の右
+      "ff.dat": new Uint8Array([0x61, 0xff, 0x0a]), // UTF-8 に現れないバイト
+      "cont.dat": new Uint8Array([0x61, 0x80, 0x0a]), // 単独の継続バイト
+      "cut.dat": new Uint8Array([0x61, 0x0a, 0xe3, 0x81]), // EOF で切れた列
+      "overlong.dat": new Uint8Array([0xc0, 0xaf, 0x0a]), // 過長形
+      "surrogate.dat": new Uint8Array([0xed, 0xa0, 0x80, 0x0a]), // サロゲート
+      "beyond.dat": new Uint8Array([0xf4, 0x90, 0x80, 0x80, 0x0a]), // U+10FFFF を超えるもの
       "nul.txt": "a\0b\n",
       "crlf.txt": "a\r\nb\r\n",
       "cr.txt": "a\rb\r",
-      "a.md": [
+      "a.md": linkLines([
         "empty.txt#L1",
         "ff.dat#L1",
         "cont.dat#L1",
@@ -623,7 +626,7 @@ const cases: {
         "crlf.txt#L3",
         "cr.txt#L1",
         "cr.txt#L2",
-      ].map((l) => `[l](${l})\n`).join(""),
+      ]),
     },
     code: 1,
     stderr: [
@@ -639,6 +642,20 @@ const cases: {
       `a.md: ${labels.crAnchor} — crlf.txt#L3`,
       `a.md: ${labels.crAnchor} — cr.txt#L1`,
       `a.md: ${labels.crAnchor} — cr.txt#L2`,
+    ],
+  },
+  {
+    name:
+      "行の anchor: 検査できない類の 2 つ以上に当たるファイルは、空・不正な UTF-8・NUL・CR の順で最初の類",
+    files: {
+      "nulcr.txt": "a\0b\r\n",
+      "all.dat": new Uint8Array([0x61, 0xff, 0x00, 0x0d, 0x0a]),
+      "a.md": linkLines(["nulcr.txt#L1", "all.dat#L1"]),
+    },
+    code: 1,
+    stderr: [
+      `a.md: ${labels.nulAnchor} — nulcr.txt#L1`,
+      `a.md: ${labels.nonUtf8Anchor} — all.dat#L1`,
     ],
   },
   {
@@ -801,39 +818,71 @@ Deno.test("check-json-md.ts の表", async () => {
 });
 
 /**
- * a/c.json の中身の形 (canon: facts/github/blob-line-anchors の「行の anchor の入力の次元」。空のファイルは JSON でないので上の表で見る)。
- * - rows: 区切りで割った行の数。
- * - terminated: 最後の行の後にも区切りを置くか。
- * - eol: 区切り。
+ * a/c.txt の中身。canon: facts/github/blob-line-anchors の「行の anchor の入力の次元」の、区切り (LF・CRLF・CR)・LF の数・最後のバイト・空・テキストでない blob (不正な UTF-8・NUL) を、次の断片を並べて作る。
+ * - `e3 81` は、後に `80` が来れば正しい UTF-8 の 1 文字になり、他が来るか終わりなら不正になる。
  */
-const jsonShape = fc.record({
-  rows: fc.integer({ min: 1, max: 3 }),
-  terminated: fc.boolean(),
-  eol: fc.constantFrom("\n", "\r\n", "\r"),
-});
-type JsonShape = { rows: number; terminated: boolean; eol: string };
-/** 行を eol で区切った JSON の配列。1 行なら `[]`、他は最初の行が `[`、最後の行が `]`、間の行は空。 */
-const jsonText = ({ rows, terminated, eol }: JsonShape) =>
-  (rows === 1 ? ["[]"] : ["[", ...Array(rows - 2).fill(""), "]"]).join(eol) +
-  (terminated ? eol : "");
+const content = fc.array(
+  fc.oneof(
+    { arbitrary: fc.constant([0x61]), weight: 3 }, // a
+    { arbitrary: fc.constant([0x0a]), weight: 3 }, // LF
+    fc.constant([0xe3, 0x81, 0x82]), // あ
+    fc.constant([0x0d]), // CR
+    fc.constant([0x00]), // NUL
+    fc.constant([0xff]), // UTF-8 に現れないバイト
+    fc.constant([0xe3, 0x81]), // あ の途中まで (上の注)
+    fc.constant([0x80]), // 継続バイト
+  ),
+  { maxLength: 8 },
+).map((chunks) => new Uint8Array(chunks.flat()));
 
-/** 性質のテストの fixture のファイルと、中身を作る関数。 */
+/** 性質のテストの fixture のファイル。キーは相対パス、値はその中身 (a/c.txt の中身とリンクの列から作る)。 */
 const propertyFiles: Record<
   string,
-  (shape: JsonShape, links: string[]) => string
+  (c: Uint8Array, links: string[]) => string | Uint8Array
 > = {
   "a/b/x.md": (_, links) => links.map((p) => `- [l](<${p}>)\n`).join(""),
   "a/n.md": () => "",
   "a b/n.md": () => "",
-  "a/c.json": (shape) => jsonText(shape),
+  "a/c.txt": (c) => c,
 };
 /** git の一覧に載せるファイル。 */
 const known = Object.keys(propertyFiles);
 
-/** a/b/x.md の url のリンクの報告のモデル。known の .md はどれも見出しを持たない。a/c.json は shape の中身。報告が無ければ undefined。 */
+/** %-decode したもの。できなければ undefined。 */
+const decode = (s: string) => {
+  try {
+    return decodeURIComponent(s);
+  } catch (e) {
+    if (!(e instanceof URIError)) throw e;
+    return undefined;
+  }
+};
+
+const utf8 = new TextDecoder("utf-8", { fatal: true });
+/** a/c.txt への L<行番号> の行の anchor の報告のモデル。検査できる中身なら、行数は LF で割った行の数 (最後の LF の後の空の行は数えない)。 */
+const lineModel = (
+  c: Uint8Array,
+  line: number,
+): keyof typeof labels | undefined => {
+  // 空・テキストでない blob・CR を含むファイルの行の anchor は、GitHub で測っていない (canon: facts/github/blob-line-anchors の「測っていないもの」)
+  if (c.length === 0) return "emptyAnchor";
+  let text: string;
+  try {
+    text = utf8.decode(c);
+  } catch (e) {
+    if (!(e instanceof TypeError)) throw e;
+    return "nonUtf8Anchor";
+  }
+  if (text.includes("\0")) return "nulAnchor";
+  if (text.includes("\r")) return "crAnchor";
+  const rows = text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+  return line >= 1 && line <= rows ? undefined : "noLine";
+};
+
+/** a/b/x.md の url のリンクの報告のモデル。known の .md はどれも見出しを持たない。a/c.txt の中身は c。報告が無ければ undefined。 */
 const model = (
   url: string,
-  shape: JsonShape,
+  c: Uint8Array,
 ): keyof typeof labels | undefined => {
   if (url.startsWith("//")) return undefined;
   const hash = url.indexOf("#");
@@ -846,13 +895,8 @@ const model = (
     : ["a", "b"];
   if (path !== "") {
     for (const segment of path.split("/")) {
-      let s: string;
-      try {
-        s = decodeURIComponent(segment);
-      } catch (e) {
-        if (!(e instanceof URIError)) throw e;
-        return "malformed";
-      }
+      const s = decode(segment);
+      if (s === undefined) return "malformed";
       if (s === "" || s === ".") continue;
       if (s !== "..") out.push(s);
       else if (out.pop() === undefined) return "outside";
@@ -869,29 +913,20 @@ const model = (
   });
   if (!exists) return "missing";
   if (raw === "") return undefined;
-  let anchor: string;
-  try {
-    anchor = decodeURIComponent(raw);
-  } catch (e) {
-    if (!(e instanceof URIError)) throw e;
-    return "malformed";
-  }
+  const anchor = decode(raw);
+  if (anchor === undefined) return "malformed";
   if (file === undefined) return "dirAnchor";
   if (!file.endsWith(".md")) {
     const line = /^L(\d+)$/.exec(anchor);
     if (line === null || (line[1].length > 1 && line[1].startsWith("0"))) {
       return "notMd";
     }
-    // CR を含むファイルへの行の anchor は、GitHub で測っていないので検査できない違反 (canon: facts/github/blob-line-anchors の「測っていないもの」)
-    if (jsonText(shape).includes("\r")) return "crAnchor";
-    return Number(line[1]) >= 1 && Number(line[1]) <= shape.rows
-      ? undefined
-      : "noLine";
+    return lineModel(c, Number(line[1]));
   }
   return "anchor";
 };
 
-Deno.test("リンクの報告は、ファイル先頭の性質のモデルと一致する", async () => {
+Deno.test("リンクと a/c.txt への行の anchor の報告は、ファイル先頭の性質のモデルと一致する", async () => {
   const path = fc.array(
     fc.constantFrom(
       ".",
@@ -910,8 +945,8 @@ Deno.test("リンクの報告は、ファイル先頭の性質のモデルと一
       "%00",
       "%25",
       "a%20b",
-      "c.json",
-      "c.json#x",
+      "c.txt",
+      "c.txt#x",
       "#",
       "#L1",
       "n.md#x",
@@ -923,28 +958,34 @@ Deno.test("リンクの報告は、ファイル先頭の性質のモデルと一
     ),
     { minLength: 1, maxLength: 6 },
   ).map((s) => s.join("/"));
-  // 生成したパスが a/c.json に届くのは稀なので、行の anchor は別に毎回生成する。行番号は 0〜4 に先頭の 0 を 0〜2 個つけたもの
+  // 生成したパスが a/c.txt に届くのは稀なので、行の anchor は固定の列と生成した列を毎回置く
+  const fixedLines = ["L0", "L1", "L01", "L2", "L3", "L4"];
   const lineLink = fc.tuple(fc.nat({ max: 4 }), fc.nat({ max: 2 })).map((
     [n, zeros],
-  ) => `../c.json#L${"0".repeat(zeros)}${n}`);
+  ) => `L${"0".repeat(zeros)}${n}`);
   await fc.assert(
     fc.asyncProperty(
-      fc.uniqueArray(lineLink, { minLength: 1, maxLength: 15 }),
+      fc.uniqueArray(lineLink, { maxLength: 15 }),
       fc.uniqueArray(path, { minLength: 1, maxLength: 20 }),
-      jsonShape,
-      async (lineLinks, paths, shape) => {
-        const links = [...new Set([...lineLinks, ...paths])];
+      content,
+      async (generated, paths, c) => {
+        const links = [
+          ...new Set([
+            ...[...fixedLines, ...generated].map((l) => `../c.txt#${l}`),
+            ...paths,
+          ]),
+        ];
         const r = await check(
           Object.fromEntries(
             Object.entries(propertyFiles).map((
-              [f, content],
-            ) => [f, content(shape, links)]),
+              [f, make],
+            ) => [f, make(c, links)]),
           ),
         );
         deepStrictEqual(
           lines(r.stderr),
           links.flatMap((p) => {
-            const m = model(p, shape);
+            const m = model(p, c);
             return m === undefined ? [] : [`a/b/x.md: ${labels[m]} — ${p}`];
           }).sort(),
         );

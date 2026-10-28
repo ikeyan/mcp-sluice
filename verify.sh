@@ -11,7 +11,6 @@
 #   - 次は git 2.43.0 で測った (git 2.32〜2.42: 測っていない)。
 #     - hook の判定が読む config -z --show-origin の並び (canon: facts/git/config-sources-and-scopes)。
 #     - run-checks.ts が読む ls-files -s -t の形 (canon: facts/git/repository-shapes)。
-#     - git が、写す途中の一時ファイル (下の「置き方」) を hook として呼ばないこと (canon: facts/git/hook-found-by-exact-name)。
 #   - verify.sh と run-checks.ts が読む rev-parse --local-env-vars の一覧 (canon: facts/git/local-env-vars-and-hook-env)。測った版での出方:
 #     - git 2.43.0: GIT_DIR に存在しないパスを入れても、同じ 15 個を同じ順で出した。測ったのは GIT_DIR だけ。
 #     - git 2.55.0 (macOS): 値を変えずに一覧を出した。
@@ -158,7 +157,7 @@ hook=$hooks/pre-push
 hooks_path_shown=
 unset_cmd=
 config_exit=
-# git config -z の出力は (scope, origin, value) の 3 つ組の列 (canon: facts/git/config-sources-and-scopes の「--show-origin の出力の形」)。その後に下の printf が exit <コード> の項目を 1 つ足す。exit の項目が無いまま EOF なら、config_exit は空のままで、下の case が読めないとして落とす
+# git config -z の出力は (scope, origin, value) の 3 つ組の列 (canon: facts/git/config-sources-and-scopes の「--show-origin の出力の形」)
 while IFS= read -r -d '' scope; do
   case $scope in
   exit\ *)
@@ -184,11 +183,13 @@ done < <(
   status=0
   # -z でないと、origin のパスの特殊な文字が C の quote で出る (canon: facts/git/config-sources-and-scopes の「--show-origin の出力の形」)
   git config -z --show-origin --show-scope --get-all core.hooksPath || status=$?
+  # 子が書けたときは、git の終了コードを exit の項目で渡す
   printf 'exit %s\0' "$status"
 )
 case $config_exit in
 0) refuse "core.hooksPath が設定されている ($hooks_path_shown)。消す" "$unset_cmd" ;;
 1) ;;
+'') fail "core.hooksPath が設定されているかを読めない (読み取りが途中で終わった)。回し直す" ;;
 *) fail "core.hooksPath が設定されているかを読めない (git config が exit $config_exit。理由は上の git)。直してから回し直す" ;;
 esac
 

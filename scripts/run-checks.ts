@@ -122,7 +122,8 @@
  *   - 版を足す・上げるときは、次を済ませてから、その道具の版の定数 (deno は denoVersions、shellcheck は shellcheckVersion) を変える:
  *     1. 次を新しい版で、Linux で測り直す (macOS の事実は killGroup の「外す判定」)。このファイルが引く canon の事実と、deno info --json の形 (下の「deno.json の imports」)。
  *     2. deno: deno lint の recommended に増えた規則の指摘を直す。
- *     3. 同じ commit で .github/workflows/verify.yml を合わせる:
+ *     3. deno: deno info --help に、deno.json の imports だけを差し替える flag が増えたかを確かめる。増えていれば、下の「deno.json の imports の各キー」の写しを外す (同じ箇所の「外せる条件」)。
+ *     4. 同じ commit で .github/workflows/verify.yml を合わせる:
  *        - deno: deno-version を denoVersions に入る版にする。
  *        - shellcheck: SHELLCHECK_VERSION と、取る tar.xz の sha256 を shellcheckVersion の版のものにする。
  * - 名前: git が知る項目を -z で受ける (canon: facts/git/path-output-quoting)。
@@ -182,7 +183,7 @@
  *   - 未使用と報告するキーの集合は、全部を同時に除いても deno の解決が変わらないもの。
  *     - 比べるもの: git が知る .ts のそれぞれを根にした `deno info --json` (canon: facts/deno/info-json-dependencies) の、graph の各 module (相対 import で辿った先を含む) の error と dependencies (解決先と、解決の error)。.ts のパスごとに比べる。
  *     - 写し: deno.json の imports と scopes だけを書いたもの (下の「定義域」)。段の一時ディレクトリに置き、--config で渡す。
- *       - 写しを deno.json と別の場所に置くのは、deno info に imports だけを差し替える flag が無いことへの回避策。
+ *       - 写しを deno.json と別の場所に置くのは、deno info に imports だけを差し替える flag が無いことへの回避策 (--import-map は deno.json の imports を使わず、npm: の展開もしない。canon: facts/deno/info-config-other-location の「imports だけを差し替える flag は無い」)。
  *       - 外せる条件: deno info が、deno.json の imports を差し替える flag を持ったとき。上流への報告は未。
  *       - 外すと消すもの: uncopiedKeys・unhandled の判定・relativeKey・pathValue・placeBound と、下の「定義域」の最上位のキーと imports・scopes の形の 2 項。
  *     - 選び方:

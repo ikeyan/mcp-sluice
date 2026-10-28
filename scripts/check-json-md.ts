@@ -68,13 +68,13 @@
  *     - 行数を数えるのは、行の anchor の先になった .md でないファイルだけ。
  *     - 読めなければ、リンクを置いた .md の違反。
  *   - 次は GitHub の描画を測っていない (blob の canon の「測っていないもの」) ので、検査できない形として違反にする:
- *     - 他の形の anchor (範囲の `L10-L20`、先頭に 0 のある行番号 `L01` を含む)。
- *     - 次のファイルへの行の anchor:
+ *     - 他の形の anchor (範囲の `L10-L20`、先頭に 0 のある行番号 `L01` を含む)。L<行番号> の形にすれば受ける。
+ *     - 次のファイルへの行の anchor (当たるものが複数なら、上から最初のものの文言で報告する):
  *       - 空のファイル。
  *       - テキストでない blob: UTF-8 として不正なファイルと、NUL を含むファイル。
  *       - CR を含むファイル (CRLF と CR だけの区切りを含む)。
  *   - 検査できない形 (上の箇条とディレクトリ):
- *     - 直し方は anchor を外すこと。他の形の anchor は L<行番号> にしてもよい。
+ *     - 直し方は anchor を外すこと。
  *     - blob の canon の「確かめ方」で GitHub の描画を確かめ、行が在ると分かれば、受ける形に足す。
  * - `.json`・`.md` を読めない (無い、を含む) か UTF-8 として不正なら、そのファイル自身の違反にする。そういう .md への anchor は見ない。
  * - 違反の行は `<file>: <何が>。<どう直すか> — <リンクか原因の文言>`。
@@ -277,7 +277,7 @@ const urlPreprocess = (value: string) => {
 };
 
 type Target = { url: string } | {
-  uncheckable: { name: string; value: string };
+  unverifiableAttr: { name: string; value: string };
 };
 
 /** 文書の、単一の URL の属性の値と、URL の列か値の形を確かめていない属性の空でない値と名前。値は urlPreprocess の後のもの。 */
@@ -290,7 +290,7 @@ const targetsOf = (tokens: Token[]): Target[] =>
           return [{ url: value }];
         case "urlList":
         case "unconfirmed":
-          return value === "" ? [] : [{ uncheckable: { name, value } }];
+          return value === "" ? [] : [{ unverifiableAttr: { name, value } }];
         default:
           return [];
       }
@@ -301,7 +301,7 @@ type Resolved = { segments: string[] } | { problem: string };
 const malformed =
   "不正な %-エンコード。% の後に 16 進 2 桁を置くか、%XX の列を UTF-8 の 1 文字に完成させる (% そのものは %25)";
 
-/** %-decode できなければ undefined。 */
+/** %-decode できなければ undefined。decodeURIComponent は、文字列の引数には URIError だけを投げる (canon: facts/ecmascript/decode-uri-component-throws-only-urierror)。 */
 const percentDecode = (s: string): string | undefined => {
   try {
     return decodeURIComponent(s);
@@ -357,12 +357,16 @@ for (const file of markdownFiles) {
   markdownParsed.push([file, parsed]);
 }
 
-/** 検査できない形 (上の「行の anchor」) の違反の、— の前まで。 */
-const uncheckableAnchor = (target: string) =>
-  `${target}への anchor は検査できない。anchor を外す`;
+/** 検査できない形 (上の「行の anchor」) の、subject への anchor の違反の、— の前まで。 */
+const uncheckableAnchor = (subject: string) =>
+  `${subject}への anchor は検査できない。anchor を外す`;
 
-/** 行の anchor の先の file の行数 (上の「行の anchor」)。読めなければ原因の文言、検査できないファイルなら違反の文言。 */
-const countLines = async (
+/**
+ * 行の anchor の先の file を分類し、検査できるなら行数を数える (上の「行の anchor」)。
+ * - 読めなければ、原因の文言。
+ * - 検査できないファイルなら、その類の名詞 (選び方は上の「行の anchor」)。
+ */
+const classifyAndCountLines = async (
   file: string,
 ): Promise<
   { count: number } | { unreadable: string } | { uncheckable: string }
@@ -379,9 +383,7 @@ const countLines = async (
     : bytes.includes(0x0d)
     ? "CR を含むファイル"
     : undefined;
-  if (uncheckable !== undefined) {
-    return { uncheckable: uncheckableAnchor(uncheckable) };
-  }
+  if (uncheckable !== undefined) return { uncheckable };
   const lfs = bytes.filter((b) => b === 0x0a).length;
   return { count: bytes.at(-1) === 0x0a ? lfs : lfs + 1 };
 };
@@ -390,8 +392,8 @@ for (const [file, parsed] of markdownParsed) {
   if (parsed === undefined) continue;
   const dir = file.split("/").slice(0, -1);
   for (const target of targetsOf(parsed.tokens)) {
-    if ("uncheckable" in target) {
-      const { name, value } = target.uncheckable;
+    if ("unverifiableAttr" in target) {
+      const { name, value } = target.unverifiableAttr;
       report(
         file,
         `${name} の参照先は検査できない。リポ内のファイルを指すなら Markdown のリンク・画像で書き、この属性を外す — ${name}=${value}`,
@@ -441,14 +443,19 @@ for (const [file, parsed] of markdownParsed) {
           );
           break;
         }
-        const counted = await countLines(resolved.segments.join("/"));
+        const counted = await classifyAndCountLines(
+          resolved.segments.join("/"),
+        );
         if ("unreadable" in counted) {
           report(
             file,
             `行の anchor の先を読めない。読める通常ファイルにするか、anchor を外す — ${url}: ${counted.unreadable}`,
           );
         } else if ("uncheckable" in counted) {
-          report(file, `${counted.uncheckable} — ${url}`);
+          report(
+            file,
+            `${uncheckableAnchor(counted.uncheckable)} — ${url}`,
+          );
         } else if (Number(line[1]) < 1 || Number(line[1]) > counted.count) {
           report(
             file,
