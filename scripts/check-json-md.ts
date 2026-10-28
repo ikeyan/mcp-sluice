@@ -5,7 +5,7 @@
  * - <path> は git が知るファイルの全部。それぞれリポのルートからの相対パス。
  *   - `.json` で終わるもの: 構文を検査する。BOM で始まるものは JSON として読めない違反になる (deno も BOM 付きの deno.json を読めない。canon: facts/deno/config-file-bom-rejected)。
  *   - `.md` で終わるもの: リンクと anchor を検査する。
- *   - 全部: リンク先が在るかの判定に使う。
+ *   - 全部: リンク先が在るかの判定に使う。`.md` でないファイルは、行の anchor の先になったときに行数を数えるのに読む (下の「リンク」)。
  *   - 拡張子の判定は大文字小文字を区別する。
  * - `.json`・`.md` は UTF-8 として読む。BOM は落とさない (canon: facts/git/path-output-quoting の TextDecoder)。
  * - 次のときは何も検査せず exit 2:
@@ -61,11 +61,12 @@
  * - anchor (空なら見ない。%-decode できなければ「不正な %-エンコード」違反):
  *   - 辿った先が `.md` の引数: その見出しの id のどれかと一致すること。id は github-slugger の規則で作る (canon: facts/github/heading-anchor-ids)。
  *   - 辿った先が `.md` でないファイル: 行の anchor `L<行番号>` の形だけを受ける。他の形 (範囲の `L10-L20` を含む) は検査できないので違反 (canon: facts/github/blob-line-anchors)。
- *     - 行番号がファイルの行数を超えるかは見ない。行数を超える行番号の扱いは未確認 (同じ canon の「docs に無いもの」)。
+ *     - 行番号が 1 から行数までに無ければ、その行が無いので違反。
+ *     - 行数は、ファイルのバイトの LF の数。最後のバイトが LF でなければ 1 を足す。空のファイルは 0 行。
+ *       - GitHub の行番号の振り方 (末尾の LF の後、空のファイル) は測っていない (同じ canon の「docs に無いもの」)。同じ canon の「確かめ方」で違うと分かれば、数え方を合わせる。
+ *     - 行数を数えるファイルを読めなければ、リンクを置いた .md の違反。
  *   - 辿った先がディレクトリ: どの形も検査できないので違反 (同じ canon の「docs に無いもの」)。直し方は anchor を外すこと。
- * - 上の anchor の次の扱いは、canon の facts/github/blob-line-anchors の「確かめ方」で GitHub の描画を確かめたときに外せる。外し方:
- *   - 範囲とディレクトリ: 効く形を受ける形に足す。
- *   - 行数を超える行番号: 行を示さない描画なら違反にする。
+ * - 検査できない形の違反 (範囲とディレクトリ) は、canon の facts/github/blob-line-anchors の「確かめ方」で GitHub の描画を確かめたときに外せる。外し方は、効く形を受ける形に足すこと。
  * - ファイルを読めない (無い、を含む) か UTF-8 として不正なら、そのファイル自身の違反にする。そういう .md への anchor は見ない。
  * - 違反の行は `<file>: <何が>。<どう直すか> — <リンクか原因の文言>`。
  */
@@ -306,7 +307,7 @@ type Parsed = { tokens: Token[]; anchors: Set<string> };
 /** 辿った先の種類 (上の「リンク」)。.md は Parsed (読めなければ undefined) を持つ。 */
 type Destination =
   | { kind: "dir" }
-  | { kind: "file" }
+  | { kind: "file"; path: string }
   | { kind: "md"; parsed?: Parsed };
 /** リンク先として在るもの (引数のファイルと、その親ディレクトリ (ルートを含む)) の鍵 → 種類。 */
 const destinations = new Map<string, Destination>();
@@ -316,8 +317,8 @@ for (const f of Deno.args) {
     destinations.set(key(segments.slice(0, i)), { kind: "dir" });
   }
 }
-for (const f of Deno.args) {
-  destinations.set(pathKey(f), { kind: "file" });
+for (const f of Deno.args.filter((f) => !f.endsWith(".md"))) {
+  destinations.set(pathKey(f), { kind: "file", path: f });
 }
 const markdownParsed: [string, Parsed | undefined][] = [];
 for (const file of markdownFiles) {
@@ -327,6 +328,20 @@ for (const file of markdownFiles) {
   destinations.set(pathKey(file), { kind: "md", parsed });
   markdownParsed.push([file, parsed]);
 }
+
+/** path のファイルの行数 (上の「行数」)。読めなければ原因の文言。 */
+const linesOf = async (
+  path: string,
+): Promise<{ lines: number } | { unreadable: string }> => {
+  let bytes: Uint8Array;
+  try {
+    bytes = await Deno.readFile(path);
+  } catch (e) {
+    return { unreadable: messageOf(e) };
+  }
+  const lfs = bytes.filter((b) => b === 0x0a).length;
+  return { lines: bytes.length > 0 && bytes.at(-1) !== 0x0a ? lfs + 1 : lfs };
+};
 
 for (const [file, parsed] of markdownParsed) {
   if (parsed === undefined) continue;
@@ -374,14 +389,29 @@ for (const [file, parsed] of markdownParsed) {
         );
         break;
       // GitHub の docs が示す行の anchor は L<行番号> だけ (canon: facts/github/blob-line-anchors)
-      case "file":
-        if (!/^L\d+$/.test(anchor)) {
+      case "file": {
+        const line = /^L(\d+)$/.exec(anchor);
+        if (line === null) {
           report(
             file,
             `.md でないファイルの行の anchor (L10 の形) の他は、検査できない。L<行番号> にするか、anchor を外す — ${url}`,
           );
+          break;
+        }
+        const count = await linesOf(destination.path);
+        if ("unreadable" in count) {
+          report(
+            file,
+            `行の anchor の先を読めない。読める通常ファイルにするか、anchor を外す — ${url}: ${count.unreadable}`,
+          );
+        } else if (Number(line[1]) < 1 || Number(line[1]) > count.lines) {
+          report(
+            file,
+            `行の anchor の行がファイルに無い。1 から行数までの番号にするか、anchor を外す — ${url}`,
+          );
         }
         break;
+      }
       case "md":
         if (destination.parsed && !destination.parsed.anchors.has(anchor)) {
           report(

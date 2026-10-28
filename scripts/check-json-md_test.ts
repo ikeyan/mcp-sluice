@@ -83,6 +83,8 @@ const labels = {
   notMd:
     ".md でないファイルの行の anchor (L10 の形) の他は、検査できない。L<行番号> にするか、anchor を外す",
   dirAnchor: "ディレクトリへのリンクの anchor は検査できない。anchor を外す",
+  noLine:
+    "行の anchor の行がファイルに無い。1 から行数までの番号にするか、anchor を外す",
 };
 /** file の、link のリンク先が無い違反の行。 */
 const missingLine = (link: string, file = "a.md") =>
@@ -542,7 +544,7 @@ const cases: {
     // GitHub の docs が示す行の anchor は、ファイルの L<行番号> だけ (canon: facts/github/blob-line-anchors)
     name: ".md でないファイルとディレクトリの anchor",
     files: {
-      LICENSE: "",
+      LICENSE: "x\n".repeat(10),
       "docs/b.md": "",
       "a.md":
         "[a](LICENSE#L10) [b](LICENSE#L10-L20) [c](LICENSE#intro) [d](docs#x) [e](docs#L10)\n",
@@ -553,6 +555,38 @@ const cases: {
       `a.md: ${labels.notMd} — LICENSE#intro`,
       `a.md: ${labels.dirAnchor} — docs#x`,
       `a.md: ${labels.dirAnchor} — docs#L10`,
+    ],
+  },
+  {
+    name:
+      "行の anchor の行数: 末尾の LF の有無と CRLF で行数ちょうどは通り、1 つ超えるか 0 は違反。空のファイルは 0 行",
+    files: {
+      "lf.txt": "a\nb\n",
+      "crlf.txt": "a\r\nb\r\n",
+      "nolf.txt": "a\nb",
+      "onlylf.txt": "\n",
+      "empty.txt": "",
+      "a.md": [
+        "lf.txt#L2",
+        "lf.txt#L3",
+        "lf.txt#L0",
+        "crlf.txt#L2",
+        "crlf.txt#L3",
+        "nolf.txt#L2",
+        "nolf.txt#L3",
+        "onlylf.txt#L1",
+        "onlylf.txt#L2",
+        "empty.txt#L1",
+      ].map((l) => `[l](${l})\n`).join(""),
+    },
+    code: 1,
+    stderr: [
+      `a.md: ${labels.noLine} — lf.txt#L3`,
+      `a.md: ${labels.noLine} — lf.txt#L0`,
+      `a.md: ${labels.noLine} — crlf.txt#L3`,
+      `a.md: ${labels.noLine} — nolf.txt#L3`,
+      `a.md: ${labels.noLine} — onlylf.txt#L2`,
+      `a.md: ${labels.noLine} — empty.txt#L1`,
     ],
   },
   {
@@ -647,14 +681,15 @@ const cases: {
   },
   {
     name: "読めないファイルは原因の文言のまま",
-    files: { "dir.md": null, "a.md": "[l](gone.md#x)\n" },
-    args: ["a.md", "dir.md", "gone.md", "gone.json"],
+    files: { "dir.md": null, "a.md": "[l](gone.md#x) [m](gone.txt#L1)\n" },
+    args: ["a.md", "dir.md", "gone.md", "gone.json", "gone.txt"],
     code: 1,
     prefix: true,
     stderr: [
       "dir.md: 読めない。読める通常ファイルにする — Is a directory",
       "gone.md: 読めない。読める通常ファイルにする — No such file or directory",
       "gone.json: 読めない。読める通常ファイルにする — No such file or directory",
+      "a.md: 行の anchor の先を読めない。読める通常ファイルにするか、anchor を外す — gone.txt#L1: No such file or directory",
     ],
   },
   {
@@ -759,7 +794,10 @@ const model = (url: string): keyof typeof labels | undefined => {
   }
   if (file === undefined) return "dirAnchor";
   if (!file.endsWith(".md")) {
-    return /^L\d+$/.test(anchor) ? undefined : "notMd";
+    const line = /^L(\d+)$/.exec(anchor);
+    if (line === null) return "notMd";
+    // known の .md でないファイルは a/c.json だけで、中身は 1 行
+    return Number(line[1]) === 1 ? undefined : "noLine";
   }
   return "anchor";
 };
@@ -785,6 +823,8 @@ Deno.test("リンクの報告は、# と ? で割り、segment ごとに decode 
       "a%20b",
       "c.json",
       "c.json#L1",
+      "c.json#L0",
+      "c.json#L2",
       "c.json#x",
       "#",
       "#L1",
