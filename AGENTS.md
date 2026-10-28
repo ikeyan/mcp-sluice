@@ -48,12 +48,11 @@
   - `deno test`: git が知る `*_test.ts`。test は TMPDIR の下に fixture を作り、`verify.sh`・`scripts/run-checks.ts`・`scripts/check-json-md.ts` を子として回す。
   - `scripts/check-json-md.ts`: git が知る `.json` の構文と、`.md` のリポ内リンク (生の HTML の `href`・`src` を含む)。
   - `deno.json` の `imports`: 各キーが、git が知る `.ts` のどれかの import 指定子から使われていること (`deno lint` が見ない、未使用の依存を埋める。このリポの `.ts` が export を持つようになったら、未使用の export・module の検査を足す)。
-- `./verify.sh` は common git dir の `hooks` の pre-push を、`VERIFY_READONLY` によらず次のように扱う (写す先は作業ツリーの外):
+- `./verify.sh` は common git dir の `hooks` の pre-push を次のように扱う (CI でも同じ):
   - 無い (壊れた symlink を含む): `hooks/pre-push` を写す。
   - `hooks/pre-push` と同じ実行可能なファイル: 何もしない。
   - それ以外: 触らずに落ち、置き換えのコマンドを示す。
 - `./verify.sh` は `core.hooksPath` が hook をよそへ向けていれば落ちる (設定は書かない)。
-- `VERIFY_READONLY` は未設定・空か `1` だけを受け、他の値なら `./verify.sh` が落ちる。CI は `1` を渡す。`./verify.sh` はどちらでも作業ツリーを書き換えない。
 - `./verify.sh` は `git rev-parse --local-env-vars` の変数 (`GIT_DIR` など) を消してから動くので、自分のあるリポだけを検査する。
 - `./verify.sh` を SIGHUP・SIGINT・SIGTERM で止めると、検査の段の子孫を止め、`deno test` の一時ディレクトリを消してから終わる。
 - 必要なもの:

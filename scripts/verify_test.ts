@@ -4,9 +4,9 @@
  * - 行ごとに、common git dir の hooks/pre-push の状態と環境を作って verify.sh を回し、次を比べる。
  *   - 終了コード。
  *   - 回した後の pre-push のバイトと、実行可能か。
- *   - stub が起動されたか、起動されたなら fixture の git dir を見たか。
+ *   - stub が fixture の git dir を見たか。
  *   - 別のリポ (GIT_DIR を向ける先) に pre-push を置かなかったか。
- * - 子の環境は、このプロセスの環境から git の場所を決める変数 (canon: facts/git/local-env-vars-and-hook-env)と VERIFY_READONLY を消し、利用者の git の設定を読まないもの。
+ * - 子の環境は、このプロセスの環境から git の場所を決める変数 (canon: facts/git/local-env-vars-and-hook-env) を消し、利用者の git の設定を読まないもの。
  */
 import { deepStrictEqual } from "node:assert/strict";
 
@@ -19,9 +19,7 @@ const localEnv = dec.decode(
 ).split("\n").filter(Boolean);
 const baseEnv: Record<string, string> = {
   ...Object.fromEntries(
-    Object.entries(Deno.env.toObject()).filter(([k]) =>
-      !localEnv.includes(k) && k !== "VERIFY_READONLY"
-    ),
+    Object.entries(Deno.env.toObject()).filter(([k]) => !localEnv.includes(k)),
   ),
   GIT_CONFIG_GLOBAL: "/dev/null",
   GIT_CONFIG_NOSYSTEM: "1",
@@ -140,14 +138,12 @@ interface Case {
   /** elsewhere は別の空のリポ。どの行でもそこに pre-push を置かないこと。 */
   env: (elsewhere: string) => Record<string, string>;
   code: number;
-  hook: Hook | null;
-  /** stub の run-checks.ts を起動するか */
-  checks: boolean;
+  hook: Hook;
   stderr?: string;
 }
 
 const cases: Case[] = [];
-const states: [HookState, number, Hook | null][] = [
+const states: [HookState, number, Hook][] = [
   ["無い", 0, copiedHook],
   ["壊れた symlink", 0, copiedHook],
   ["同じ", 0, copiedHook],
@@ -155,17 +151,13 @@ const states: [HookState, number, Hook | null][] = [
   ["違う", 1, { bytes: Array.from(other), executable: true }],
 ];
 for (const [state, code, hook] of states) {
-  for (const readonly of [undefined, "1"]) {
-    cases.push({
-      name: `${state}・VERIFY_READONLY=${readonly ?? "(無し)"}`,
-      prepare: (dir) => setHook(dir, state),
-      env: (): Record<string, string> =>
-        readonly === undefined ? {} : { VERIFY_READONLY: readonly },
-      code,
-      hook,
-      checks: true,
-    });
-  }
+  cases.push({
+    name: state,
+    prepare: (dir) => setHook(dir, state),
+    env: () => ({}),
+    code,
+    hook,
+  });
 }
 cases.push(
   {
@@ -174,17 +166,7 @@ cases.push(
     env: () => ({}),
     code: 1,
     hook: copiedHook,
-    checks: true,
     stderr: "hook の置き場が",
-  },
-  {
-    name: "VERIFY_READONLY=0",
-    prepare: async () => {},
-    env: () => ({ VERIFY_READONLY: "0" }),
-    code: 1,
-    hook: null,
-    checks: false,
-    stderr: "VERIFY_READONLY は未設定・空か 1 (0)",
   },
   {
     name: "GIT_DIR が別のリポを指す",
@@ -192,7 +174,6 @@ cases.push(
     env: (elsewhere) => ({ GIT_DIR: `${elsewhere}/.git` }),
     code: 0,
     hook: copiedHook,
-    checks: true,
   },
 );
 
@@ -207,12 +188,11 @@ Deno.test("verify.sh の hook の状態と環境", async () => {
           const r = await verify(dir, c.env(elsewhere));
           const hook = await readHook(dir);
           const strayHook = await readHook(elsewhere);
-          const checked = r.stdout.includes("git-dir=");
           const sawRepo = r.stdout.includes(
             `git-dir=${await Deno.realPath(dir)}/.git\n`,
           );
           return r.code === c.code &&
-              checked === c.checks && checked === sawRepo &&
+              sawRepo &&
               JSON.stringify(hook) === JSON.stringify(c.hook) &&
               strayHook === null &&
               (c.stderr === undefined || r.stderr.includes(c.stderr))
@@ -220,8 +200,8 @@ Deno.test("verify.sh の hook の状態と環境", async () => {
             : [
               `${c.name}: exit ${r.code} (期待 ${c.code})、pre-push の実行可能 ${
                 JSON.stringify(hook?.executable)
-              } (期待 ${JSON.stringify(c.hook?.executable)})、中身が期待と${
-                JSON.stringify(hook?.bytes) === JSON.stringify(c.hook?.bytes)
+              } (期待 ${JSON.stringify(c.hook.executable)})、中身が期待と${
+                JSON.stringify(hook?.bytes) === JSON.stringify(c.hook.bytes)
                   ? "同じ"
                   : "違う"
               }、別のリポの pre-push ${

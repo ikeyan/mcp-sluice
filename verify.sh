@@ -4,9 +4,8 @@
 # 事前条件: shellcheck・deno・git が PATH にあること。ネットワークは、deno が依存 (npm) を未取得のときだけ要る。
 # 環境:
 # - git の場所を決める環境変数 (git rev-parse --local-env-vars の一覧。canon: facts/git/local-env-vars-and-hook-env) は cd の直後に消すので、git はこのファイルのあるリポだけを見る。一覧に無い設定の差し替え (GIT_CONFIG_GLOBAL など) は残る。
-# - VERIFY_READONLY は未設定・空か 1 だけを受け、他の値なら落ちる。1 (CI) は作業ツリーを書き換えないことを求める。verify.sh はどちらでも作業ツリーを書き換えない。
 # git は hook を $GIT_COMMON_DIR/hooks (linked worktree も共有し、checkout で変わらない。canon: facts/git/hookspath-relative-resolves-per-worktree) から呼ぶので、hooks/pre-push をそこへ写す。core.hooksPath (どの scope でも) が hook をよそへ向けていれば違反にし、設定は書かない。
-# 写す先の pre-push の状態ごとの扱い (VERIFY_READONLY によらない。写す先は作業ツリーの外):
+# 写す先の pre-push の状態ごとの扱い:
 # - 無い (壊れた symlink を含む。git が実行できない): 写す
 # - hooks/pre-push と同じ実行可能なファイル: 何もしない
 # - それ以外 (旧版、利用者が置いた別の hook、手を入れた写し、実行可能でない写し): このリポのものかを中身から決められないので、触らずに置き換えのコマンドを示して落ちる
@@ -16,14 +15,6 @@ cd "$(dirname "$0")"
 local_env=$(git rev-parse --local-env-vars)
 mapfile -t local_env_vars <<<"$local_env"
 unset "${local_env_vars[@]}"
-
-case ${VERIFY_READONLY:-} in
-  '' | 1) ;;
-  *)
-    echo "VERIFY_READONLY は未設定・空か 1 ($VERIFY_READONLY)" >&2
-    exit 1
-    ;;
-esac
 
 status=0
 common=$(git rev-parse --path-format=absolute --git-common-dir)
