@@ -81,7 +81,7 @@
   - `deno`
   - `git`
 - 依存は `deno.json` に完全な版で書き、`deno.lock` で固定する。新しすぎる版を避ける `minimumDependencyAge` の意味は canon: facts/deno/minimum-dependency-age。
-- `./verify.sh` は `--frozen-lockfile` で回し、`deno.lock` が `deno.json` と食い違えば落ちる (直すのは `deno install --frozen=false`)。
+- `deno.json` の `lock.frozen` で、`deno.lock` が `deno.json` と食い違えば `./verify.sh` が落ちる (直すのは `deno install --frozen=false`)。
 
 ## このリポの言語
 

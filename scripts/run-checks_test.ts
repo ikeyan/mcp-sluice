@@ -205,6 +205,13 @@ const bad = "#!/bin/sh\necho $1\n";
 /** 段の見出し。 */
 const failedHead = (name: string) => `== ${name}: 落ちた`;
 const passedHead = (name: string) => `== ${name}: 通った`;
+/** stderr の、落ちた段 name の見出しから次の見出しの前まで。無ければ空。 */
+const sectionOf = (stderr: string, name: string) => {
+  const start = stderr.indexOf(failedHead(name));
+  if (start < 0) return "";
+  const end = stderr.indexOf("\n== ", start + 1);
+  return stderr.slice(start, end < 0 ? undefined : end);
+};
 /** 表の行ごとの失敗を集め、最後にまとめて比べる。 */
 const collector = () => {
   const failures: string[] = [];
@@ -416,12 +423,7 @@ Deno.test("段は指摘があれば落ちる: fmt・lint (recommended)・check�
     "a.md": "[x](gone.md)\n",
   }, async (dir) => {
     const r = await runChecks(dir, "0");
-    const section = (name: string) => {
-      const start = r.stderr.indexOf(failedHead(name));
-      if (start < 0) return "";
-      const end = r.stderr.indexOf("\n== ", start + 1);
-      return r.stderr.slice(start, end < 0 ? undefined : end);
-    };
+    const section = (name: string) => sectionOf(r.stderr, name);
     deepStrictEqual({
       code: r.code,
       lint: section("deno lint").includes("no-unused-vars"),
@@ -440,8 +442,8 @@ Deno.test("段は指摘があれば落ちる: fmt・lint (recommended)・check�
   });
 });
 
-Deno.test("deno の子の環境と --frozen-lockfile", async () => {
-  // 次元: canon: facts/deno/environment-and-config-inputs の「結果を変える」の変数と、canon: facts/deno/frozen-lockfile-subcommands の subcommand
+Deno.test("deno の子の環境", async () => {
+  // 次元: canon: facts/deno/environment-and-config-inputs の「結果を変える」の変数
   const resultVars = [
     "DENO_COMPAT",
     "DENO_CONDITIONS",
@@ -449,52 +451,78 @@ Deno.test("deno の子の環境と --frozen-lockfile", async () => {
     "DENO_TSC_BIN",
     "DENO_V8_FLAGS",
   ];
+  const ts = ["a.ts", "a_test.ts"];
   await withRepo({
-    "a.ts": "export {};\n",
-    "a_test.ts": 'Deno.test("t", () => {});\n',
+    ...Object.fromEntries(ts.map((f) => [f, "export {};\n"])),
     "a.md": "",
   }, async (dir) => {
     const g = `${dir}/.git`;
     const calls = `${g}/calls`;
     await Deno.mkdir(calls);
-    // run-checks.ts 自身の起動は記録しない。記録は 1 行目が引数、続く行が変数ごとの値 (無ければ <名前>=-)
+    // run-checks.ts 自身の起動は記録しない。記録は 1 行目が subcommand、続く行が変数ごとの値 (無ければ <名前>=-)
     const bin = await fakePath(dir, {
       deno: [
         "#!/bin/sh",
-        `case " $* " in *" ${root}/scripts/run-checks.ts "*) ;; *)`,
-        `  { echo "$*"; for v in DENO_NO_PACKAGE_JSON ${
+        'case " $* " in *" $FAKE_SELF "*) ;; *)',
+        `  { echo "$1"; for v in DENO_NO_PACKAGE_JSON ${
           resultVars.join(" ")
-        }; do printenv "$v" || echo "$v=-"; done; } > "${calls}/$$" ;;`,
+        }; do printenv "$v" || echo "$v=-"; done; } > "$FAKE_CALLS/$$" ;;`,
         "esac",
         `exec "${which("deno")}" "$@"`,
       ].join("\n"),
     });
     const r = await runChecks(dir, "0", {
       PATH: `${bin}:${baseEnv.PATH}`,
+      FAKE_SELF: `${root}/scripts/run-checks.ts`,
+      FAKE_CALLS: calls,
       DENO_COMPAT: "1",
       DENO_CONDITIONS: "probe",
       DENO_COVERAGE_DIR: `${g}/coverage`,
       DENO_TSC_BIN: `${g}/no-tsc`,
       DENO_V8_FLAGS: "--stack-size=2000",
     });
-    const got: Record<string, { frozen: boolean; env: string[] }> = {};
+    const got: { sub: string; env: string[] }[] = [];
     for await (const e of Deno.readDir(calls)) {
-      const [args, ...env] = (await Deno.readTextFile(`${calls}/${e.name}`))
+      const [sub, ...env] = (await Deno.readTextFile(`${calls}/${e.name}`))
         .trimEnd().split("\n");
-      got[args.split(" ")[0]] = {
-        frozen: args.split(" ").includes("--frozen-lockfile"),
-        env,
-      };
+      got.push({ sub, env });
     }
     const env = ["1", ...resultVars.map((v) => `${v}=-`)];
-    deepStrictEqual(got, {
-      fmt: { frozen: false, env },
-      lint: { frozen: false, env },
-      check: { frozen: true, env },
-      test: { frozen: true, env },
-      info: { frozen: false, env },
-      run: { frozen: true, env },
-    }, `exit ${r.code}\n${r.stderr}`);
+    const bySub = (a: { sub: string }, b: { sub: string }) =>
+      a.sub < b.sub ? -1 : a.sub > b.sub ? 1 : 0;
+    deepStrictEqual(
+      got.sort(bySub),
+      ["fmt", "lint", "check", "test", ...ts.map(() => "info"), "run"]
+        .map((sub) => ({ sub, env })).sort(bySub),
+      `exit ${r.code}\n${r.stderr}`,
+    );
+  });
+});
+
+Deno.test("deno.lock が deno.json と食い違えば、lock を読む段 (deno check・deno test) が落ち、deno.lock を書き換えない", async () => {
+  const json = JSON.parse(await Deno.readTextFile(`${root}/deno.json`));
+  json.imports["is-odd"] = "npm:is-odd@3.0.1";
+  const lock = await Deno.readTextFile(`${root}/deno.lock`);
+  await withRepo({
+    "deno.json": JSON.stringify(json),
+    "deno.lock": lock,
+    "a.ts": "export {};\n",
+    "a_test.ts": 'Deno.test("t", () => {});\n',
+  }, async (dir) => {
+    const r = await runChecks(dir, "0");
+    const outdated = (name: string) =>
+      sectionOf(r.stderr, name).includes("The lockfile is out of date");
+    deepStrictEqual(
+      {
+        check: outdated("deno check"),
+        test: outdated("deno test"),
+        fmt: r.stdout.includes(passedHead("deno fmt")),
+        lint: r.stdout.includes(passedHead("deno lint")),
+        lock: await Deno.readTextFile(`${dir}/deno.lock`) === lock,
+      },
+      { check: true, test: true, fmt: true, lint: true, lock: true },
+      r.stderr,
+    );
   });
 });
 

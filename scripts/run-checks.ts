@@ -7,7 +7,7 @@
  *    - 作業ツリーに無い追跡ファイル (`git ls-files --deleted`)。deno lint はその名前を黙って飛ばす (canon: facts/deno/missing-file-args)。deno lint が存在しない引数を error にするようになったら外せる。
  *    - deno と shellcheck の版 (下の「版」)。
  *    - deno test の段の TMPDIR を作れること (下の「deno test の段の TMPDIR」)。
- * 2. 段 (下の steps) を回し、全部を待つ。段が共有して書くのは deno の cache (DENO_DIR) だけ。deno.lock は読むだけで、deno() が lock を読む subcommand (check・test・run) に `--frozen-lockfile` を付ける (fmt・lint は受けない。canon: facts/deno/frozen-lockfile-subcommands)。
+ * 2. 段 (下の steps) を回し、全部を待つ。段が共有して書くのは deno の cache (DENO_DIR) だけ。deno.lock は読むだけ: deno.json の lock.frozen で、lock を読む subcommand (check・test・run) は deno.lock が deno.json と食い違えば落ち、書き換えない。fmt・lint は lock を読まない (canon: facts/deno/lock-frozen-config)。
  * 3. 段の出力を steps の順に出す。
  *    - 通った段: 見出しと標準出力を stdout へ、標準エラーを stderr へ。
  *    - 落ちた段: 見出しと両方を stderr へ。
@@ -372,18 +372,12 @@ const denoResultVars = [
   "DENO_TSC_BIN",
   "DENO_V8_FLAGS",
 ];
-/** deno.lock を読み、--frozen-lockfile を付ける subcommand (上の「流れ」の 2)。 */
-const readsLock = new Set(["check", "test", "run"]);
-/** tmp があれば、子の TMPDIR をそれにする。 */
-const deno = ([sub, ...rest]: string[], tmp?: string) =>
-  exec(
-    "deno",
-    [sub, ...(readsLock.has(sub) ? ["--frozen-lockfile"] : []), ...rest],
-    {
-      set: { DENO_NO_PACKAGE_JSON: "1", ...(tmp ? { TMPDIR: tmp } : {}) },
-      unset: denoResultVars,
-    },
-  );
+/** deno を args で、上の「入力と環境の定義域」の deno の環境で起動する。tmp を渡すと、子の TMPDIR をそれにする。 */
+const deno = (args: string[], tmp?: string) =>
+  exec("deno", args, {
+    set: { DENO_NO_PACKAGE_JSON: "1", ...(tmp ? { TMPDIR: tmp } : {}) },
+    unset: denoResultVars,
+  });
 
 /** 印字できる ASCII (空白と \ を除く) の他のバイトを \xHH にする。 */
 const escapeBytes = (b: Uint8Array) =>

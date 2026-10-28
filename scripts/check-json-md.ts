@@ -1,7 +1,7 @@
 /**
  * check-json-md.ts — git が知るファイルのうち、JSON の構文と、Markdown のリポ内リンク・anchor を検査する。run-checks.ts が起動する。
  *
- * 使い方: リポのルートを cwd にして `deno run --frozen-lockfile --allow-read=. <このファイル> <path>...`。
+ * 使い方: リポのルートを cwd にして `deno run --allow-read=. <このファイル> <path>...`。
  * - <path> は git が知るファイルの全部。それぞれリポのルートからの相対パス。
  *   - `.json` で終わるもの: 構文を検査する。BOM で始まるものは JSON として読めない違反になる (deno も BOM 付きの deno.json を読めない。canon: facts/deno/config-file-bom-rejected)。
  *   - `.md` で終わるもの: リンクと anchor を検査する。

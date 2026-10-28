@@ -42,7 +42,6 @@ const check = (
     const r = await new Deno.Command("deno", {
       args: [
         "run",
-        "--frozen-lockfile",
         "--allow-read=.",
         `${root}/scripts/check-json-md.ts`,
         ...args,

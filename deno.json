@@ -1,5 +1,5 @@
 {
-  "lock": true,
+  "lock": { "frozen": true },
   "minimumDependencyAge": "P3D",
   "imports": {
     "fast-check": "npm:fast-check@4.10.2",
