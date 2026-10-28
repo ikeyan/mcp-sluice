@@ -3,15 +3,19 @@
  *
  * 使い方: リポのルートを cwd にして `deno run --frozen-lockfile --allow-read=. <このファイル> <path>...`。
  * - <path> は git が知るファイルの全部。それぞれリポのルートからの相対パス。
- *   - `.json` で終わるもの: 構文を検査する。BOM で始まるものは JSON として読めない違反になる (deno 自身も BOM 付きの deno.json を拒否する)。
- *   - `.md` で終わるもの: リンクと anchor を検査する。各ファイルは 1 回だけ読み、そのファイル自身の検査と、そこへのリンクの anchor の検査に使う。
+ *   - `.json` で終わるもの: 構文を検査する。BOM で始まるものは JSON として読めない違反になる (deno も BOM 付きの deno.json を読めない。canon: facts/deno/config-file-bom-rejected)。
+ *   - `.md` で終わるもの: リンクと anchor を検査する。
  *   - 全部: リンク先が在るかの判定に使う。
+ *   - 拡張子の判定は大文字小文字を区別する。`.JSON`・`.MD` は検査しない。
+ * - `.json`・`.md` は UTF-8 として読む。BOM は落とさない (canon: facts/git/path-output-quoting の TextDecoder)。
  * - 次のときは何も検査せず exit 2:
  *   - 引数が無い。
  *   - どれかが正規の相対パスでない (先頭の `/`、空・`.`・`..` の segment)。
  * - 違反があれば stderr に出して exit 1。無ければ件数を stdout に出して exit 0。
  *
- * リンク (GitHub が追跡されたファイルを描画するときの解決に合わせる。ただし未確認の前提で、canon に事実が無く、下の規則は GitHub で確かめていない。確かめ方: 規則の各行の例を使い捨てのブランチの .md に置いて push し、GitHub の描画でリンクを辿る):
+ * リンク:
+ * - 根拠: GitHub が追跡されたファイルを描画するときの解決に合わせる。ただし未確認の前提で、canon に事実が無く、下の規則は GitHub で確かめていない。
+ * - 確かめ方: 規則の各行の例を使い捨てのブランチの .md に置いて push し、GitHub の描画でリンクを辿る。
  * - 対象:
  *   - Markdown のリンク・画像 (参照スタイルを含む)。
  *   - 生の HTML のタグの `href`・`src`。
@@ -19,14 +23,16 @@
  * - スキーム (`http:`・`mailto:` など) か `//` で始まるものは外部として見ない。
  * - 最初の `#` の後が anchor。その前の最初の `?` の後は query で、見ない。
  * - パス:
- *   - `/` で割ってから segment ごとに %-decode する (`%2F` は区切りにならない)。decode できない segment があれば「不正な %-エンコード」の違反。
- *   - `/` で始まればリポのルートから、他はファイルのディレクトリから辿る。`.` と空の segment は飛ばし、`..` で 1 つ戻る。ルートより上へ戻るものは「リポの外を指す」違反。
- *   - パスが空ならファイル自身。
+ *   - `/` で割ってから、segment ごとに %-decode する。`%2F` は区切りにならない。
+ *   - 起点は、`/` で始まればリポのルート、他はファイルのディレクトリ。パスが空ならファイル自身。
+ *   - `.` と空の segment は飛ばし、`..` で 1 つ戻る。
+ *   - 違反: decode できない segment があれば「不正な %-エンコード」。ルートより上へ戻れば「リポの外を指す」。
  * - 辿った先が、引数のどれかと segment ごとに綴り (大文字小文字を含む) まで一致するか、どれかの親ディレクトリ (ルートを含む) でなければ「リンク先が無い」違反。
  * - anchor (空なら見ない。%-decode できなければ「不正な %-エンコード」違反):
- *   - 辿った先が `.md` のファイル: その見出しの id のどれかと一致すること。id は github-slugger の規則で作る (canon: facts/github/heading-anchor-ids)。
+ *   - 辿った先が `.md` の引数: その見出しの id のどれかと一致すること。id は github-slugger の規則で作る (canon: facts/github/heading-anchor-ids)。
  *   - 他: GitHub の行の anchor (`L10`・`L10-L20`) だけを受ける。他は検査できないので違反。
- * - ファイルを読めなければ (無い、を含む)、そのファイル自身の違反 (`<file>: 読めない — <原因の文言>`) にする。読めない .md への anchor は見ない。
+ * - ファイルを読めない (無い、を含む) か UTF-8 として不正なら、そのファイル自身の違反にする。そういう .md への anchor は見ない。
+ * - 違反の行は `<file>: <何が>。<どう直すか> — <リンクか原因の文言>`。
  */
 import GithubSlugger from "github-slugger";
 import MarkdownIt from "markdown-it";
@@ -61,11 +67,20 @@ const report = (file: string, message: string) =>
   violations.push(`${file}: ${message}`);
 const messageOf = (e: unknown) => e instanceof Error ? e.message : String(e);
 
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const readOrReport = async (file: string): Promise<string | undefined> => {
+  let bytes: Uint8Array;
   try {
-    return await Deno.readTextFile(file);
+    bytes = await Deno.readFile(file);
   } catch (e) {
-    report(file, `読めない — ${messageOf(e)}`);
+    report(file, `読めない。読める通常ファイルにする — ${messageOf(e)}`);
+    return;
+  }
+  try {
+    return utf8.decode(bytes);
+  } catch (e) {
+    if (!(e instanceof TypeError)) throw e;
+    report(file, `UTF-8 として不正。UTF-8 で保存し直す — ${messageOf(e)}`);
   }
 };
 
@@ -75,7 +90,7 @@ for (const file of jsonFiles) {
   try {
     JSON.parse(text);
   } catch (e) {
-    report(file, `JSON として読めない — ${messageOf(e)}`);
+    report(file, `JSON として読めない。構文を直す — ${messageOf(e)}`);
   }
 }
 
@@ -156,6 +171,8 @@ const targetsOf = (tokens: Token[]): Target[] => {
 };
 
 type Resolved = { segments: string[] } | { problem: string };
+const malformed =
+  "不正な %-エンコード。正しい %XX の列にする (% そのものは %25)";
 
 /** リンクのパスを辿った、リポのルートからの segment。 */
 const resolve = (dir: string[], path: string): Resolved => {
@@ -165,11 +182,13 @@ const resolve = (dir: string[], path: string): Resolved => {
     try {
       segment = decodeURIComponent(raw);
     } catch {
-      return { problem: "不正な %-エンコード" };
+      return { problem: malformed };
     }
     if (segment === "" || segment === ".") continue;
     if (segment !== "..") out.push(segment);
-    else if (out.pop() === undefined) return { problem: "リポの外を指す" };
+    else if (out.pop() === undefined) {
+      return { problem: "リポの外を指す。リポ内を指すか、URL で書く" };
+    }
   }
   return { segments: out };
 };
@@ -183,24 +202,24 @@ const decodeAnchor = (s: string): string | undefined => {
   }
 };
 
-/** .md の引数ごとの、parse したトークンと見出しの anchor。読めなければ undefined。 */
+/** .md の引数ごとの、名前と、parse したトークンと見出しの anchor (読めなければ undefined)。鍵は key。 */
 const markdown = new Map<
   string,
-  { tokens: Token[]; anchors: Set<string> } | undefined
+  { file: string; parsed?: { tokens: Token[]; anchors: Set<string> } }
 >();
 for (const file of markdownFiles) {
   const text = await readOrReport(file);
   const tokens = text === undefined ? undefined : parse(text);
-  markdown.set(
+  markdown.set(key(file.split("/")), {
     file,
-    tokens === undefined ? undefined : { tokens, anchors: anchorsOf(tokens) },
-  );
+    parsed: tokens && { tokens, anchors: anchorsOf(tokens) },
+  });
 }
 
-for (const [file, read] of markdown) {
-  if (read === undefined) continue;
+for (const { file, parsed } of markdown.values()) {
+  if (parsed === undefined) continue;
   const dir = file.split("/").slice(0, -1);
-  for (const target of targetsOf(read.tokens)) {
+  for (const target of targetsOf(parsed.tokens)) {
     if ("uncheckable" in target) {
       report(
         file,
@@ -220,27 +239,35 @@ for (const [file, read] of markdown) {
       report(file, `${resolved.problem} — ${url}`);
       continue;
     }
-    const isFile = knownFiles.has(key(resolved.segments));
-    if (!isFile && !knownDirs.has(key(resolved.segments))) {
-      report(file, `リンク先が無い — ${url}`);
+    const at = key(resolved.segments);
+    if (!knownFiles.has(at) && !knownDirs.has(at)) {
+      report(
+        file,
+        `リンク先が無い。git が知るファイルかディレクトリを指す — ${url}`,
+      );
       continue;
     }
     if (rawAnchor === "") continue;
     const anchor = decodeAnchor(rawAnchor);
     if (anchor === undefined) {
-      report(file, `不正な %-エンコード — ${url}`);
+      report(file, `${malformed} — ${url}`);
       continue;
     }
-    const joined = resolved.segments.join("/");
-    if (!isFile || !joined.endsWith(".md")) {
+    const linked = markdown.get(at);
+    if (linked === undefined) {
       if (!/^L\d+(?:-L\d+)?$/.test(anchor)) {
-        report(file, `.md でないファイルの anchor は検査できない — ${url}`);
+        report(
+          file,
+          `.md でないファイルの anchor は検査できない。行の anchor (L10・L10-L20) にするか、anchor を外す — ${url}`,
+        );
       }
       continue;
     }
-    const anchors = markdown.get(joined)?.anchors;
-    if (anchors !== undefined && !anchors.has(anchor)) {
-      report(file, `anchor が見出しに無い — ${url}`);
+    if (linked.parsed && !linked.parsed.anchors.has(anchor)) {
+      report(
+        file,
+        `anchor が見出しに無い。リンク先の見出しの id に合わせる — ${url}`,
+      );
     }
   }
 }

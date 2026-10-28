@@ -20,9 +20,9 @@ const withTempDir = async <T>(fn: (dir: string) => Promise<T>): Promise<T> => {
   }
 };
 
-/** files を置いた一時ディレクトリを cwd にして check-json-md.ts を回す。値が null のパスはディレクトリにする。引数の既定は null でないパスの全部。 */
+/** files を置いた一時ディレクトリを cwd にして check-json-md.ts を回す。値が null のパスはディレクトリにし、Uint8Array はそのバイトで書く。引数の既定は null でないパスの全部。 */
 const check = (
-  files: Record<string, string | null>,
+  files: Record<string, string | Uint8Array | null>,
   args = Object.keys(files).filter((f) => files[f] !== null),
 ): Promise<{ code: number; stderr: string }> =>
   withTempDir(async (dir) => {
@@ -35,7 +35,9 @@ const check = (
       await Deno.mkdir(full.slice(0, full.lastIndexOf("/")), {
         recursive: true,
       });
-      await Deno.writeTextFile(full, content);
+      await (typeof content === "string"
+        ? Deno.writeTextFile(full, content)
+        : Deno.writeFile(full, content));
     }
     const r = await new Deno.Command("deno", {
       args: [
@@ -68,7 +70,7 @@ const assignable = (got: string[], want: string[], prefix: boolean) => {
 const heading = "# x\n\n## a\n\n## a\n";
 const cases: {
   name: string;
-  files: Record<string, string | null>;
+  files: Record<string, string | Uint8Array | null>;
   args?: string[];
   code: number;
   stderr: string[];
@@ -83,7 +85,9 @@ const cases: {
         "[l](/LICENSE) [m](/nope) [n](/docs/a.md) [o](/) [p](/docs/)\n",
     },
     code: 1,
-    stderr: ["docs/a.md: リンク先が無い — /nope"],
+    stderr: [
+      "docs/a.md: リンク先が無い。git が知るファイルかディレクトリを指す — /nope",
+    ],
   },
   {
     name: "ルートより上へ戻る ..",
@@ -94,9 +98,9 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "docs/a.md: リポの外を指す — ../../LICENSE",
-      "docs/a.md: リポの外を指す — /../LICENSE",
-      "docs/a.md: リポの外を指す — ../docs/../../x",
+      "docs/a.md: リポの外を指す。リポ内を指すか、URL で書く — ../../LICENSE",
+      "docs/a.md: リポの外を指す。リポ内を指すか、URL で書く — /../LICENSE",
+      "docs/a.md: リポの外を指す。リポ内を指すか、URL で書く — ../docs/../../x",
     ],
   },
   {
@@ -108,8 +112,8 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "b.md: リンク先が無い — license",
-      "b.md: リンク先が無い — Docs/a.md",
+      "b.md: リンク先が無い。git が知るファイルかディレクトリを指す — license",
+      "b.md: リンク先が無い。git が知るファイルかディレクトリを指す — Docs/a.md",
     ],
   },
   {
@@ -117,7 +121,9 @@ const cases: {
     files: { "untracked.md": "", "a.md": "[l](untracked.md)\n" },
     args: ["a.md"],
     code: 1,
-    stderr: ["a.md: リンク先が無い — untracked.md"],
+    stderr: [
+      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — untracked.md",
+    ],
   },
   {
     name: "%-エンコードは segment ごとに戻す",
@@ -129,8 +135,20 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "docs/a.md: リンク先が無い — ..%2FLICENSE",
-      "docs/a.md: リポの外を指す — %2E%2E/%2e%2e/LICENSE",
+      "docs/a.md: リンク先が無い。git が知るファイルかディレクトリを指す — ..%2FLICENSE",
+      "docs/a.md: リポの外を指す。リポ内を指すか、URL で書く — %2E%2E/%2e%2e/LICENSE",
+    ],
+  },
+  {
+    name: "%2F を decode した segment は、/ を含む 1 つの名前",
+    files: {
+      "a/b.md": "",
+      "x.md": "[l](/a%2Fb.md) [m](a%2Fb.md) [n](a/b.md)\n",
+    },
+    code: 1,
+    stderr: [
+      "x.md: リンク先が無い。git が知るファイルかディレクトリを指す — /a%2Fb.md",
+      "x.md: リンク先が無い。git が知るファイルかディレクトリを指す — a%2Fb.md",
     ],
   },
   {
@@ -142,21 +160,25 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: 不正な %-エンコード — 100%zz.md",
-      "a.md: 不正な %-エンコード — b.md#%E3",
+      "a.md: 不正な %-エンコード。正しい %XX の列にする (% そのものは %25) — 100%zz.md",
+      "a.md: 不正な %-エンコード。正しい %XX の列にする (% そのものは %25) — b.md#%E3",
     ],
   },
   {
     name: "2 つ目の # は anchor の一部",
     files: { "b.md": heading, "a.md": "[l](b.md#x#y) [m](b.md#x)\n" },
     code: 1,
-    stderr: ["a.md: anchor が見出しに無い — b.md#x#y"],
+    stderr: [
+      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#x#y",
+    ],
   },
   {
     name: "query は見ない",
     files: { "b.md": heading, "a.md": "[l](b.md?plain=1#x) [m](c.md?x=1)\n" },
     code: 1,
-    stderr: ["a.md: リンク先が無い — c.md?x=1"],
+    stderr: [
+      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — c.md?x=1",
+    ],
   },
   {
     name: "参照スタイルのリンク・画像と、外部のもの",
@@ -172,7 +194,9 @@ const cases: {
       ].join("\n"),
     },
     code: 1,
-    stderr: ["a.md: リンク先が無い — gone.md"],
+    stderr: [
+      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — gone.md",
+    ],
   },
   {
     name: "生の HTML の href・src・srcset",
@@ -184,7 +208,7 @@ const cases: {
         "",
         '<!-- <a href="commented.md"> -->',
         "",
-        'text <a href="b.md#x">x</a> <a href=missing.md>m</a> <a href="b.md?a=1&amp;b=2#nope">n</a> <img src="https://example.com/x.png">',
+        'text <a href="b.md#x">x</a> <a href=missing.md>m</a> <a href="b.md?a=1&amp;b=2#nope">n</a> <img src="https://example.com/x.png"> <a HREF="upper.md">u</a>',
         "",
         '<picture><source srcset="img/ok.png 2x"><img src="img/ok.png"></picture>',
         "",
@@ -192,9 +216,10 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: リンク先が無い — img/no.png",
-      "a.md: リンク先が無い — missing.md",
-      "a.md: anchor が見出しに無い — b.md?a=1&b=2#nope",
+      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — img/no.png",
+      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — missing.md",
+      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — upper.md",
+      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md?a=1&b=2#nope",
       "a.md: srcset のリンク先は検査できない。リポ内のファイルを指すなら src にする — srcset=img/ok.png 2x",
     ],
   },
@@ -208,8 +233,8 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: .md でないファイルの anchor は検査できない — LICENSE#intro",
-      "a.md: .md でないファイルの anchor は検査できない — docs#x",
+      "a.md: .md でないファイルの anchor は検査できない。行の anchor (L10・L10-L20) にするか、anchor を外す — LICENSE#intro",
+      "a.md: .md でないファイルの anchor は検査できない。行の anchor (L10・L10-L20) にするか、anchor を外す — docs#x",
     ],
   },
   {
@@ -220,8 +245,8 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: anchor が見出しに無い — b.md#a-2",
-      "b.md: anchor が見出しに無い — #a-2",
+      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#a-2",
+      "b.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — #a-2",
     ],
   },
   {
@@ -249,9 +274,9 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: anchor が見出しに無い — b.md#logo-project-name",
-      "a.md: anchor が見出しに無い — b.md#text-alt-word-tail",
-      "a.md: anchor が見出しに無い — b.md#html-alt-html-img",
+      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#logo-project-name",
+      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#text-alt-word-tail",
+      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#html-alt-html-img",
     ],
   },
   {
@@ -265,8 +290,8 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: anchor が見出しに無い — b.md#title-x-y",
-      "a.md: anchor が見出しに無い — c.md#empty",
+      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#title-x-y",
+      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — c.md#empty",
     ],
   },
   {
@@ -276,7 +301,9 @@ const cases: {
       "a.md": "[l](b.md#title-x)\n",
     },
     code: 1,
-    stderr: ["a.md: anchor が見出しに無い — b.md#title-x"],
+    stderr: [
+      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#title-x",
+    ],
   },
   {
     name: "frontmatter: CRLF",
@@ -285,7 +312,9 @@ const cases: {
       "a.md": "[l](b.md#real) [m](b.md#title-x)\n",
     },
     code: 1,
-    stderr: ["a.md: anchor が見出しに無い — b.md#title-x"],
+    stderr: [
+      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#title-x",
+    ],
   },
   {
     name: "見出しの id: backslash escape",
@@ -294,7 +323,9 @@ const cases: {
       "a.md": "[l](b.md#a_b) [m](b.md#ab)\n",
     },
     code: 1,
-    stderr: ["a.md: anchor が見出しに無い — b.md#ab"],
+    stderr: [
+      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#ab",
+    ],
   },
   {
     name: "読めないファイルは原因の文言のまま",
@@ -303,9 +334,23 @@ const cases: {
     code: 1,
     prefix: true,
     stderr: [
-      "dir.md: 読めない — Is a directory",
-      "gone.md: 読めない — No such file or directory",
-      "gone.json: 読めない — No such file or directory",
+      "dir.md: 読めない。読める通常ファイルにする — Is a directory",
+      "gone.md: 読めない。読める通常ファイルにする — No such file or directory",
+      "gone.json: 読めない。読める通常ファイルにする — No such file or directory",
+    ],
+  },
+  {
+    name: "UTF-8 として不正な .json と .md",
+    files: {
+      "bad.json": new Uint8Array([0x7b, 0xff, 0x7d]),
+      "bad.md": new Uint8Array([0x23, 0x20, 0xff, 0x0a]),
+      "a.md": "[l](bad.md#x)\n",
+    },
+    code: 1,
+    prefix: true,
+    stderr: [
+      "bad.json: UTF-8 として不正。UTF-8 で保存し直す — ",
+      "bad.md: UTF-8 として不正。UTF-8 で保存し直す — ",
     ],
   },
   {
@@ -314,8 +359,8 @@ const cases: {
     code: 1,
     prefix: true,
     stderr: [
-      "bad.json: JSON として読めない — ",
-      "bom.json: JSON として読めない — ",
+      "bad.json: JSON として読めない。構文を直す — ",
+      "bom.json: JSON として読めない。構文を直す — ",
     ],
   },
   ...[[], ["/a.md"], ["a//b.md"], ["./a.md"], ["a/../b.md"], [""], ["a/"]].map((
@@ -342,14 +387,15 @@ Deno.test("check-json-md.ts の表", async () => {
 });
 
 /** リンクを置くファイル (a/b/x.md) の他に、git の一覧に載せるファイル。 */
-const known = ["a/b/x.md", "a/n.md", "a b/n.md"];
+const known = ["a/b/x.md", "a/n.md", "a b/n.md", "a/c.json"];
 
 const labels = {
-  malformed: "不正な %-エンコード",
-  outside: "リポの外を指す",
-  missing: "リンク先が無い",
-  anchor: "anchor が見出しに無い",
-  notMd: ".md でないファイルの anchor は検査できない",
+  malformed: "不正な %-エンコード。正しい %XX の列にする (% そのものは %25)",
+  outside: "リポの外を指す。リポ内を指すか、URL で書く",
+  missing: "リンク先が無い。git が知るファイルかディレクトリを指す",
+  anchor: "anchor が見出しに無い。リンク先の見出しの id に合わせる",
+  notMd:
+    ".md でないファイルの anchor は検査できない。行の anchor (L10・L10-L20) にするか、anchor を外す",
 };
 
 /** a/b/x.md の url のリンクの報告のモデル。known の .md はどれも見出しを持たない。報告が無ければ undefined。 */
@@ -376,7 +422,10 @@ const model = (url: string): keyof typeof labels | undefined => {
       else if (out.pop() === undefined) return "outside";
     }
   }
-  const isFile = known.includes(out.join("/"));
+  const isMd = known.some((f) =>
+    f.endsWith(".md") && f.split("/").length === out.length &&
+    f.split("/").every((s, i) => s === out[i])
+  );
   const exists = known.some((f) => {
     const segments = f.split("/");
     return segments.length >= out.length &&
@@ -390,7 +439,7 @@ const model = (url: string): keyof typeof labels | undefined => {
   } catch {
     return "malformed";
   }
-  if (!isFile) return /^L\d+(?:-L\d+)?$/.test(anchor) ? undefined : "notMd";
+  if (!isMd) return /^L\d+(?:-L\d+)?$/.test(anchor) ? undefined : "notMd";
   return "anchor";
 };
 
@@ -409,7 +458,13 @@ Deno.test("リンクの報告は、# と ? で割り、segment ごとに decode 
       "%2e%2e",
       "%2E",
       "%2F",
+      "a%2Fn.md",
+      "%00",
+      "%25",
       "a%20b",
+      "c.json",
+      "c.json#L1",
+      "c.json#x",
       "#",
       "#L1",
       "n.md#x",
@@ -428,6 +483,7 @@ Deno.test("リンクの報告は、# と ? で割り、segment ごとに decode 
         const r = await check({
           "a/n.md": "",
           "a b/n.md": "",
+          "a/c.json": "{}",
           "a/b/x.md": paths.map((p) => `- [l](<${p}>)\n`).join(""),
         });
         deepStrictEqual(
