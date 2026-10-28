@@ -16,12 +16,15 @@
  * - 中断の test: 写している最中に SIGTERM を受けると、一時ファイルを残さない。
  * - TMPDIR の値は、canon: facts/shell/string-input-categories の分類から生成して回す。
  * - git rev-parse --local-env-vars の各行の形は、fake の git が出す行を生成して、[A-Z] が ASCII の外の大文字を含む locale で回す (canon: facts/shell/bash-regex-range-locale)。
- *   - 回す前に、その locale の bash で `[[ É =~ ^[A-Z]$ ]]` が真になることを確かめる。
+ *   - 回す前に、その locale の bash で次を確かめる:
+ *     1. locale が効いている: `${#É}` が 1。locale が無ければ bash は C のまま動き、バイトを数えて 2 になる (canon: facts/shell/bash-missing-locale-stays-c)。
+ *     2. `[[ É =~ ^[A-Z]$ ]]` が真。
  *   - OS ごとの違い:
- *     - Linux: en_US.UTF-8 を localedef で一時の dir に作り、LOCPATH で指す (canon: facts/glibc/localedef-and-locpath-inputs)。確かめが偽なら、次元を確かめられないので落ちる。
- *     - 他の OS: OS に入っている en_US.UTF-8。確かめが偽なら、そのことを stderr に出し、この次元を確かめずに現在の locale のまま回す。
- *       - 偽の理由 (bash の [A-Z] が É を含まない、その locale が OS に無い) は区別しない。
- *       - 外せる条件: macOS の /bin/bash 3.2 で、OS に入っている en_US.UTF-8 の [A-Z] が É を含むかを測ったとき。含めば、偽を Linux と同じく落ちる扱いにする。
+ *     - Linux: en_US.UTF-8 を localedef で一時の dir に作り、LOCPATH で指す (canon: facts/glibc/localedef-and-locpath-inputs)。1 か 2 が偽なら、次元を確かめられないので落ちる。
+ *     - 他の OS: OS に入っている en_US.UTF-8。
+ *       - 1 が偽 (locale が無い): 落ちる。
+ *       - 1 が真で 2 が偽: その OS の bash の [A-Z] が É を含まないとみて、そのことを stderr に出し、この次元を確かめずに現在の locale のまま回す。
+ *       - 外せる条件: macOS の /bin/bash 3.2 で、OS に入っている en_US.UTF-8 の [A-Z] が É を含むかを測ったとき。含めば、2 の偽を Linux と同じく落ちる扱いにする。
  *   - 後始末: localedef で作った dir は test の終わりに消す。
  * - 子の環境と symlink の作り方、test が起動したものの寿命と fixture の消し方は、run-checks_test.ts の先頭と同じ。
  */
@@ -92,7 +95,7 @@ async function removeEventually(dir: string) {
   }
 }
 
-/** dir を作って fn に渡し、終われば消す。fn が投げたら、消せなくても fn の例外を投げる (消せないことは stderr に出す)。 */
+/** dir を作って fn に渡し、終われば消す。fn が投げたら、その例外を投げる。そのときに消せなければ、そのことを stderr に出す。 */
 const withTempDir = async <T>(fn: (dir: string) => Promise<T>): Promise<T> => {
   const dir = await Deno.makeTempDir({ dir: tmpdir });
   let result: T;
@@ -500,7 +503,7 @@ const missingTools: (
     ],
     fix: true,
   },
-  // rm -f の失敗は、一時ファイルが在ったかを問わずに出す (写す前に落ちたときも)
+  // rm -f の失敗は、写す前に落ちて一時ファイルが無いときも出す
   {
     tools: ["rm", "install"],
     state: "無い",
@@ -1118,22 +1121,35 @@ async function wideRangeLocale(dir: string): Promise<Record<string, string>> {
       clearEnv: true,
     }).output();
     if (!r.success) {
-      throw new Error(`localedef が exit ${r.code}\n${dec.decode(r.stderr)}`);
+      throw new Error(
+        `localedef が exit ${r.code}。locale の定義 /usr/share/i18n/locales/en_US と charmap /usr/share/i18n/charmaps/UTF-8.gz が要る (Ubuntu では package locales。他の distribution は確かめていない)\n${
+          dec.decode(r.stderr)
+        }`,
+      );
     }
   }
+  // exit 2: locale が効いていない。exit 1: 効いているが [A-Z] が É を含まない
   const probe = await spawn("bash", {
-    args: ["-c", "[[ É =~ ^[A-Z]$ ]]"],
+    args: ["-c", '[ "${#1}" = 1 ] || exit 2; [[ $1 =~ ^[A-Z]$ ]]', "bash", "É"],
     env: { ...baseEnv, ...env },
     clearEnv: true,
   }).output();
   if (probe.success) return env;
+  const where = linux ? `localedef で作った ${wideLocale}` : wideLocale;
+  if (probe.code === 2) {
+    throw new Error(
+      `${where} が bash に効かない (\${#É} が 1 でない)。[A-Z] が ASCII の外を含む locale の次元を確かめられない${
+        linux ? "" : `。${wideLocale} を OS に入れる`
+      }\n${dec.decode(probe.stderr)}`,
+    );
+  }
   if (linux) {
     throw new Error(
-      `localedef で作った ${wideLocale} で [[ É =~ ^[A-Z]$ ]] が偽。[A-Z] が ASCII の外を含む locale の次元を確かめられない`,
+      `${where} で [[ É =~ ^[A-Z]$ ]] が偽。[A-Z] が ASCII の外を含む locale の次元を確かめられない`,
     );
   }
   console.error(
-    `${Deno.build.os} で、${wideLocale} の bash の [[ É =~ ^[A-Z]$ ]] が偽 (bash の [A-Z] が É を含まないか、locale が無い)。この次元を確かめずに、現在の locale のまま回す`,
+    `${Deno.build.os} の bash の [A-Z] は、${wideLocale} で É を含まない ([[ É =~ ^[A-Z]$ ]] が偽)。この次元を確かめずに、現在の locale のまま回す`,
   );
   return {};
 }

@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# このリポの単一検証コマンド。hook を揃えてから scripts/run-checks.ts を exec し、hook の段の結果 (0: 揃えた、1: 揃えられなかったか、写す途中の一時ファイルの rm -f が落ちた) を引数で渡す。検査の規則の本文は scripts/run-checks.ts の先頭にある。
+# このリポの単一検証コマンド。hook を揃えてから scripts/run-checks.ts を exec し、hook の段の結果を引数で渡す。引数の値は次のどれか:
+# - 0: 揃えた。
+# - 1: 揃えられなかったか、写す途中の一時ファイルの rm -f が落ちた。
+# 検査の規則の本文は scripts/run-checks.ts の先頭にある。
 # 事前条件 (外れれば exit 1。PATH の道具が無いときは下の「PATH にあるもの」、git の失敗は下の「git の失敗」):
 # - OS は Linux か macOS (uname -s が Linux か Darwin)。
 # - bash 3.2 以降。
@@ -25,14 +28,14 @@
 #   - bash: 1 行目の env が見つけられず exit 127 (canon: facts/shell/env-utility-not-found-exit-127)。
 #   - uname・dirname・git: その行で exit 127 で止まる (set -e。canon: facts/shell/bash-command-not-found-exit-127)。hook に触れる前。
 #   - mkdir・install・ln: hook を写すときだけ使う。無ければ写せないので、hook を揃えられないとする (下の「写せない」)。
-#   - rm: 写す途中の一時ファイルを、在るかを見ずに rm -f で消す (写せたかに関わらない)。rm -f が落ちれば (rm が無いときを含む)、一時ファイルが残りうることと消すコマンドを出し、hook の段の結果を 1 にする。写せていれば hook はそのまま。
+#   - rm: 写す途中の一時ファイルを rm -f で消す。写せたときも、写す前に落ちたときも消す。rm -f が落ちれば (rm が無いときを含む)、一時ファイルが残りうることと消すコマンドを出し、hook の段の結果を 1 にする。写せていれば hook はそのまま。
 #   - cmp: 写す先に通常ファイルの pre-push が在るときだけ使う。無ければ hook を揃えられないとする (下の写す先の表)。
 #   - chmod: 写す先の pre-push が同じ中身で実行可能でないときだけ使う。無ければ hook を揃えられないとする (同じ表)。
 #   - deno: 無ければ、hook を揃えた後の最後の exec が exit 127 で終わる (canon: facts/shell/bash-exec-missing-command-exit-status)。
 #   - shellcheck: run-checks.ts が確かめる。
 #   - deno test の段のテストが使うもの:
 #     - sh・env・printenv・sleep・mkfifo・find。
-#     - Linux では localedef と、それが読む locale の定義 en_US と charmap UTF-8 (canon: facts/glibc/localedef-and-locpath-inputs)。Ubuntu では package locales が置く。他の distribution の package は確かめていない。
+#     - Linux では localedef と、それが読む locale の定義 en_US と charmap UTF-8 (canon: facts/glibc/localedef-and-locpath-inputs)。Ubuntu では package locales が置く (canon: facts/glibc/localedef-and-locpath-inputs の「観測」)。他の distribution の package は確かめていない。
 # - git の失敗: git が非 0 で終われば、その行で git の終了コードで止まる (set -e)。除くのは、作業ツリーの判定 (上の「このファイルの dir の状態」) と core.hooksPath の読み (下の「hook」)。
 # - ネットワークは、deno が依存 (npm) を未取得のときだけ要る。
 # 入力:
@@ -266,8 +269,10 @@ case $TMPDIR in
 esac
 export TMPDIR
 # 段の子の deno は別のプロセスで、下の 4 つの flags を受けない (run-checks.ts の先頭の規則。canon: facts/deno/child-process-permissions)
-# Deno.kill で段のプロセスグループに送るには、パスを付けない --allow-run が要る (canon: facts/deno/command-spawn の「Deno.kill」)。パスで絞った --allow-run で通るようになったら、段が起動するもの (git・shellcheck・deno) に絞る。
-flags=(--allow-run)
+flags=(
+  # Deno.kill で段のプロセスグループに送るには、パスを付けない --allow-run が要る (canon: facts/deno/command-spawn の「Deno.kill」)。パスで絞った --allow-run で通るようになったら、段が起動するもの (git・shellcheck・deno) に絞る。
+  --allow-run
+)
 # 段の子の環境から変数を消すには、Deno.env.toObject で環境を丸ごと写す。それには変数を絞らない --allow-env が要る (canon: facts/deno/env-to-object-requires-unscoped-allow-env)。
 flags+=(--allow-env)
 # 段の一時ディレクトリを作って消す
