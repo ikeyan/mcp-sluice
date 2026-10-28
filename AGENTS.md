@@ -31,7 +31,9 @@
 
 ## 初回の準備
 
-- `.claude/settings.json` は ikeyan-skills と superpowers の plugin を有効にするだけで、入れはしない。Claude Code で ikeyan の marketplace (`ikeyan/agent-files`) と公式の marketplace から入れ、信頼する。
+- `.claude/settings.json` は ikeyan-skills と superpowers の plugin を宣言する。入り方は環境で違う:
+  - Claude Code on the web: セッションの開始時に自動で入る (canon: facts/claude-code/web-session-auto-installs-declared-plugins)。
+  - 手元の Claude Code: 各利用者が ikeyan の marketplace (`ikeyan/agent-files`) と公式の marketplace から入れ、信頼する (canon: facts/claude-code/external-plugin-requires-per-user-install-trust)。
 
 ## このリポの仕様
 
