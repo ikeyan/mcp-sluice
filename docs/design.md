@@ -62,7 +62,7 @@ mcp-sluice は、複数の子 MCP サーバーを 1 つのエンドポイント�
 - 2 つの世代を両方受ける。
   - 2026-07-28 (最新):
     - `initialize` もセッションも無い。
-    - サーバーからクライアントへの要求は、`tools/call` の結果として `input_required` を返し、クライアントが再送する形 (MRTR) だけになった。
+    - サーバーからクライアントへの要求は、`tools/call` の結果として `input_required` を返し、クライアントが再送する形 (Multi Round-Trip Requests。以下 MRTR) だけになった。
   - 2025-11-25 まで:
     - `initialize` とセッションがある。
     - POST の SSE の流れの中で `elicitation/create` を送れる。
@@ -83,8 +83,8 @@ authentik 2026.8.5 と main のソースで確認した。
 
 | 機能 | 状態 | 影響 |
 | --- | --- | --- |
-| Dynamic Client Registration | 有り。ただし `goauthentik.io/oidc/dcr` scope を持つ Bearer が要る | 匿名で登録しにくる MCP クライアントは 401 で失敗する |
-| Client ID Metadata Documents | 無し | 使えない |
+| Dynamic Client Registration (DCR) | 有り。ただし `goauthentik.io/oidc/dcr` scope を持つ Bearer が要る | 匿名で登録しにくる MCP クライアントは 401 で失敗する |
+| Client ID Metadata Documents (CIMD) | 無し | 使えない |
 | RFC 8707 `resource` | 読まない | `aud` をゲートウェイに向けられない |
 | `aud` | provider の client_id | client_id で検証する |
 | RFC 8414 のメタデータ | 無し。OIDC discovery (`/application/o/<slug>/.well-known/openid-configuration`) だけ | クライアントが OIDC discovery に落ちる必要がある |
@@ -144,9 +144,12 @@ authentik 2026.8.5 と main のソースで確認した。
   1. 利用者がまだ接続していない子のツールを呼んだら、「接続」の操作 (6 節) を作る。
   2. ページ (`/i/<id>`) で、ログインのセッションの (`iss`, `sub`) が要求の (`iss`, `sub`) と一致することを確かめる。一致すれば、子の AS へ送る。仕様は、URL を開いた人の確認を求めている。
   3. 戻ってきたトークンを (`iss`, `sub`, server id) に結んで、暗号化して保存する。
-- 子の AS へのクライアント登録の順: 事前登録 → CIMD → DCR。CIMD を使う場合、ゲートウェイは自分のメタデータの文書を公開する。
+- 子の AS へのクライアント登録は、次の順で試す。CIMD を使う場合、ゲートウェイは自分のメタデータの文書を公開する。
+  1. 事前登録
+  2. CIMD
+  3. DCR
 - 暗号化の鍵は env で渡す。鍵を失ったら、保存したトークンは全部無効になり、利用者は再接続する。
-- ツールの一覧は利用者によって違いうる。そのため、一覧を (利用者, server id) ごとに取り、`ttlMs` の間だけ持つ。
+- 子が返すツールの一覧は、利用者によって違いうる。この種類の子に限り、一覧を (利用者, server id) ごとに持ち、子の `list_changed` を受けたら、その server id の全利用者の分を捨てる。
 - まだ接続していない利用者には、その子のツールを一覧に出さない。代わりに `gateway__connect` を出す。
 
 ## 4. 子サーバーの登録と名前
@@ -218,7 +221,7 @@ gateway:                            # ゲートウェイ自身のツールにも
 
 1. server の `groups` に利用者が入っていなければ、その server のツールは全部 deny。
 2. server の `rules` を上から見て、次の 2 つを両方満たす最初の規則の `decision` を採る:
-   - `tools` (`*` だけのグロブ) が当たる。
+   - `tools` (`*` だけのグロブか、その配列。配列なら、どれか 1 つが当たれば当たる) が当たる。
    - `groups` が無いか、利用者が入っている。
 3. 当たる規則が無ければ、全体の `default` (既定は ask) を採る。
 
@@ -262,7 +265,7 @@ gateway:                            # ゲートウェイ自身のツールにも
 
 - elicitation で聞く場合:
   - 2025 系: その場で送って待つ。
-  - 2026 系: `input_required` を返し、`requestState` に署名した `{要求 id, 操作 id, iss, sub, client_id, 期限}` を入れる。仕様は `requestState` の改ざん防止を求めている。
+  - 2026 系: `input_required` を返し、`requestState` に要求 id と、その署名だけを入れる。仕様は `requestState` の改ざん防止を求めている。利用者・期限・操作 id は、要求 id で中断した要求の記録 (6.3 節) から引き、再送の利用者が記録の利用者と一致することを確かめる。
 - 結果に URL を返す場合:
   - 要求を中断し、ツールの結果として次を返す:
     - 何が必要か (承認か接続か)
@@ -332,7 +335,7 @@ gateway:                            # ゲートウェイ自身のツールにも
 1. 静的な検査: typescript 6.x の API を、プロセスの中で仮想のファイルシステムを使って呼ぶ。
    - `import`・`export`・`require` があれば拒否する。
    - 利用者から見えるツール (deny を除く) の `.d.ts` を、JSON Schema から生成して型検査する。型エラーがあれば実行せずに返す (副作用の前に、引数の誤りを直させる)。
-   - typescript 7.0.2 (npm の latest) には `transpileModule` が無かったので、6.x に固定する。
+   - typescript 7.0.2 (npm の latest) には `transpileModule` が無かったので、6.x に固定する。外せる条件: 7.x の API が、仮想のファイルシステムでの型検査と JS への変換を提供したとき。
 2. TS を JS に変換する (同じ compiler で)。
 3. 実行: QuickJS-WASM (quickjs-emscripten) で、実行ごとに新しい context を作り、worker thread で回す。
    - WASM を選ぶ理由: WASM は、渡したもの以外の IO を持たない。Deno の子プロセスでは、許可フラグが無くても次が通ることを実測した (2.9.6)。
@@ -392,7 +395,15 @@ gateway:                            # ゲートウェイ自身のツールにも
     - Code Mode の実行時間と、1 回あたりのツール呼び出しの数
     - 子の接続状態
 - log (構造化):
-  - 監査: 呼び出しごとに 1 件出す。中身は利用者、クライアント、tool、判定、操作の結果、成否、時間、引数の hash と大きさ。
+  - 監査: 呼び出しごとに 1 件出す。中身:
+    - 利用者
+    - クライアント
+    - tool
+    - 判定
+    - 操作の結果
+    - 成否
+    - 時間
+    - 引数の hash と大きさ
   - Code Mode のソース: 実行ごとに全文を 1 件出し、`trace_id`・`span_id` で trace とつなぐ。
     - span の属性に入れない理由: Tempo は 2048 バイトを超える属性を既定で切り詰め、上限を上げると querier が out-of-memory になりうると docs が警告している。
     - Loki の 1 行の上限が 64 KiB の入力を受けられるかは、未確認 (実装の前に確かめる)。

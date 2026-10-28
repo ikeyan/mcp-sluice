@@ -17,6 +17,7 @@ jobs:
         with:
           deno-version: v2.x
       # runner image 同梱の shellcheck (ubuntu-24.04 は 0.9.0) は SC2015 などの出方が手元と違うので、verify.sh が要求する版を /usr/local/bin に入れて先に引かせる。
+      # 外せる条件: ubuntu-latest の同梱が scripts/run-checks.ts の shellcheckVersion と同じ版になったとき。
       - run: |
           curl -fsSLo "$RUNNER_TEMP/shellcheck.tar.xz" https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
           echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  $RUNNER_TEMP/shellcheck.tar.xz" | sha256sum -c -

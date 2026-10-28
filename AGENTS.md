@@ -36,18 +36,20 @@
 
 ## このリポの検証
 
-- 単一検証コマンドは `./verify.sh`。CI も同じものを回す。含むもの:
-  - shellcheck (このリポが持つ shell。agent-sync が置くもの (`.agent-sync/generated` に載るもの) は上流が検査するので除く)
-  - `deno fmt --check`・`deno lint`・`deno check` (git が知る `.ts`)。`deno lint` は `no-unused-vars` だけ (recommended 全体にすると、deno 2.x の更新で規則が増えて CI が落ちうる)
-  - `deno test` (git が知る `*_test.ts`)
-  - JSON の構文 (git が知る `.json`)
-  - Markdown のリポ内リンク (git が知る `.md`)
-  - `deno.json` の `imports` の各キーが、git が知る `.ts` のどれかの import 指定子から使われていること (`deno lint` が見ない、未使用の依存を埋める。このリポの `.ts` が export を持つようになったら、未使用の export・module の検査を足す)
+- 単一検証コマンドは `./verify.sh`。CI も同じものを回す。含む検査:
+  - `shellcheck`: このリポが持つ shell。agent-sync が置いたもの (`.agent-sync/generated` に載り、中身が記録した id と同じもの) は上流が検査するので除く。
+  - `deno fmt --check`・`deno lint`・`deno check`: git が知る `.ts`。`deno lint` は `no-unused-vars` だけ (recommended 全体にすると、deno 2.x の更新で規則が増えて CI が落ちうる)。
+  - `deno test`: git が知る `*_test.ts`。
+  - `scripts/check-json-md.ts`: git が知る `.json` の構文と、`.md` のリポ内リンク。
+  - `deno.json` の `imports`: 各キーが、git が知る `.ts` のどれかの import 指定子から使われていること (`deno lint` が見ない、未使用の依存を埋める。このリポの `.ts` が export を持つようになったら、未使用の export・module の検査を足す)。
 - `./verify.sh` は common git dir の `hooks` の pre-push をその場で揃える (CI は `VERIFY_READONLY=1` で直さず落とす):
   - 無ければ `hooks/pre-push` を写す。
   - `hooks/pre-push` と違えば、上書きせず落ちて置き換えのコマンドを示す。
 - `./verify.sh` は `core.hooksPath` が hook をよそへ向けていれば落ちる (設定は書かない)。
-- 必要なもの: `shellcheck` (0.11.0 だけ。違えば `./verify.sh` が落ちる)、`deno` (2.x)、`git` (2.31 以降)。
+- 必要なもの:
+  - `shellcheck` (版は `scripts/run-checks.ts` の `shellcheckVersion` だけ。違えば `./verify.sh` が落ちる)
+  - `deno` (2.x)
+  - `git` (2.31 以降)
 - `deno.json` は `"lock": true` で、依存は完全な版で固定する。`minimumDependencyAge` は `P3D` (公開から 3 日未満の版を解決しない。deno の unstable の設定)。`./verify.sh` は `--frozen-lockfile` で回し、`deno.lock` が `deno.json` と食い違えば書き換えず落ちる (直すのは `deno install --frozen=false`)。
 
 ## このリポの言語

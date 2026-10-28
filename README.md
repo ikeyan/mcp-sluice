@@ -23,13 +23,18 @@ Design phase. Nothing is runnable yet. The design (in Japanese) is [docs/design.
 - **Per-user scope.** Policy is evaluated per user and per call.
   - `deny` tools are hidden and rejected.
   - Approvals, suspended requests and approval pages are bound to the user who made the request.
-- **Code Mode has no ambient I/O.** Scripts run in a fresh QuickJS WebAssembly context per run. They have no network, filesystem, environment, timers or storage that outlives a run. Every tool call from a script goes through the same policy and approval as a direct call.
+- **Code Mode has no ambient I/O.** Scripts run in a fresh QuickJS WebAssembly context per run. Every tool call from a script goes through the same policy and approval as a direct call. Scripts have none of the following:
+  - network
+  - filesystem
+  - environment variables
+  - timers
+  - storage that outlives a run
 - **Trusted.**
   - The host the gateway runs on.
   - The child servers an operator registers.
   - The OIDC provider.
   - The observability backend.
-- **Observability data is sensitive.** Traces and logs contain Code Mode source and audit records. Restrict the observability UI to administrators.
+- **Observability data is sensitive.** Logs contain Code Mode source and audit records; traces carry the source's hash and size. Restrict the observability UI to administrators.
 
 ## License
 
