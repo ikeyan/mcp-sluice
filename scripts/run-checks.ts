@@ -6,7 +6,7 @@
  *    - git が知る項目と、その種類と名前 (下の「名前」と「拡張子」)。
  *    - 作業ツリーに無い追跡ファイル (`git ls-files --deleted`)。deno lint はその名前を黙って飛ばす (canon: facts/deno/missing-file-args)。deno lint が存在しない引数を error にするようになったら外せる。
  *    - deno と shellcheck の版 (下の「版」)。
- *    - .ts があるとき、TMPDIR が段の一時ディレクトリを作れる形であること (下の「入力と環境の定義域」の TMPDIR)。
+ *    - .ts があるとき、TMPDIR が `/` で始まること。作れるかは段が判定する (下の「入力と環境の定義域」の TMPDIR)。
  * 2. 段 (下の steps) を回し、全部を待つ。段が共有して書くのは deno の cache (DENO_DIR) だけ。
  *    - deno.lock は読むだけ。deno.json の lock.frozen による (canon: facts/deno/lock-frozen-config):
  *      - lock を読む subcommand (check・test・run): deno.lock が deno.json と食い違えば落ち、書き換えない。
@@ -37,7 +37,7 @@
  *   - グループの中の子孫: emptyGroup が止める。
  *   - グループを抜けた子孫: 止めない。
  * - 状態 (groups):
- *   - 対象: exec が起動した子のプロセスグループ。起動から、emptyGroup が成功するか、空にできない失敗を出すまで記録する。
+ *   - 対象: exec が起動した子のプロセスグループ。起動から、emptyGroup が成功するか、空にできない失敗を出すまで記録する。記録は exec が戻ったか (returned) を持つ。
  *   - 鍵: pgid (子の pid)。
  *   - 等しいとみなす条件: 同じ exec の呼び出し。
  *
@@ -48,19 +48,19 @@
  *     - 段より前の失敗。
  *     - 段の後。
  *   - 中断 (SIGHUP・SIGINT・SIGTERM)。
- * - 後始末の記録は groups と stageTmps (上と下の「状態」)。失敗を出した側が、出すのと同じ同期の区間で記録を消す:
- *   - 本流: 段より前の失敗か段の結果を出した直後に、groups と stageTmps を消す。そのときには、どの exec も戻っている。
+ * - 後始末の記録は groups と stageTmps (上と下の「状態」)。どちらも、後始末が成功すれば消え、持ち主 (exec・withStageTmp) が戻ると returned を立てる。残った記録の失敗は、次のどちらかが出す:
+ *   - 本流: 段より前の失敗か段の結果を出した直後に、同じ同期の区間で、returned の記録を消す (持ち主の失敗は、結果の文言として出ている)。returned でない記録 (段が待たずに戻ったときの、まだ走っている exec など) は残す。
  *   - finish: 残る記録を全部後始末して、その失敗を理由と手で直す方法つきで stderr に出してから exit する。
  *     1. 記録しているグループを同時に空にする。
  *     2. 段の一時ディレクトリが残っていれば消す。失敗するのは、消せないものがあるとき (グループを抜けた子孫が書き続けているなど)。
- * - 中断が来る時点ごとの、失敗 (グループを空にできない、段の一時ディレクトリを消せない) の報告:
+ * - 記録の時点ごとの、失敗 (グループを空にできない、段の一時ディレクトリを消せない) の報告:
  *
- *   | 中断が来る時点 | 出す側 | 回数 |
+ *   | 記録の時点 | 出す側 | 回数 |
  *   | --- | --- | --- |
- *   | exec が投げる前・段が一時ディレクトリを消し終える前 | finish (同じ emptyGroup・同じ消去の結果を待つ) | 1 |
- *   | exec が投げた後・段が消去の失敗を結果に足した後で、本流が出す前 | finish (記録が残る) | 1 |
- *   | 本流が出した後 | 本流 (finish の前に記録は消えている) | 1 |
- *   | 中断なし | 本流 | 1 |
+ *   | 持ち主が戻る前に中断が来る | finish (持ち主と同じ emptyGroup・同じ消去の結果を待つ。持ち主の結果は本流が出さない) | 1 |
+ *   | 持ち主が戻った後、本流が出す前に中断が来る | finish (記録が残る) | 1 |
+ *   | 持ち主が戻った後、本流が出した | 本流 (finish の前に記録は消えている) | 1 |
+ *   | 本流が出したときに、持ち主が戻っていない | finish (記録が残る。持ち主の結果は本流が出さない) | 1 |
  *
  * - 終了コードは最初の finish の呼び出しのもの。中断なら 128 + シグナルの番号 (下の signals)。
  * - 後の呼び出し (2 回目以降のシグナル、中断の後の本流) は何もせず、最初の経路の exit を待つ。
@@ -79,9 +79,9 @@
  *   - 段の初めに作る。作れなければ、理由を出して段を落とす。
  *   - 段の後に消せなければ、段の結果 (exec の例外ならその文言) に、消せないことと手で消すことを足して段を落とす。文言は終了の経路と同じ。
  * - 状態 (stageTmps):
- *   - 対象: このプロセスが作った段の一時ディレクトリ。作ってから、本流か finish がその消去の結果を出すまで記録する。
- *   - 鍵: 段の名前。
- *   - 等しいとみなす条件: 同じ run-checks.ts の起動の、同じ段。
+ *   - 対象: このプロセスが作った段の一時ディレクトリ。作ってから、消せるか、本流か finish がその消去の失敗を出すまで記録する。記録は段の名前と、withStageTmp が戻ったか (returned) を持つ。
+ *   - 鍵: 一時ディレクトリのパス。
+ *   - 等しいとみなす条件: 同じパス (makeTempDir が作るたびに違うパスを返す)。
  * - deno test の段のものを外せる条件: deno test が SIGTERM で finally を回し、SIGINT でも test の後始末を終えてから終わるようになったとき。
  *   - 確かめ方: canon の facts/deno/test-signal-listeners の観測を、その版で回す。
  *   - 外すときに消すもの:
@@ -93,10 +93,7 @@
  *   - 0: 揃えた。
  *   - 1: 揃えられなかったか、写す途中の一時ファイルを消せなかった (理由は verify.sh が出した)。段は回し、最後に exit 1。
  * - 環境変数 TMPDIR: .ts があるときだけ使い、その下に段の一時ディレクトリを作る。verify.sh は絶対パスにした値を渡す。
- *   - 次のときは段の前で exit 1:
- *     - 未設定。
- *     - 空。
- *     - 絶対パスでない (`/` で始まらない)。
+ *   - `/` で始まらない (未設定・空を含む) ときは段の前で exit 1。
  *   - その下に作れない (無い・書けないなど) ときは、作る段が落ちる。
  * - cwd はリポのルート。読むファイルは deno.json だけ。書くのは段の一時ディレクトリだけ。許可は verify.sh が渡す。
  * - 環境はそのまま段の子に渡す。差し替えるのは次だけ:
@@ -156,6 +153,7 @@
  *     - deno test: `*_test.ts`。
  *     - JSON と Markdown: 名前の全部を check-json-md.ts に渡し、check-json-md.ts が `*.json`・`*.md` を選ぶ (リンク先として在るかの判定には全部の名前を使う)。
  *   - 対象が無い段は通す (shellcheck は引数が無いと落ちる。canon: facts/shellcheck/no-files-argument)。
+ *     - 例外: deno.json の imports の段は、.ts が無くても imports にキーがあれば、全部のキーを未使用として落ちる。
  *   - 名前の拡張子の類ごとの扱い (「落ちる」は、処理できない項目として段の前で落ちること):
  *
  *     | 名前の拡張子 | 追跡 (mode 100644) | 追跡 (mode 100755、実行可能) | 未追跡 |
@@ -178,14 +176,16 @@
  *     - verify.sh・run-checks.ts・check-json-md.ts と、PATH を差し替えた fake を起動する。
  *   - 外せる条件: `--allow-run=deno` で、差し替えた PATH の dir の deno を起動できるようになったら (canon: facts/deno/allow-run-name-with-child-path)、run を起動するものに絞る。
  * - deno.json の imports の各キー (importKeys 段):
- *   - キーを除いても deno の解決が変わらなければ、そのキーは使われていない。
- *     - 比べるもの: git が知る .ts のそれぞれを根にした `deno info --json` (canon: facts/deno/info-json-dependencies) の、graph の各 module (相対 import で辿った先を含む) の error と dependencies (解決先と、解決の error)。
- *     - 比べる 2 つ: 全部のキーを持つ deno.json の写しと、そのキーを除いた写し。どちらも段の一時ディレクトリに置き、--config で渡す。
- *     - deno を起動する数は (キーの数 + 1) × .ts の数。
- *   - 定義域: deno.json の imports と scopes が、写しの場所で解決が変わる形を持たない (canon: facts/deno/info-config-other-location)。持てば、理由を出して落ちる:
- *     - `./`・`../` で始まるキー (scopes のキーを含む): 写しの場所から解決される。
- *     - パスの形の値 (`./`・`../`・`/`・`file:` で始まる): 値の先を治める deno.json (リポのファイルならリポの deno.json) を deno が自動で link し、その imports が写しの差に関わらず当たる。
- *   - 前提: deno.json は、imports と scopes の他に、deno.json の場所から解決するパス (workspace・links・importMap・compilerOptions.types など) を持たない。持てば写しの場所から解決される (測っていない)。
+ *   - 未使用と報告するキーの集合は、全部を同時に除いても deno の解決が変わらないもの。
+ *     - 比べるもの: git が知る .ts のそれぞれを根にした `deno info --json` (canon: facts/deno/info-json-dependencies) の、graph の各 module (相対 import で辿った先を含む) の error と dependencies (解決先と、解決の error)。.ts のパスごとに比べる。
+ *     - 写し: deno.json の imports と scopes だけを書いたもの (下の「定義域」)。段の一時ディレクトリに置き、--config で渡す。
+ *     - 選び方: 全部のキーを持つ写しの解決を基準にする。キーを名前 (UTF-16 の符号単位) の順に 1 つずつ、それまでに除いたものと一緒に除いた写しを試し、解決が基準と同じなら除いたままにする。互いに代わりになるキー (`a/` と `a/b/` など) は、先に試したほうだけを報告する。
+ *     - deno info を同時に起動する数は infoLimit まで。写しは 1 つずつ試す。
+ *   - 定義域。外れれば、理由を出して落ちる:
+ *     - deno.json の最上位のキーは、imports・scopes と uncopiedKeys (写さなくても deno info の解決が変わらないと測ったもの) だけ。workspace・links・importMap・name・unstable・compilerOptions などは、写さないと解決が変わる (canon: facts/deno/info-config-other-location の「写さないキー」)。
+ *     - imports と scopes が、写しの場所で解決が変わる形を持たない:
+ *       - `./`・`../` で始まるキー (scopes のキーを含む): 写しの場所から解決される (canon: facts/deno/info-config-other-location)。
+ *       - パスの形の値 (`./`・`../`・`/`・`file:` で始まる): 値の先を治める deno.json (リポのファイルならリポの deno.json) を deno が自動で link し、その imports が写しの差に関わらず当たる (canon: facts/deno/info-config-other-location の「自動の link」)。
  *   - 指定子に入る構文:
  *     - 静的 import (`import x from "a"`・`import "a"`・`import { type W } from "a"`)。
  *     - `export … from "a"`。
@@ -202,10 +202,13 @@
  *   - 落ちる (未使用の判定をしない) とき:
  *     - deno.json の最上位か imports がオブジェクトでない。
  *     - 上の定義域の外。
- *     - deno info が非 0 で終わる。
- *     - 全部のキーを持つ写しでの graph の、file: の module に error がある (ファイルが無い、構文が壊れている、import 先のファイルが無い。deno info は exit 0。canon: facts/deno/info-json-dependencies)。npm: などの file: でない module の error (--no-npm で取らないもの) は見ない。
+ *     - deno info が非 0 で終わるか、出力が JSON として読めない。
+ *     - 写しでの graph の、file: の module に error がある (ファイルが無い、構文が壊れている、import 先のファイルが無い。deno info は exit 0。canon: facts/deno/info-json-dependencies)。npm: などの file: でない module の error (--no-npm で取らないもの) は見ない。
+ *     - どれかで落ちれば、残りの写しは試さない。
  *   - 数える参照は .ts の import の指定子だけ。
  */
+
+import { Buffer } from "node:buffer";
 
 const self = "run-checks.ts";
 const dec = new TextDecoder();
@@ -242,8 +245,11 @@ const signals: [Deno.Signal, number][] = [
   ["SIGINT", 130],
   ["SIGTERM", 143],
 ];
-/** 記録しているグループ (上の「状態 (groups)」)。pgid → そのグループを空にする関数。 */
-const groups = new Map<number, () => Promise<void>>();
+/** 記録しているグループ (上の「状態 (groups)」)。pgid → そのグループを空にする関数と、exec が戻ったか。 */
+const groups = new Map<
+  number,
+  { empty: () => Promise<void>; returned: boolean }
+>();
 const killGroup = (child: Deno.ChildProcess, signal: Deno.Signal) => {
   try {
     Deno.kill(-child.pid, signal);
@@ -303,10 +309,10 @@ async function emptyGroup(
   }
 }
 
-/** 段の一時ディレクトリ (上の「状態 (stageTmps)」)。段の名前 → パスと、並行に呼んでも 1 回だけ消す remove。 */
+/** 段の一時ディレクトリ (上の「状態 (stageTmps)」)。パス → 段の名前と、並行に呼んでも 1 回だけ消す remove と、withStageTmp が戻ったか。 */
 const stageTmps = new Map<
   string,
-  { path: string; remove: () => Promise<void> }
+  { stage: string; remove: () => Promise<void>; returned: boolean }
 >();
 /** 段の一時ディレクトリを消せないときの文言。段の結果と終了の経路で同じものを出す。 */
 const stageTmpLeft = (stage: string, path: string, e: unknown) =>
@@ -320,14 +326,14 @@ let finishing: Promise<never> | undefined;
 const finish = (code: number): Promise<never> =>
   finishing ??= (async () => {
     const emptied = await Promise.allSettled(
-      [...groups.values()].map((empty) => empty()),
+      [...groups.values()].map(({ empty }) => empty()),
     );
     for (const r of emptied) {
       if (r.status === "rejected") {
         console.error(`${self}: ${messageOf(r.reason)}`);
       }
     }
-    for (const [stage, { path, remove }] of stageTmps) {
+    for (const [path, { stage, remove }] of stageTmps) {
       try {
         await remove();
       } catch (e) {
@@ -339,10 +345,14 @@ const finish = (code: number): Promise<never> =>
 for (const [signal, code] of signals) {
   Deno.addSignalListener(signal, () => void finish(code));
 }
-/** 出した失敗の記録を消す (上の「終了」)。呼ぶ側は失敗を出した後に、await を挟まずに呼ぶ。 */
+/** 持ち主が戻った記録を消す (上の「終了」)。呼ぶ側は失敗を出した後に、await を挟まずに呼ぶ。 */
 const dropReportedRecords = () => {
-  groups.clear();
-  stageTmps.clear();
+  for (const [pgid, { returned }] of groups) {
+    if (returned) groups.delete(pgid);
+  }
+  for (const [path, { returned }] of stageTmps) {
+    if (returned) stageTmps.delete(path);
+  }
 };
 /** 段より前の失敗を出して終わる。終了の経路が始まっていれば、何も出さずにそれを待つ。 */
 const failBeforeSteps = async (problems: string[]): Promise<never> => {
@@ -371,22 +381,12 @@ interface EnvChange {
   unset?: string[];
 }
 
-const concat = (chunks: Uint8Array[]) => {
-  const all = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
-  let i = 0;
-  for (const c of chunks) {
-    all.set(c, i);
-    i += c.length;
-  }
-  return all;
-};
-
 /** 閉じるか cancel されるまで読む。Response の読みは cancel できない (canon: facts/deno/command-spawn の「出力の pipe を持ったまま残る子孫と、読み端の cancel」)。 */
 async function readAll(reader: ReadableStreamDefaultReader<Uint8Array>) {
   const chunks: Uint8Array[] = [];
   for (;;) {
     const { done, value } = await reader.read();
-    if (done) return concat(chunks);
+    if (done) return Buffer.concat(chunks);
     chunks.push(value);
   }
 }
@@ -419,7 +419,8 @@ async function exec(
     emptied ??= emptyGroup(child, outputs).then(() => {
       groups.delete(child.pid);
     });
-  groups.set(child.pid, empty);
+  const record = { empty, returned: false };
+  groups.set(child.pid, record);
   try {
     const { code } = await child.status;
     await empty();
@@ -430,7 +431,7 @@ async function exec(
     return closed ? { code, out, err } : {
       code: 1,
       out,
-      err: concat([
+      err: Buffer.concat([
         err,
         enc.encode(
           `${self}: ${cmd} の出力の pipe が、${cmd} が終わっても閉じない (${graceMs} ms 待った)。pipe を持つプロセスを ps -eo pid,ppid,pgid,args で探して止める\n`,
@@ -438,7 +439,11 @@ async function exec(
       ]),
     };
   } finally {
-    await empty();
+    try {
+      await empty();
+    } finally {
+      record.returned = true;
+    }
   }
 }
 
@@ -546,13 +551,12 @@ async function gitFiles(): Promise<{ files: string[]; problems: Problems }> {
   const files: string[] = [];
   const rejected = new Set<string>();
   const rename = "名前を変えるか、消す (未追跡なら .gitignore に足してもよい)";
-  /** kind は種類で決まる理由。executable は追跡された実行ファイルか。 */
+  /** reason は種類で決まる理由で、無ければ名前で決める。executable は追跡された実行ファイルか。 */
   const accept = (
     name: Uint8Array,
-    kind: string | undefined,
-    executable: boolean,
+    reason: string | undefined,
+    { executable }: { executable: boolean },
   ) => {
-    let reason = kind;
     if (reason === undefined) {
       try {
         const f = utf8.decode(name);
@@ -592,7 +596,7 @@ async function gitFiles(): Promise<{ files: string[]; problems: Problems }> {
       accept(
         tab < 0 ? entry : entry.subarray(tab + 1),
         "git ls-files -s -t の項目の形でない。git の版を確かめる",
-        false,
+        { executable: false },
       );
       continue;
     }
@@ -610,10 +614,12 @@ async function gitFiles(): Promise<{ files: string[]; problems: Problems }> {
         : stage !== "0"
         ? "解決していない merge の項目。解決して git add する"
         : undefined,
-      mode === "100755",
+      { executable: mode === "100755" },
     );
   }
-  for (const name of splitNul(others.out)) accept(name, undefined, false);
+  for (const name of splitNul(others.out)) {
+    accept(name, undefined, { executable: false });
+  }
   return {
     files,
     problems: rejected.size
@@ -696,7 +702,7 @@ async function shellcheckProbe(): Promise<Problems> {
   return [];
 }
 
-const [listing, others] = await Promise.all([
+const [listing, probes] = await Promise.all([
   gitFiles().catch((e) => ({ files: [], problems: [describe(e)] })),
   Promise.all(
     [deletedFiles, denoVersion, shellcheckProbe].map((check) =>
@@ -709,18 +715,14 @@ const files = listing.files;
 const withExt = (ext: string) => files.filter((f) => f.endsWith(ext));
 const ts = withExt(exts.ts.ext);
 const tests = ts.filter((f) => f.endsWith("_test.ts"));
-const preProblems = [...listing.problems, ...others.flat()];
+const preProblems = [...listing.problems, ...probes.flat()];
 const setWritableTmpdir = "書けるディレクトリを TMPDIR に設定する";
-if (ts.length) {
-  if (!tmpdir) {
-    preProblems.push(
-      `TMPDIR が未設定か空で、段の一時ディレクトリを作る場所が無い。${setWritableTmpdir}`,
-    );
-  } else if (!tmpdir.startsWith("/")) {
-    preProblems.push(
-      `TMPDIR (${tmpdir}) が / で始まらない。絶対パスの、${setWritableTmpdir}`,
-    );
-  }
+if (ts.length && !tmpdir?.startsWith("/")) {
+  preProblems.push(
+    `TMPDIR (${
+      tmpdir ?? "未設定"
+    }) が / で始まらず、段の一時ディレクトリを作る場所が無い。絶対パスの、${setWritableTmpdir}`,
+  );
 }
 if (preProblems.length) await failBeforeSteps(preProblems);
 
@@ -732,7 +734,6 @@ async function withStageTmp(
   await finishing;
   let path: string;
   try {
-    // 終了の経路が作りかけを見落とさないように、同期で作って記録する
     path = Deno.makeTempDirSync({ dir: tmpdir, prefix: "run-checks-" });
   } catch (e) {
     return fail(
@@ -742,19 +743,30 @@ async function withStageTmp(
     );
   }
   let removal: Promise<void> | undefined;
-  const remove = () => removal ??= Deno.remove(path, { recursive: true });
-  stageTmps.set(stage, { path, remove });
-  // 段の結果を先に決め、一時ディレクトリを消せなければそれに足す
-  const r = await run(path).catch((e) => fail(describe(e)));
+  const remove = () =>
+    removal ??= Deno.remove(path, { recursive: true }).then(() => {
+      stageTmps.delete(path);
+    });
+  // 終了の経路が作りかけを見落とさないよう、作ってから記録するまで await を挟まない
+  const record = { stage, remove, returned: false };
+  stageTmps.set(path, record);
   try {
-    await remove();
-    return r;
-  } catch (e) {
-    return {
-      code: 1,
-      out: r.out,
-      err: concat([r.err, enc.encode(`${stageTmpLeft(stage, path, e)}\n`)]),
-    };
+    const r = await run(path).catch((e) => fail(describe(e)));
+    try {
+      await remove();
+      return r;
+    } catch (e) {
+      return {
+        code: 1,
+        out: r.out,
+        err: Buffer.concat([
+          r.err,
+          enc.encode(`${stageTmpLeft(stage, path, e)}\n`),
+        ]),
+      };
+    }
+  } finally {
+    record.returned = true;
   }
 }
 
@@ -774,27 +786,67 @@ const denoFiles = (args: string[], targets: string[], tmp?: string) =>
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
-/** graph の module ごとの、error と dependencies (解決先と解決の error)。 */
-const resolutionOf = (r: Run) => {
-  const modules: {
-    specifier: string;
-    error?: string;
-    dependencies?: unknown[];
-  }[] = JSON.parse(dec.decode(r.out)).modules;
-  return JSON.stringify(
+/** items の各要素に fn を、同時に limit 個までで回す。全部が決着するまで待つ。 */
+async function settleLimited<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  const settled: PromiseSettledResult<R>[] = [];
+  let next = 0;
+  const worker = async () => {
+    for (let i = next++; i < items.length; i = next++) {
+      try {
+        settled[i] = { status: "fulfilled", value: await fn(items[i]) };
+      } catch (reason) {
+        settled[i] = { status: "rejected", reason };
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, worker),
+  );
+  return settled;
+}
+
+/** deno info --json の modules[] の要素 (canon: facts/deno/info-json-dependencies)。 */
+interface InfoModule {
+  specifier: string;
+  error?: string;
+  dependencies?: unknown[];
+}
+/** graph の module ごとの error と dependencies (解決先と解決の error) を、specifier の順に並べた文字列。 */
+const resolutionOf = (modules: InfoModule[]) =>
+  JSON.stringify(
     modules
-      // deno info の modules の並びに頼らない
-      .sort((a, b) =>
+      .toSorted((a, b) =>
         a.specifier < b.specifier ? -1 : a.specifier > b.specifier ? 1 : 0
       )
       .map((m) => [m.specifier, m.error ?? null, m.dependencies ?? []]),
   );
-};
 
+/** 写さなくても deno info の解決が変わらないと測った、deno.json の最上位のキー (canon: facts/deno/info-config-other-location の「写さないキー」)。 */
+const uncopiedKeys = [
+  "bench",
+  "exclude",
+  "fmt",
+  "include",
+  "lint",
+  "lock",
+  "minimumDependencyAge",
+  "nodeModulesDir",
+  "publish",
+  "tasks",
+  "test",
+  "vendor",
+  "version",
+];
 /** 写しの場所で解決が変わるキーと値 (上の「deno.json の imports の各キー」の定義域)。 */
-const relativeKey = (k: string) => /^\.\.?\//.test(k);
+const relativePath = /^\.\.?\//;
+const relativeKey = (k: string) => relativePath.test(k);
 const pathValue = (v: unknown) =>
-  typeof v === "string" && /^(?:\.\.?\/|\/|file:)/.test(v);
+  typeof v === "string" && (relativePath.test(v) || /^(?:\/|file:)/.test(v));
+const infoLimit = 8;
 
 const importsStage = "deno.json の imports";
 /** deno.json の imports の各キーが使われていること (上の「deno.json の imports の各キー」)。 */
@@ -815,7 +867,16 @@ async function importKeys(): Promise<Run> {
       }`,
     );
   }
-  const keys = Object.keys(imports);
+  const unhandled = Object.keys(config).filter((k) =>
+    k !== "imports" && k !== "scopes" && !uncopiedKeys.includes(k)
+  );
+  if (unhandled.length) {
+    return fail(
+      `deno.json: 最上位に、imports の未使用の判定が扱わないキー (${
+        unhandled.join("・")
+      }) がある。そのキーを消すか、run-checks.ts の先頭の「deno.json の imports の各キー」の定義域を広げる`,
+    );
+  }
   const scopes = isObject(config.scopes) ? config.scopes : {};
   const placeBound = [
     ...Object.keys(scopes).filter(relativeKey).map((k) => `scopes の "${k}"`),
@@ -826,88 +887,93 @@ async function importKeys(): Promise<Run> {
   ];
   if (placeBound.length) {
     return fail(
-      `deno.json: imports・scopes に、写しの場所で解決が変わるもの (./・../ で始まるキー、./・../・/・file: で始まる値) があり、未使用を判定できない。ローカルのファイルは相対 import で読み、キーは bare な名前にする:\n${
+      `deno.json: imports・scopes に、未使用を判定できない形 (./・../ で始まるキー、./・../・/・file: で始まる値) がある。ローカルのファイルは相対 import で読み、キーは bare な名前にする:\n${
         placeBound.map((p) => `- ${p}`).join("\n")
       }`,
     );
   }
+  const keys = Object.keys(imports).sort();
   if (ts.length === 0) {
     return keys.length ? unusedOf(keys) : pass(noTargets);
   }
   const info = ["info", "--json", "--no-lock", "--no-npm", "--no-remote"];
   return withStageTmp(importsStage, async (tmp) => {
-    /** imports から without を除いた写しを置き、各 .ts の graph の解決を返す。 */
-    const resolve = async (name: string, without?: string) => {
+    /** imports に kept だけを持つ写しを置き、.ts ごとの graph の解決 (resolutionOf) と、落ちる理由を返す。 */
+    const resolve = async (name: string, kept: string[]) => {
       const copy = `${tmp}/${name}.json`;
       await Deno.writeTextFile(
         copy,
         JSON.stringify({
-          ...config,
-          imports: Object.fromEntries(
-            Object.entries(imports).filter(([k]) => k !== without),
-          ),
+          imports: Object.fromEntries(kept.map((k) => [k, imports[k]])),
+          ...("scopes" in config ? { scopes: config.scopes } : {}),
         }),
       );
-      // 並べた exec は全部待ち、投げたものを全部出す
-      const runs = await Promise.all(
-        ts.map((f) =>
-          denoFiles([...info, "--config", copy], [f]).then(
-            (r) => ({ f, r }),
-            (reason: unknown) => ({ f, reason }),
-          )
-        ),
+      const runs = await settleLimited(
+        ts,
+        infoLimit,
+        (f) => denoFiles([...info, "--config", copy], [f]),
       );
       const problems: string[] = [];
-      const resolutions: string[] = [];
-      for (const run of runs) {
-        const { f } = run;
-        if ("reason" in run) {
+      const resolutions = new Map<string, string>();
+      ts.forEach((f, i) => {
+        const run = runs[i];
+        if (run.status === "rejected") {
           problems.push(`${f}: ${describe(run.reason)}`);
-          continue;
+          return;
         }
-        const { r } = run;
+        const r = run.value;
         if (r.code !== 0) {
           problems.push(`${f}: ${exited("deno info", r)}`);
-          continue;
+          return;
         }
-        if (without === undefined) {
-          for (const m of JSON.parse(dec.decode(r.out)).modules) {
-            if (m.error && m.specifier.startsWith("file:")) {
-              problems.push(`${f}: ${m.specifier}: ${m.error}`);
-            }
+        let modules: InfoModule[];
+        try {
+          ({ modules } = JSON.parse(dec.decode(r.out)));
+        } catch (e) {
+          problems.push(
+            `${f}: deno info の出力を JSON として読めない。deno の版を確かめる — ${
+              messageOf(e)
+            }`,
+          );
+          return;
+        }
+        for (const m of modules) {
+          if (m.error && m.specifier.startsWith("file:")) {
+            problems.push(`${f}: ${m.specifier}: ${m.error}`);
           }
         }
-        resolutions.push(resolutionOf(r));
-      }
+        resolutions.set(f, resolutionOf(modules));
+      });
       return { problems, resolutions };
     };
-    const all = await resolve("all");
-    const each = await Promise.all(
-      keys.map((key, i) => resolve(`without-${i}`, key)),
-    );
-    // 写しごとに同じ失敗が出るので 1 回にする
-    const problems = new Set([all, ...each].flatMap((r) => r.problems));
-    if (problems.size) {
-      return fail(
+    const notJudged = (problems: string[]) =>
+      fail(
         [
           ...problems,
           "deno.json: imports の未使用の判定をしていない。上を直してから回す",
         ].join("\n"),
       );
+    const base = await resolve("all", keys);
+    if (base.problems.length) return notJudged(base.problems);
+    let kept = keys;
+    for (const [i, key] of keys.entries()) {
+      const without = kept.filter((k) => k !== key);
+      const trial = await resolve(`without-${i}`, without);
+      if (trial.problems.length) return notJudged(trial.problems);
+      if (
+        ts.every((f) => trial.resolutions.get(f) === base.resolutions.get(f))
+      ) kept = without;
     }
-    const unused = keys.filter((_, i) =>
-      each[i].resolutions.every((r, j) => r === all.resolutions[j])
-    );
+    const unused = keys.filter((k) => !kept.includes(k));
     return unused.length
       ? unusedOf(unused)
       : pass(`ok: imports ${keys.length} 件、.ts ${ts.length} 件`);
   });
 }
-/** 未使用のキーの報告。 */
 const unusedOf = (keys: string[]) =>
   fail(
     keys.map((key) =>
-      `deno.json: imports の "${key}" を除いても、どの .ts の import の解決も変わらない。使うか deno.json から消す`
+      `deno.json: imports の "${key}" は使われていない (報告したキーを全部除いても、どの .ts の import の解決も変わらない)。使うか deno.json から消す`
     ).join("\n"),
   );
 
