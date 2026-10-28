@@ -1077,9 +1077,9 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
         clearEnv: true,
       }).output();
       const section = sectionOf(r.stderr, importsStage);
-      // — の後の JSON.parse の失敗の文言は ECMA-262 が定めず、入力の改行を含みうるので、空でないことだけを見る (canon: facts/deno/json-parse-error-message)
       expect(
         "deno info の出力が JSON として読めなければ、理由と stdout と stderr を出して落ち、並べた兄弟の deno info は run-checks.ts の終了の後に残らない",
+        // 理由の行の「 — 」の後ろは JSON.parse の失敗の文言で、ECMA-262 が定めず、入力の改行を含みうるので、空でないことだけを見る (canon: facts/deno/json-parse-error-message)
         /\nbad\.ts: deno info の出力を JSON として読めない。下の出力を見て原因を直す — \S[\s\S]*?\n-- deno info の stdout:\nnotjson\n-- deno info の stderr:\nwarn\ndeno\.json: imports の未使用の判定をしていない。上を直してから回す\n/
           .test(section) && !alive.success,
         r.stderr,

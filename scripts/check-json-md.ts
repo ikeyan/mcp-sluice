@@ -5,7 +5,7 @@
  * - <path> は git が知るファイルの全部。それぞれリポのルートからの相対パス。
  *   - `.json` で終わるもの: 構文を検査する。BOM で始まるものは JSON として読めない違反になる (deno も BOM 付きの deno.json を読めない。canon: facts/deno/config-file-bom-rejected)。
  *   - `.md` で終わるもの: リンクと anchor を検査する。
- *   - 全部: リンク先が在るかの判定に使う。`.md` でないファイルは、行の anchor の先になったときに行数を数えるのに読む (下の「リンク」)。
+ *   - 全部: リンク先が在るかの判定に使う。
  *   - 拡張子の判定は大文字小文字を区別する。
  * - `.json`・`.md` は UTF-8 として読む。BOM は落とさない (canon: facts/git/path-output-quoting の TextDecoder)。
  * - 次のときは何も検査せず exit 2:
@@ -61,13 +61,15 @@
  * - anchor (空なら見ない。%-decode できなければ「不正な %-エンコード」違反):
  *   - 辿った先が `.md` の引数: その見出しの id のどれかと一致すること。id は github-slugger の規則で作る (canon: facts/github/heading-anchor-ids)。
  *   - 辿った先が `.md` でないファイル: 行の anchor `L<行番号>` の形だけを受ける。他の形 (範囲の `L10-L20` を含む) は検査できないので違反 (canon: facts/github/blob-line-anchors)。
- *     - 行番号が 1 から行数までに無ければ、その行が無いので違反。
- *     - 行数は、ファイルのバイトの LF の数。最後のバイトが LF でなければ 1 を足す。空のファイルは 0 行。
- *       - GitHub の行番号の振り方 (末尾の LF の後、空のファイル) は測っていない (同じ canon の「docs に無いもの」)。同じ canon の「確かめ方」で違うと分かれば、数え方を合わせる。
+ *     - 行番号は 10 進の数として読む。`L01` は `L1` と同じ。
+ *     - 行番号が 1 から行数 (下の「行数」) までに無ければ、存在しない行へのリンクとして違反。GitHub の blob の描画も、行数を超える番号と `L0` に行を持たない (同じ canon の「実測」)。
  *     - 行数を数えるファイルを読めなければ、リンクを置いた .md の違反。
  *   - 辿った先がディレクトリ: どの形も検査できないので違反 (同じ canon の「docs に無いもの」)。直し方は anchor を外すこと。
+ * - 行数は、ファイルのバイトの LF の数。最後のバイトが LF でなければ 1 を足す。CR は区切りに数えない (CR だけで区切るファイルは 1 行)。空のファイルは 0 行。
+ *   - 根拠: GitHub の blob の描画の行の数と、最後のバイトが LF のファイルと LF でないファイルで一致した (canon: facts/github/blob-line-anchors の「実測」)。
+ *   - 次は GitHub で測っていない (同じ canon の「測っていないもの」): 空のファイル、CRLF、CR だけの区切り、先頭に 0 のある行番号 (`L01`)、行の強調表示。同じ canon の「確かめ方」で違うと分かれば、数え方と読み方を合わせる。
  * - 検査できない形の違反 (範囲とディレクトリ) は、canon の facts/github/blob-line-anchors の「確かめ方」で GitHub の描画を確かめたときに外せる。外し方は、効く形を受ける形に足すこと。
- * - ファイルを読めない (無い、を含む) か UTF-8 として不正なら、そのファイル自身の違反にする。そういう .md への anchor は見ない。
+ * - `.json`・`.md` を読めない (無い、を含む) か UTF-8 として不正なら、そのファイル自身の違反にする。そういう .md への anchor は見ない。`.md` でないファイルは、行の anchor の先のときだけ読む。
  * - 違反の行は `<file>: <何が>。<どう直すか> — <リンクか原因の文言>`。
  */
 import GithubSlugger from "github-slugger";
@@ -104,6 +106,7 @@ if (badArgs.length > 0) {
 }
 const jsonFiles = Deno.args.filter((f) => f.endsWith(".json"));
 const markdownFiles = Deno.args.filter((f) => f.endsWith(".md"));
+const nonMarkdownFiles = Deno.args.filter((f) => !markdownFiles.includes(f));
 
 /** segment の列の鍵は JSON にする (segment は decode した `/` や NUL を含みうるので)。 */
 const key = (segments: string[]) => JSON.stringify(segments);
@@ -115,18 +118,27 @@ const report = (file: string, message: string) =>
   violations.add(`${file}: ${message}`);
 const messageOf = (e: unknown) => e instanceof Error ? e.message : String(e);
 
+/** file のバイト。読めなければ原因の文言。 */
+const readBytes = async (
+  file: string,
+): Promise<{ bytes: Uint8Array } | { unreadable: string }> => {
+  try {
+    return { bytes: await Deno.readFile(file) };
+  } catch (e) {
+    return { unreadable: messageOf(e) };
+  }
+};
+
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 /** 読めて UTF-8 なら文字列。読めなければ違反を記録して undefined を返す。 */
 const readOrReport = async (file: string): Promise<string | undefined> => {
-  let bytes: Uint8Array;
-  try {
-    bytes = await Deno.readFile(file);
-  } catch (e) {
-    report(file, `読めない。読める通常ファイルにする — ${messageOf(e)}`);
+  const read = await readBytes(file);
+  if ("unreadable" in read) {
+    report(file, `読めない。読める通常ファイルにする — ${read.unreadable}`);
     return;
   }
   try {
-    return utf8.decode(bytes);
+    return utf8.decode(read.bytes);
   } catch (e) {
     if (!(e instanceof TypeError)) throw e;
     report(file, `UTF-8 として不正。UTF-8 で保存し直す — ${messageOf(e)}`);
@@ -307,7 +319,7 @@ type Parsed = { tokens: Token[]; anchors: Set<string> };
 /** 辿った先の種類 (上の「リンク」)。.md は Parsed (読めなければ undefined) を持つ。 */
 type Destination =
   | { kind: "dir" }
-  | { kind: "file"; path: string }
+  | { kind: "file" }
   | { kind: "md"; parsed?: Parsed };
 /** リンク先として在るもの (引数のファイルと、その親ディレクトリ (ルートを含む)) の鍵 → 種類。 */
 const destinations = new Map<string, Destination>();
@@ -317,8 +329,8 @@ for (const f of Deno.args) {
     destinations.set(key(segments.slice(0, i)), { kind: "dir" });
   }
 }
-for (const f of Deno.args.filter((f) => !f.endsWith(".md"))) {
-  destinations.set(pathKey(f), { kind: "file", path: f });
+for (const f of nonMarkdownFiles) {
+  destinations.set(pathKey(f), { kind: "file" });
 }
 const markdownParsed: [string, Parsed | undefined][] = [];
 for (const file of markdownFiles) {
@@ -329,18 +341,15 @@ for (const file of markdownFiles) {
   markdownParsed.push([file, parsed]);
 }
 
-/** path のファイルの行数 (上の「行数」)。読めなければ原因の文言。 */
-const linesOf = async (
-  path: string,
-): Promise<{ lines: number } | { unreadable: string }> => {
-  let bytes: Uint8Array;
-  try {
-    bytes = await Deno.readFile(path);
-  } catch (e) {
-    return { unreadable: messageOf(e) };
-  }
+/** file の行数 (上の「行数」)。読めなければ原因の文言。 */
+const countLines = async (
+  file: string,
+): Promise<{ count: number } | { unreadable: string }> => {
+  const read = await readBytes(file);
+  if ("unreadable" in read) return read;
+  const { bytes } = read;
   const lfs = bytes.filter((b) => b === 0x0a).length;
-  return { lines: bytes.length > 0 && bytes.at(-1) !== 0x0a ? lfs + 1 : lfs };
+  return { count: bytes.length > 0 && bytes.at(-1) !== 0x0a ? lfs + 1 : lfs };
 };
 
 for (const [file, parsed] of markdownParsed) {
@@ -398,13 +407,13 @@ for (const [file, parsed] of markdownParsed) {
           );
           break;
         }
-        const count = await linesOf(destination.path);
-        if ("unreadable" in count) {
+        const counted = await countLines(resolved.segments.join("/"));
+        if ("unreadable" in counted) {
           report(
             file,
-            `行の anchor の先を読めない。読める通常ファイルにするか、anchor を外す — ${url}: ${count.unreadable}`,
+            `行の anchor の先を読めない。読める通常ファイルにするか、anchor を外す — ${url}: ${counted.unreadable}`,
           );
-        } else if (Number(line[1]) < 1 || Number(line[1]) > count.lines) {
+        } else if (Number(line[1]) < 1 || Number(line[1]) > counted.count) {
           report(
             file,
             `行の anchor の行がファイルに無い。1 から行数までの番号にするか、anchor を外す — ${url}`,

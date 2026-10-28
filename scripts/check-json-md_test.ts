@@ -1,7 +1,7 @@
 /**
  * check-json-md.ts を子として、TMPDIR の下の一時ディレクトリの fixture に回す。
  * - 表の各行: fixture のファイルと引数に対し、終了コードと stderr の違反の行 (順を問わない集合) が一致すること。
- * - 性質: 生成した相対パスへのリンクについて、報告が、最初の # と、その前の最初の ? で割り、パスを segment ごとに decode して辿り、anchor を decode するモデルと一致すること。
+ * - 性質: 生成した相対パスへのリンクと、生成した a/c.json の中身について、報告が、最初の # と、その前の最初の ? で割り、パスを segment ごとに decode して辿り、anchor を decode するモデルと一致すること。
  * - 属性の値の前処理: 前・中・後と U+0000〜U+0020 の全部の組 (そのままの文字と文字参照) で、報告が URL の前処理のモデルと一致すること。
  */
 import fc from "fast-check";
@@ -559,12 +559,13 @@ const cases: {
   },
   {
     name:
-      "行の anchor の行数: 末尾の LF の有無と CRLF で行数ちょうどは通り、1 つ超えるか 0 は違反。空のファイルは 0 行",
+      "行の anchor の行数: 末尾の LF の有無と CRLF で行数ちょうどは通り、1 つ超えるか 0 は違反。CR だけの区切りは 1 行、空のファイルは 0 行",
     files: {
       "lf.txt": "a\nb\n",
       "crlf.txt": "a\r\nb\r\n",
       "nolf.txt": "a\nb",
       "onlylf.txt": "\n",
+      "cr.txt": "a\rb\r",
       "empty.txt": "",
       "a.md": [
         "lf.txt#L2",
@@ -576,6 +577,8 @@ const cases: {
         "nolf.txt#L3",
         "onlylf.txt#L1",
         "onlylf.txt#L2",
+        "cr.txt#L1",
+        "cr.txt#L2",
         "empty.txt#L1",
       ].map((l) => `[l](${l})\n`).join(""),
     },
@@ -586,6 +589,7 @@ const cases: {
       `a.md: ${labels.noLine} — crlf.txt#L3`,
       `a.md: ${labels.noLine} — nolf.txt#L3`,
       `a.md: ${labels.noLine} — onlylf.txt#L2`,
+      `a.md: ${labels.noLine} — cr.txt#L2`,
       `a.md: ${labels.noLine} — empty.txt#L1`,
     ],
   },
@@ -751,8 +755,28 @@ Deno.test("check-json-md.ts の表", async () => {
 /** リンクを置くファイル (a/b/x.md) の他に、git の一覧に載せるファイル。 */
 const known = ["a/b/x.md", "a/n.md", "a b/n.md", "a/c.json"];
 
-/** a/b/x.md の url のリンクの報告のモデル。known の .md はどれも見出しを持たない。報告が無ければ undefined。 */
-const model = (url: string): keyof typeof labels | undefined => {
+/**
+ * a/c.json の中身の形 (canon: facts/github/blob-line-anchors の「行の anchor の入力の次元」。空のファイルは JSON でないので上の表で見る)。
+ * - rows: 区切りで割った行の数。
+ * - terminated: 最後の行の後にも区切りを置くか。
+ * - eol: 区切り。CR だけは行を割らない。
+ */
+const jsonShape = fc.record({
+  rows: fc.integer({ min: 1, max: 3 }),
+  terminated: fc.boolean(),
+  eol: fc.constantFrom("\n", "\r\n", "\r"),
+});
+type JsonShape = { rows: number; terminated: boolean; eol: string };
+/** 行を eol で区切った JSON の配列。1 行なら `[]`、他は最初の行が `[`、最後の行が `]`、間の行は空。 */
+const jsonText = ({ rows, terminated, eol }: JsonShape) =>
+  (rows === 1 ? ["[]"] : ["[", ...Array(rows - 2).fill(""), "]"]).join(eol) +
+  (terminated ? eol : "");
+
+/** a/b/x.md の url のリンクの報告のモデル。known の .md はどれも見出しを持たない。a/c.json は shape の中身。報告が無ければ undefined。 */
+const model = (
+  url: string,
+  shape: JsonShape,
+): keyof typeof labels | undefined => {
   if (url.startsWith("//")) return undefined;
   const hash = url.indexOf("#");
   const raw = hash < 0 ? "" : url.slice(hash + 1);
@@ -796,8 +820,10 @@ const model = (url: string): keyof typeof labels | undefined => {
   if (!file.endsWith(".md")) {
     const line = /^L(\d+)$/.exec(anchor);
     if (line === null) return "notMd";
-    // known の .md でないファイルは a/c.json だけで、中身は 1 行
-    return Number(line[1]) === 1 ? undefined : "noLine";
+    const count = shape.eol === "\r" ? 1 : shape.rows;
+    return Number(line[1]) >= 1 && Number(line[1]) <= count
+      ? undefined
+      : "noLine";
   }
   return "anchor";
 };
@@ -822,9 +848,12 @@ Deno.test("リンクの報告は、# と ? で割り、segment ごとに decode 
       "%25",
       "a%20b",
       "c.json",
-      "c.json#L1",
       "c.json#L0",
+      "c.json#L1",
+      "c.json#L01",
       "c.json#L2",
+      "c.json#L3",
+      "c.json#L4",
       "c.json#x",
       "#",
       "#L1",
@@ -837,20 +866,26 @@ Deno.test("リンクの報告は、# と ? で割り、segment ごとに decode 
     ),
     { minLength: 1, maxLength: 6 },
   ).map((s) => s.join("/"));
+  // 生成したパスが a/c.json に届くのは稀なので、行番号の境目は毎回見る
+  const lineLinks = ["L0", "L1", "L01", "L2", "L3", "L4"].map((l) =>
+    `../c.json#${l}`
+  );
   await fc.assert(
     fc.asyncProperty(
       fc.uniqueArray(path, { minLength: 1, maxLength: 20 }),
-      async (paths) => {
+      jsonShape,
+      async (paths, shape) => {
+        const links = [...new Set([...lineLinks, ...paths])];
         const r = await check({
           "a/n.md": "",
           "a b/n.md": "",
-          "a/c.json": "{}",
-          "a/b/x.md": paths.map((p) => `- [l](<${p}>)\n`).join(""),
+          "a/c.json": jsonText(shape),
+          "a/b/x.md": links.map((p) => `- [l](<${p}>)\n`).join(""),
         });
         deepStrictEqual(
           lines(r.stderr),
-          paths.flatMap((p) => {
-            const m = model(p);
+          links.flatMap((p) => {
+            const m = model(p, shape);
             return m === undefined ? [] : [`a/b/x.md: ${labels[m]} — ${p}`];
           }).sort(),
         );
