@@ -18,10 +18,8 @@ jobs:
         with:
           # scripts/run-checks.ts の denoMinor・denoPatches が受ける版にする (上げ方は同じファイルの先頭の「版」)
           deno-version: "2.9.8"
-      # runner image 同梱の shellcheck は版が違い、指摘の出方が違う (canon: facts/shellcheck/sc2015-version-difference)。
-      # 外せる条件: ubuntu-24.04 の同梱の shellcheck が scripts/run-checks.ts の shellcheckVersion と同じ版になったとき。
-      # - 同梱の版を見る場所: https://raw.githubusercontent.com/actions/runner-images/main/images/ubuntu/Ubuntu2404-Readme.md の表の shellcheck の行 (canon: facts/github-actions/ubuntu-2404-runner-bundled-tools)。
-      # - 外すときの手順: この step と SHELLCHECK_VERSION を消し、CI の verify が通ることを確かめる。
+      # runner image の shellcheck で揃えない理由: canon: facts/shellcheck/sc2015-version-difference
+      # 外せる条件: ubuntu-24.04 の同梱の shellcheck が scripts/run-checks.ts の shellcheckVersion と同じ版になったとき (canon: facts/github-actions/ubuntu-2404-runner-bundled-tools)。
       - env:
           # scripts/run-checks.ts の shellcheckVersion と同じ値にする
           SHELLCHECK_VERSION: "0.11.0"
