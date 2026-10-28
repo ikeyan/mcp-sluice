@@ -18,28 +18,35 @@
  * - 根拠:
  *   - 見出しの id: canon の実測 (facts/github/heading-anchor-ids)。
  *   - リンクのパスの解決 (segment の decode・`..`・起点): 未確認の前提で、GitHub では測っていない。
- * - 対象: 文書を markdown-it で parse し、GFM の tagfilter を当ててから HTML に描画し、parse5 の parse で文書の木にした、全部の要素の属性 (canon: facts/github/gfm-tagfilter、facts/markdown-it/render-html、facts/parse5/parse-tree-attributes)。
- *   - tagfilter: 生の HTML (html_block の中の全部の `<`、html_inline の先頭の `<`) のうち、title・textarea・style・xmp・iframe・noembed・noframes・script・plaintext の開き・閉じのタグの `<` を `&lt;` にする。名前は大文字小文字を問わず、名前の後は tab・LF・CR・空白・`>`・`/>` のどれか。
- *     - 当たったタグは文字になり、中と後ろは木構築で読む。閉じない形も同じ。
- *     - 当たらない形 (名前の後が FF など) で始まるものは、下の「木に属性が残らないもの」に入る。
- *   - 生の HTML は tagfilter の後のまま描画される。Markdown のリンク・画像 (参照スタイルを含む) は a の href・img の src になり、値は markdown-it が正規化した href・src と同じ。
- *   - 木に属性が残らないものは見ない。木構築のとおりで、次を含む:
- *     - 中身を要素にしない要素のうち、tagfilter が文字にしないものの中: noscript (parse5 の scripting の既定で中身が文字になる。閉じなければ文書の終わりまで) と、tagfilter に当たらない形のタグで始まる上の 9 要素。GitHub が noscript を同じに扱うかは未確認。
- *     - コメント (閉じないものは文書の終わりまで) の中。
- *     - 木構築が捨てる開きタグ (body の中の head・frame、select の中の a など)。
- *   - template の中身も見る。
- *   - 木構築は閉じない a などを後の要素に複製するので、同じ違反が重なる (上の「同じ違反の行は 1 回だけ」。canon: facts/parse5/parse-tree-attributes)。
- *   - 属性の名前は小文字。外来の要素の xlink:href などは prefix つきの名前で見る。値は引用符を外して文字参照を戻したもの。U+0000 と `&#0;` は U+FFFD になり、値の一部として残る (canon: facts/markdown-it/render-html、facts/parse5/parse-tree-attributes)。
- *   - 値は、WHATWG URL の parser の前処理に合わせ、前後の C0 制御文字と空白を落とし、中の tab と改行を消してから扱う (canon: facts/url/parser-strips-c0-space-and-tab-newline)。
- *   - 属性の類 (attributeClasses。canon: facts/html/url-valued-attributes の一覧と「値の形」) と値の類ごとの扱い:
+ * - 属性の読み方:
+ *   1. 文書を markdown-it で parse する。
+ *   2. 生の HTML の token に、GFM の tagfilter (下の「tagfilter」) を当てる。
+ *   3. HTML に描画する。生の HTML は tagfilter の後のまま出る。Markdown のリンク・画像 (参照スタイルを含む) は a の href・img の src になり、値は markdown-it が正規化した href・src と同じ (canon: facts/markdown-it/render-html)。
+ *   4. parse5 の parse で文書の木にし、全部の要素 (template の中身を含む) の属性を見る (canon: facts/parse5/parse-tree-attributes)。
+ * - tagfilter: GFM の仕様と cmark-gfm の規則に依り、GitHub の描画では測っていない (canon: facts/github/gfm-tagfilter)。
+ *   - 場所: 生の HTML のうち、html_block の中の全部の `<` と、html_inline の先頭の `<`。
+ *   - タグ: title・textarea・style・xmp・iframe・noembed・noframes・script・plaintext の開き・閉じのタグ。名前は大文字小文字を問わない。
+ *   - 名前の後: tab・LF・CR・空白・`>`・`/>` のどれか。
+ *   - 当たれば `<` を `&lt;` にする。当たったタグは文字になり、中と後ろは木構築で読む。閉じない形も同じ (canon: facts/github/gfm-tagfilter)。
+ *   - 外せる条件: GitHub の描画が規則と違うと分かったとき。確かめ方は同じ canon の「確かめ方」(使い捨てのブランチに置いて描画する)。違えば規則を合わせる。
+ * - 木に属性が残らないものは見ない。木構築のとおりで、次を含む (canon: facts/parse5/parse-tree-attributes):
+ *   - noscript の中。parse5 の scripting の既定で中身が文字になる。
+ *     - GitHub が noscript を同じに扱うかは未確認 (canon: facts/github/gfm-tagfilter の「一覧に無いもの」)。確かめ方は同じ canon の「確かめ方」。GitHub が中の a を要素にすると分かれば、noscript の中も見る。
+ *   - tagfilter に当たらない形のタグ (名前の後が FF など) で始まる、上の 9 要素の中 (canon: facts/github/gfm-tagfilter)。
+ *   - コメント (閉じないものは文書の終わりまで) の中。
+ *   - 木構築が捨てる開きタグ (body の中の head・frame、select の中の a など)。
+ * - 木構築は閉じない a などを後の要素に複製するので、同じ違反が重なる (上の「同じ違反の行は 1 回だけ」。canon: facts/parse5/parse-tree-attributes)。
+ * - 属性の名前は小文字。外来の要素の xlink:href などは prefix つきの名前で見る。値は引用符を外して文字参照を戻したもの。U+0000 と `&#0;` は U+FFFD になり、値の一部として残る (canon: facts/markdown-it/render-html、facts/parse5/parse-tree-attributes)。
+ * - 値は、WHATWG URL の parser の前処理に合わせ、前後の C0 制御文字と空白を落とし、中の tab と改行を消してから扱う (canon: facts/url/parser-strips-c0-space-and-tab-newline)。
+ * - 属性の類 (attributeClasses。canon: facts/html/url-valued-attributes の一覧と「値の形」) と値の類ごとの扱い:
  *
- *     | 属性の類 | 外部のスキーム (`http:`・`mailto:` など) | `//` で始まる | 空 | fragment だけ (`#x`) | リポ内に在る | リポ内に無い |
- *     | --- | --- | --- | --- | --- | --- | --- |
- *     | 単一の URL (`url`。`href`・`src` など) | 見ない | 見ない | ファイル自身 (違反でない) | ファイル自身の anchor | 通る (anchor は下の規則) | 違反 |
- *     | URL の列 (`urlList`。`srcset` など) と、値の形を canon で確かめていないもの (`unconfirmed`。`archive` など) | 違反 (検査できない) | 違反 | 見ない | 違反 | 違反 | 違反 |
- *     | 見ない (`ignored`。`usemap`。値は `<map name>` を指す `#名前` で、リポのファイルを指せない) と、attributeClasses に無いもの | 見ない | 見ない | 見ない | 見ない | 見ない | 見ない |
+ *   | 属性の類 | 外部のスキーム (`http:`・`mailto:` など) | `//` で始まる | 空 | fragment だけ (`#x`) | リポ内に在る | リポ内に無い |
+ *   | --- | --- | --- | --- | --- | --- | --- |
+ *   | 単一の URL (`url`。`href`・`src` など) | 見ない | 見ない | ファイル自身 (違反でない) | ファイル自身の anchor | 通る (anchor は下の規則) | 違反 |
+ *   | URL の列 (`urlList`。`srcset` など) と、値の形を canon で確かめていないもの (`unconfirmed`。`archive` など) | 違反 (検査できない) | 違反 | 見ない | 違反 | 違反 | 違反 |
+ *   | 見ない (`ignored`。`usemap`。値は `<map name>` を指す `#名前` で、リポのファイルを指せない) と、attributeClasses に無いもの | 見ない | 見ない | 見ない | 見ない | 見ない | 見ない |
  *
- *   - `unconfirmed` の類を外せる条件: canon の facts/html/url-valued-attributes の「確かめていないもの」の値の形が確かめられたとき。各属性を `url` か `urlList` へ移し、この類を消す。
+ * - `unconfirmed` の類を外せる条件: canon の facts/html/url-valued-attributes の「確かめていないもの」の値の形が確かめられたとき。各属性を `url` か `urlList` へ移し、この類を消す。
  *
  * - 下の規則は、単一の URL の属性 (Markdown のリンク・画像を含む) の値に当てる。スキームか `//` で始まるものは外部として見ない。
  * - 最初の `#` の後が anchor。その前の最初の `?` の後は query で、見ない。
@@ -51,7 +58,9 @@
  * - 辿った先が、引数のどれかと segment ごとに綴り (大文字小文字を含む) まで一致するか、どれかの親ディレクトリ (ルートを含む) でなければ「リンク先が無い」違反。
  * - anchor (空なら見ない。%-decode できなければ「不正な %-エンコード」違反):
  *   - 辿った先が `.md` の引数: その見出しの id のどれかと一致すること。id は github-slugger の規則で作る (canon: facts/github/heading-anchor-ids)。
- *   - 他 (ディレクトリを含む): GitHub の行の anchor (`L10`・`L10-L20`) だけを受ける。他は検査できないので違反。
+ *   - 辿った先が `.md` でないファイル: 行の anchor `L<行番号>` だけを受ける (canon: facts/github/blob-line-anchors)。他の形 (範囲の `L10-L20` を含む) は、GitHub の docs に綴りが無く検査できないので違反。
+ *   - 辿った先がディレクトリ: GitHub の docs に行の anchor の扱いが無く検査できないので、どの形も違反。
+ *   - 範囲とディレクトリを外せる条件: canon の facts/github/blob-line-anchors の「確かめ方」で GitHub の描画を確かめたとき。効く形を受ける形に足す。
  * - ファイルを読めない (無い、を含む) か UTF-8 として不正なら、そのファイル自身の違反にする。そういう .md への anchor は見ない。
  * - 違反の行は `<file>: <何が>。<どう直すか> — <リンクか原因の文言>`。
  */
@@ -61,24 +70,29 @@ import { type DefaultTreeAdapterTypes, parse as parseHtml } from "parse5";
 
 const self = "check-json-md.ts";
 const checkedExts = [".json", ".md"];
-const badArgs = Deno.args.filter((f) =>
-  f.split("/").some((s) => s === "" || s === "." || s === "..") ||
-  checkedExts.some((e) => !f.endsWith(e) && f.toLowerCase().endsWith(e))
-);
 const passPaths =
   "git が知るファイルの、リポのルートからの相対パスを渡す (./verify.sh から起動する)";
 if (Deno.args.length === 0) {
   console.error(`${self}: 引数が無い。${passPaths}`);
   Deno.exit(2);
 }
+const badArgs = Deno.args.flatMap((f) =>
+  f.split("/").some((s) => s === "" || s === "." || s === "..")
+    ? [
+      `${self}: 引数 ${
+        JSON.stringify(f)
+      } が、正規の相対パスでない (先頭の /、空・.・.. の segment のどれかを持つ)。${passPaths}`,
+    ]
+    : checkedExts.some((e) => !f.endsWith(e) && f.toLowerCase().endsWith(e))
+    ? [
+      `${self}: 引数 ${JSON.stringify(f)} の拡張子が ${
+        checkedExts.join("・")
+      } と大文字小文字だけ違う。ファイルの拡張子を小文字にする`,
+    ]
+    : []
+);
 if (badArgs.length > 0) {
-  console.error(
-    `${self}: 引数 ${
-      badArgs.map((f) => JSON.stringify(f)).join(" ")
-    } が、正規の相対パスでないか、拡張子が ${
-      checkedExts.join("・")
-    } と大文字小文字だけ違う。${passPaths}`,
-  );
+  console.error(badArgs.join("\n"));
   Deno.exit(2);
 }
 const jsonFiles = Deno.args.filter((f) => f.endsWith(".json"));
@@ -86,6 +100,8 @@ const markdownFiles = Deno.args.filter((f) => f.endsWith(".md"));
 
 /** segment の列の鍵は JSON にする (segment は decode した `/` や NUL を含みうるので)。 */
 const key = (segments: string[]) => JSON.stringify(segments);
+/** 引数のファイルの鍵。 */
+const fileKeys = new Set(Deno.args.map((f) => key(f.split("/"))));
 /** リンク先として在るもの: 引数のファイルと、その親ディレクトリ (ルートを含む) の鍵。 */
 const linkTargets = new Set(
   Deno.args.flatMap((f) => {
@@ -131,13 +147,40 @@ for (const file of jsonFiles) {
 const md = new MarkdownIt({ html: true });
 type Token = ReturnType<typeof md.parse>[number];
 
-/** 先頭の --- のブロックは、YAML として読めなくても GitHub が本文から外す (canon: facts/github/heading-anchor-ids)。空のブロックと CRLF の行末も同じ扱いとする (GitHub で確かめていない。同じ canon の「測っていない次元」)。 */
-const parse = (markdown: string): Token[] =>
-  md.parse(
+/** GFM の tagfilter が `<` を `&lt;` にするタグ。名前の後に続く文字は cmark-gfm の is_tag のとおり (canon: facts/github/gfm-tagfilter)。 */
+const filteredTag = String
+  .raw`\/?(?:title|textarea|style|xmp|iframe|noembed|noframes|script|plaintext)(?:[\t\n\r >]|\/>)`;
+const filteredInBlock = new RegExp(`<(?=${filteredTag})`, "gi");
+const filteredAtStart = new RegExp(`^<(?=${filteredTag})`, "i");
+/**
+ * 生の HTML の token に tagfilter (上の「tagfilter」) を当てる (tokens を書き換える)。
+ * - GFM の仕様と cmark-gfm の規則に依り、GitHub の描画では測っていない (canon: facts/github/gfm-tagfilter)。
+ */
+const tagfilter = (tokens: Token[]) => {
+  for (const token of tokens) {
+    if (token.type === "html_block") {
+      token.content = token.content.replace(filteredInBlock, "&lt;");
+    } else if (token.type === "html_inline") {
+      token.content = token.content.replace(filteredAtStart, "&lt;");
+    }
+    if (token.children) tagfilter(token.children);
+  }
+};
+
+/**
+ * 文書を parse し、tagfilter を当てたトークン。
+ * - 先頭の --- のブロックは、YAML として読めなくても GitHub が本文から外す (canon: facts/github/heading-anchor-ids)。
+ * - 空のブロックと CRLF の行末も同じ扱いとする。GitHub で確かめていない (同じ canon の「測っていない次元」)。確かめ方は同じ canon の、使い捨てのブランチに置いて描画する手順。違えば規則を合わせる。
+ */
+const parse = (markdown: string): Token[] => {
+  const tokens = md.parse(
     // 残すと --- が見出しの下線になる
     markdown.replace(/^---\r?\n(?:[\s\S]*?\r?\n)?---(?:\r?\n|$)/, ""),
     {},
   );
+  tagfilter(tokens);
+  return tokens;
+};
 
 /** 見出しの anchor。 */
 const anchorsOf = (tokens: Token[]): Set<string> => {
@@ -182,23 +225,6 @@ const attributeClasses = new Map<string, AttributeClass>([
   ["usemap", "ignored"],
 ]);
 
-/** GFM の tagfilter が `<` を `&lt;` にするタグ (canon: facts/github/gfm-tagfilter)。名前の後に続く文字は cmark-gfm の is_tag のとおり。 */
-const filteredTag = String
-  .raw`\/?(?:title|textarea|style|xmp|iframe|noembed|noframes|script|plaintext)(?:[\t\n\r >]|\/>)`;
-const filteredInBlock = new RegExp(`<(?=${filteredTag})`, "gi");
-const filteredAtStart = new RegExp(`^<(?=${filteredTag})`, "i");
-/** GitHub の描画のとおり、生の HTML の token に tagfilter を当てる (tokens を書き換える)。 */
-const tagfilter = (tokens: Token[]) => {
-  for (const token of tokens) {
-    if (token.type === "html_block") {
-      token.content = token.content.replace(filteredInBlock, "&lt;");
-    } else if (token.type === "html_inline") {
-      token.content = token.content.replace(filteredAtStart, "&lt;");
-    }
-    if (token.children) tagfilter(token.children);
-  }
-};
-
 /** 描画した HTML の木の、全部の要素 (template の中身を含む) の属性。名前は prefix つき。 */
 const attributesOf = (html: string) => {
   const attrs: { name: string; value: string }[] = [];
@@ -229,9 +255,8 @@ type Target = { url: string } | {
 };
 
 /** 文書の、単一の URL の属性の値と、URL の列か値の形を確かめていない属性の空でない値と名前。値は urlPreprocess の後のもの。 */
-const targetsOf = (tokens: Token[]): Target[] => {
-  tagfilter(tokens);
-  return attributesOf(md.renderer.render(tokens, md.options, {})).flatMap(
+const targetsOf = (tokens: Token[]): Target[] =>
+  attributesOf(md.renderer.render(tokens, md.options, {})).flatMap(
     ({ name, value: raw }): Target[] => {
       const value = urlPreprocess(raw);
       switch (attributeClasses.get(name)) {
@@ -245,7 +270,6 @@ const targetsOf = (tokens: Token[]): Target[] => {
       }
     },
   );
-};
 
 type Resolved = { segments: string[] } | { problem: string };
 const malformed =
@@ -333,10 +357,11 @@ for (const { file, parsed } of markdown.values()) {
     }
     const linked = markdown.get(at);
     if (linked === undefined) {
-      if (!/^L\d+(?:-L\d+)?$/.test(anchor)) {
+      // 行の anchor の形は canon: facts/github/blob-line-anchors
+      if (!fileKeys.has(at) || !/^L\d+$/.test(anchor)) {
         report(
           file,
-          `.md でないもの (ディレクトリを含む) の anchor は検査できない。行の anchor (L10・L10-L20) にするか、anchor を外す — ${url}`,
+          `.md でないファイルの行の anchor (L10 の形) の他は、検査できない。L<行番号> にするか、anchor を外す — ${url}`,
         );
       }
       continue;

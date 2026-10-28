@@ -74,13 +74,20 @@ const labels = {
   missing: "リンク先が無い。git が知るファイルかディレクトリを指す",
   anchor: "anchor が見出しに無い。リンク先の見出しの id に合わせる",
   notMd:
-    ".md でないもの (ディレクトリを含む) の anchor は検査できない。行の anchor (L10・L10-L20) にするか、anchor を外す",
+    ".md でないファイルの行の anchor (L10 の形) の他は、検査できない。L<行番号> にするか、anchor を外す",
 };
+/** file の、link のリンク先が無い違反の行。 */
+const missingLine = (link: string, file = "a.md") =>
+  `${file}: ${labels.missing} — ${link}`;
 
 const heading = "# x\n\n## a\n\n## a\n";
 /** 不正な引数の違反の、引数の後から。 */
-const badArg =
-  "正規の相対パスでないか、拡張子が .json・.md と大文字小文字だけ違う。";
+const badArg = {
+  path:
+    "が、正規の相対パスでない (先頭の /、空・.・.. の segment のどれかを持つ)。",
+  ext:
+    "の拡張子が .json・.md と大文字小文字だけ違う。ファイルの拡張子を小文字にする",
+};
 /** 検査できない属性の違反の、属性の名前の後から値の前まで。 */
 const uncheckable =
   "の参照先は検査できない。リポ内のファイルを指すなら Markdown のリンク・画像で書き、この属性を外す";
@@ -146,7 +153,7 @@ const attributeCases = attributeClasses.flatMap(([names, kind]) =>
       ? [
         `a.md: ${labels.anchor} — #nope`,
         `a.md: ${labels.anchor} — b.md#nope`,
-        `a.md: ${labels.missing} — gone.md`,
+        missingLine("gone.md"),
       ]
       : kind === "urlList" || kind === "unconfirmed"
       ? attributeValues.filter((v) => v !== "").map((v) =>
@@ -158,14 +165,12 @@ const attributeCases = attributeClasses.flatMap(([names, kind]) =>
 /**
  * 中身を要素にしない要素 (canon: facts/parse5/parse-tree-attributes) の開き・閉じのタグ。
  * - filtered: GFM の tagfilter が文字にするか (canon: facts/github/gfm-tagfilter)。
- * - closes: 文字にしないとき、閉じのタグで元に戻るか。
+ * - restoredByClose: 文字にしないとき、閉じのタグで中身の扱いが元に戻るか。
  */
-const textElements: {
-  open: string;
-  close: string;
-  filtered: boolean;
-  closes: boolean;
-}[] = [
+const textElements: (
+  & { open: string; close: string }
+  & ({ filtered: true } | { filtered: false; restoredByClose: boolean })
+)[] = [
   ...[
     "title",
     "textarea",
@@ -177,61 +182,61 @@ const textElements: {
     "script",
     "plaintext",
     "TEXTAREA",
-  ].map((e) => ({
-    open: `<${e}>`,
-    close: `</${e}>`,
-    filtered: true,
-    closes: true,
-  })),
-  { open: "<textarea/>", close: "</textarea>", filtered: true, closes: true },
-  { open: "<style\t>", close: "</style\n>", filtered: true, closes: true },
+  ].map((e) => ({ open: `<${e}>`, close: `</${e}>`, filtered: true as const })),
+  { open: "<textarea/>", close: "</textarea>", filtered: true },
+  { open: "<style\t>", close: "</style\n>", filtered: true },
   // 閉じのタグは tagfilter が文字にするので、文書の終わりまで textarea の中
   {
     open: "<textarea\f>",
     close: "</textarea>",
     filtered: false,
-    closes: false,
+    restoredByClose: false,
   },
-  { open: "<noscript>", close: "</noscript>", filtered: false, closes: true },
+  {
+    open: "<noscript>",
+    close: "</noscript>",
+    filtered: false,
+    restoredByClose: true,
+  },
 ];
-/** タグごとに、閉じる形と閉じない形を、html_block (開きタグの行で始まる) と段落の中の html_inline に置く。 */
-const textElementCases = textElements.flatMap((
-  { open, close, filtered, closes },
-) =>
+/** タグごとに、閉じのタグを持つ形と持たない形を、html_block (開きタグの行で始まる) と段落の中の html_inline に置く。 */
+const textElementCases = textElements.flatMap((element) =>
   [
     {
       form: "html_block",
       content:
-        `${open}\n<a href="gone.md">x</a>\n${close}\n\n<a href="after.md">a</a>\n`,
-      closed: closes,
+        `${element.open}\n<a href="gone.md">x</a>\n${element.close}\n\n<a href="after.md">a</a>\n`,
+      withClose: true,
     },
     {
       form: "閉じない html_block",
-      content: `${open}\n<a href="gone.md">x</a>\n\n<a href="after.md">a</a>\n`,
-      closed: false,
+      content:
+        `${element.open}\n<a href="gone.md">x</a>\n\n<a href="after.md">a</a>\n`,
+      withClose: false,
     },
     {
       form: "html_inline",
       content:
-        `x ${open}<a href="gone.md">x</a>${close} <a href="after.md">a</a>\n`,
-      closed: closes,
+        `x ${element.open}<a href="gone.md">x</a>${element.close} <a href="after.md">a</a>\n`,
+      withClose: true,
     },
     {
       form: "閉じない html_inline",
-      content: `x ${open}<a href="gone.md">x</a>\n\n<a href="after.md">a</a>\n`,
-      closed: false,
+      content:
+        `x ${element.open}<a href="gone.md">x</a>\n\n<a href="after.md">a</a>\n`,
+      withClose: false,
     },
-  ].map(({ form, content, closed }) => {
-    const seen = filtered
+  ].map(({ form, content, withClose }) => {
+    const seen = element.filtered
       ? ["gone.md", "after.md"]
-      : closed
+      : withClose && element.restoredByClose
       ? ["after.md"]
       : [];
     return {
-      name: `生の HTML: ${JSON.stringify(open)} の中と後ろ (${form})`,
+      name: `生の HTML: ${JSON.stringify(element.open)} の中と後ろ (${form})`,
       files: { "a.md": content },
       code: seen.length ? 1 : 0,
-      stderr: seen.map((l) => `a.md: ${labels.missing} — ${l}`),
+      stderr: seen.map((l) => missingLine(l)),
     };
   })
 );
@@ -245,9 +250,11 @@ const foreignCases = ([
   // tagfilter に無い noscript は、svg・math の直下では外来の要素で、中の a も要素
   ["svg", "noscript", true],
   ["math", "noscript", true],
-  // 統合点 (svg の desc・math の mi) の中は HTML の規則に戻り、noscript の中身は文字
+  // 統合点 (svg の desc・math の mi) の中は HTML の規則に戻る。noscript の中身は文字で、style は tagfilter が文字にするので中の a は要素
   ["svg", "desc><noscript", false],
   ["math", "mi><noscript", false],
+  ["svg", "desc><style", true],
+  ["math", "mi><style", true],
 ] as const).flatMap(([outer, inner, seen]) => {
   const body = `<${inner}><a href="gone.md">x</a>`;
   return [
@@ -259,7 +266,7 @@ const foreignCases = ([
     } の中の a (${form})`,
     files: { "a.md": content },
     code: seen ? 1 : 0,
-    stderr: seen ? [`a.md: ${labels.missing} — gone.md`] : [],
+    stderr: seen ? [missingLine("gone.md")] : [],
   }));
 });
 const cases: {
@@ -280,7 +287,7 @@ const cases: {
     },
     code: 1,
     stderr: [
-      `docs/a.md: ${labels.missing} — /nope`,
+      missingLine("/nope", "docs/a.md"),
     ],
   },
   {
@@ -306,8 +313,8 @@ const cases: {
     },
     code: 1,
     stderr: [
-      `b.md: ${labels.missing} — license`,
-      `b.md: ${labels.missing} — Docs/a.md`,
+      missingLine("license", "b.md"),
+      missingLine("Docs/a.md", "b.md"),
     ],
   },
   {
@@ -316,7 +323,7 @@ const cases: {
     args: ["a.md"],
     code: 1,
     stderr: [
-      `a.md: ${labels.missing} — untracked.md`,
+      missingLine("untracked.md"),
     ],
   },
   {
@@ -329,7 +336,7 @@ const cases: {
     },
     code: 1,
     stderr: [
-      `docs/a.md: ${labels.missing} — ..%2FLICENSE`,
+      missingLine("..%2FLICENSE", "docs/a.md"),
       `docs/a.md: ${labels.outside} — %2E%2E/%2e%2e/LICENSE`,
     ],
   },
@@ -341,8 +348,8 @@ const cases: {
     },
     code: 1,
     stderr: [
-      `x.md: ${labels.missing} — /a%2Fb.md`,
-      `x.md: ${labels.missing} — a%2Fb.md`,
+      missingLine("/a%2Fb.md", "x.md"),
+      missingLine("a%2Fb.md", "x.md"),
     ],
   },
   {
@@ -371,7 +378,7 @@ const cases: {
     files: { "b.md": heading, "a.md": "[l](b.md?plain=1#x) [m](c.md?x=1)\n" },
     code: 1,
     stderr: [
-      `a.md: ${labels.missing} — c.md?x=1`,
+      missingLine("c.md?x=1"),
     ],
   },
   {
@@ -389,7 +396,7 @@ const cases: {
     },
     code: 1,
     stderr: [
-      `a.md: ${labels.missing} — gone.md`,
+      missingLine("gone.md"),
     ],
   },
   {
@@ -410,9 +417,9 @@ const cases: {
     },
     code: 1,
     stderr: [
-      `a.md: ${labels.missing} — img/no.png`,
-      `a.md: ${labels.missing} — missing.md`,
-      `a.md: ${labels.missing} — upper.md`,
+      missingLine("img/no.png"),
+      missingLine("missing.md"),
+      missingLine("upper.md"),
       `a.md: ${labels.anchor} — b.md?a=1&b=2#nope`,
       `a.md: srcset ${uncheckable} — srcset=img/ok.png 2x`,
     ],
@@ -433,8 +440,8 @@ const cases: {
     },
     code: 1,
     stderr: [
-      `a.md: ${labels.missing} — gone.md`,
-      `a.md: ${labels.missing} — \u00a0b.md`,
+      missingLine("gone.md"),
+      missingLine("\u00a0b.md"),
     ],
   },
   {
@@ -450,21 +457,21 @@ const cases: {
       ].join("\n"),
     },
     code: 1,
-    stderr: [`a.md: ${labels.missing} — after.md`],
+    stderr: [missingLine("after.md")],
   },
   {
     // canon: facts/parse5/parse-tree-attributes の「閉じない a は、次の p の中に同じ属性で複製される」
     name: "生の HTML: 木構築が複製する閉じない a の違反は 1 行",
     files: { "a.md": 'x <a href="gone.md">open\n\nnext\n' },
     code: 1,
-    stderr: [`a.md: ${labels.missing} — gone.md`],
+    stderr: [missingLine("gone.md")],
   },
   {
     name:
       "生の HTML: 閉じない textarea (html_inline) の後の段落の Markdown のリンク",
     files: { "a.md": "x <textarea>\n\n[l](gone.md)\n" },
     code: 1,
-    stderr: [`a.md: ${labels.missing} — gone.md`],
+    stderr: [missingLine("gone.md")],
   },
   {
     // 閉じのタグの無い script の html_block は文書の終わりまで続き、Markdown のリンクは描画されない
@@ -473,7 +480,7 @@ const cases: {
       "a.md": 'y\n\n<script>\n\n[l](md.md)\n\n<a href="raw.md">r</a>\n',
     },
     code: 1,
-    stderr: [`a.md: ${labels.missing} — raw.md`],
+    stderr: [missingLine("raw.md")],
   },
   {
     // canon: facts/parse5/parse-tree-attributes の「body の中の head・frame の開きタグと、select の中の a は捨てられ」
@@ -483,7 +490,7 @@ const cases: {
         'x <select><a href="gone.md">x</a></select> <frame src="gone.md"> <head profile="gone.md"> <a href="after.md">a</a>\n',
     },
     code: 1,
-    stderr: [`a.md: ${labels.missing} — after.md`],
+    stderr: [missingLine("after.md")],
   },
   {
     // canon: facts/parse5/parse-tree-attributes の「外来の要素の xlink:href は prefix "xlink"・name "href"」
@@ -496,7 +503,7 @@ const cases: {
     name: "生の HTML: template の中身",
     files: { "a.md": '<template><a href="gone.md">x</a></template>\n' },
     code: 1,
-    stderr: [`a.md: ${labels.missing} — gone.md`],
+    stderr: [missingLine("gone.md")],
   },
   {
     // markdown-it の normalize と parse5 が U+FFFD に替える (canon: facts/markdown-it/render-html、facts/parse5/parse-tree-attributes)
@@ -506,27 +513,33 @@ const cases: {
       "a.md": 'x <a href="\0b.md">y</a> <a href="&#0;b.md">z</a>\n',
     },
     code: 1,
-    stderr: [`a.md: ${labels.missing} — \ufffdb.md`],
+    stderr: [missingLine("\ufffdb.md")],
   },
   {
     name: "大文字小文字だけ違う拡張子の引数は exit 2",
     files: { "A.JSON": "{}", "B.Md": "", "c.md": "" },
     code: 2,
     prefix: true,
-    stderr: [`check-json-md.ts: 引数 "A.JSON" "B.Md" が、${badArg}`],
+    stderr: [
+      `check-json-md.ts: 引数 "A.JSON" ${badArg.ext}`,
+      `check-json-md.ts: 引数 "B.Md" ${badArg.ext}`,
+    ],
   },
   {
+    // canon: facts/github/blob-line-anchors
     name: ".md でないファイルとディレクトリの anchor",
     files: {
       LICENSE: "",
       "docs/b.md": "",
       "a.md":
-        "[a](LICENSE#L10) [b](LICENSE#L10-L20) [c](LICENSE#intro) [d](docs#x)\n",
+        "[a](LICENSE#L10) [b](LICENSE#L10-L20) [c](LICENSE#intro) [d](docs#x) [e](docs#L10)\n",
     },
     code: 1,
     stderr: [
+      `a.md: ${labels.notMd} — LICENSE#L10-L20`,
       `a.md: ${labels.notMd} — LICENSE#intro`,
       `a.md: ${labels.notMd} — docs#x`,
+      `a.md: ${labels.notMd} — docs#L10`,
     ],
   },
   {
@@ -672,7 +685,7 @@ const cases: {
     args: ["a.md", arg],
     code: 2,
     prefix: true,
-    stderr: [`check-json-md.ts: 引数 ${JSON.stringify(arg)} が、${badArg}`],
+    stderr: [`check-json-md.ts: 引数 ${JSON.stringify(arg)} ${badArg.path}`],
   })),
 ];
 
@@ -718,6 +731,10 @@ const model = (url: string): keyof typeof labels | undefined => {
     f.endsWith(".md") && f.split("/").length === out.length &&
     f.split("/").every((s, i) => s === out[i])
   );
+  const isFile = known.some((f) =>
+    f.split("/").length === out.length &&
+    f.split("/").every((s, i) => s === out[i])
+  );
   const exists = known.some((f) => {
     const segments = f.split("/");
     return segments.length >= out.length &&
@@ -731,7 +748,7 @@ const model = (url: string): keyof typeof labels | undefined => {
   } catch {
     return "malformed";
   }
-  if (!isMd) return /^L\d+(?:-L\d+)?$/.test(anchor) ? undefined : "notMd";
+  if (!isMd) return isFile && /^L\d+$/.test(anchor) ? undefined : "notMd";
   return "anchor";
 };
 
@@ -793,16 +810,15 @@ Deno.test("リンクの報告は、# と ? で割り、segment ごとに decode 
 
 Deno.test("属性の値の前処理: 前・中・後の U+0000〜U+0020 (tab・LF・CR・FF を含む)、そのままの文字と文字参照の全部の組", async () => {
   const codes = Array.from({ length: 0x21 }, (_, i) => i);
+  /** 値 b.md の at の位置に x を置いたもの。 */
+  const placeAt = (at: string, x: string) =>
+    at === "前" ? `${x}b.md` : at === "中" ? `b${x}.md` : `b.md${x}`;
   const values = codes.flatMap((code) => {
     const c = String.fromCharCode(code);
-    return ["前", "中", "後"].flatMap((at) => {
-      const place = (x: string) =>
-        at === "前" ? `${x}b.md` : at === "中" ? `b${x}.md` : `b.md${x}`;
-      return [
-        { written: place(c), at, c, place },
-        { written: place(`&#x${code.toString(16)};`), at, c, place },
-      ];
-    });
+    return ["前", "中", "後"].flatMap((at) => [
+      { written: placeAt(at, c), at, c },
+      { written: placeAt(at, `&#x${code.toString(16)};`), at, c },
+    ]);
   });
   const r = await check({
     "b.md": "",
@@ -814,12 +830,12 @@ Deno.test("属性の値の前処理: 前・中・後の U+0000〜U+0020 (tab・L
     ].join("\n"),
   });
   const reported = new Set(
-    values.flatMap(({ at, c, place }) => {
+    values.flatMap(({ at, c }) => {
       // markdown-it の normalize と parse5 は U+0000 を U+FFFD にする (canon: facts/markdown-it/render-html、facts/parse5/parse-tree-attributes)
       const read = c === "\0" ? "\ufffd" : c;
       // canon: facts/url/parser-strips-c0-space-and-tab-newline。前後は U+0020 以下を落とし、中は tab・LF・CR だけを消す。markdown-it と parse5 は CR を LF にする (上と同じ canon)
       const kept = read > " " || (at === "中" && !"\t\n\r".includes(read));
-      return kept ? [`a.md: ${labels.missing} — ${place(read)}`] : [];
+      return kept ? [missingLine(placeAt(at, read))] : [];
     }),
   );
   deepStrictEqual(lines(r.stderr), [...reported].sort());
