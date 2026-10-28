@@ -15,6 +15,7 @@
  * - linked worktree の test: worktree で回すと、hook は common git dir の hooks にだけ写る。
  * - 中断の test: 写している最中に SIGTERM を受けると、一時ファイルを残さない。
  * - TMPDIR の値は、canon: facts/shell/string-input-categories の分類から生成して回す。
+ * - git rev-parse --local-env-vars の各行の形は、fake の git が出す行を生成して回す。
  * - 子の環境と symlink の作り方、test が起動したものの寿命と fixture の消し方は、run-checks_test.ts の先頭と同じ。
  */
 import fc from "fast-check";
