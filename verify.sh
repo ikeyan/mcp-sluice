@@ -32,5 +32,7 @@ if [ ! -x "$hook" ] || ! cmp -s hooks/pre-push "$hook"; then
   fi
 fi
 
-# --frozen-lockfile: deno.lock が deno.json と食い違うなら、検査の最中に書き換えず落とす。
-exec deno run --frozen-lockfile --allow-run=git,shellcheck,deno --allow-read=deno.json,.agent-sync/generated scripts/run-checks.ts "$status"
+# Deno.kill で段のプロセスグループに送るには、パスを付けない --allow-run が要る (canon: facts/deno/command-spawn の「Deno.kill」)。パスで絞った --allow-run で通るようになったら、段が起動するもの (git・shellcheck・deno) に絞る。
+# run-checks.ts は TMPDIR (未設定か空なら /tmp) の下に書く。許可はパスの綴りで照合する (canon: facts/deno/permission-paths-not-resolved) ので、同じ綴りで渡す。
+tmpdir=${TMPDIR:-/tmp}
+exec deno run --frozen-lockfile --allow-run --allow-env=TMPDIR --allow-write="$tmpdir" --allow-read=deno.json,.agent-sync/generated scripts/run-checks.ts "$status"

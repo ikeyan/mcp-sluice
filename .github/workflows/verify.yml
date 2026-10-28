@@ -15,9 +15,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          deno-version: v2.x
-      # runner image 同梱の shellcheck (ubuntu-24.04 は 0.9.0) は SC2015 などの出方が手元と違うので、verify.sh が要求する版を /usr/local/bin に入れて先に引かせる。
-      # 外せる条件: ubuntu-latest の同梱が scripts/run-checks.ts の shellcheckVersion と同じ版になったとき。
+          # scripts/run-checks.ts の先頭の「版」が受ける範囲の中で、確かめた版
+          deno-version: "2.9.8"
+      # runner image 同梱の shellcheck は scripts/run-checks.ts の shellcheckVersion と版が違い、指摘の出方が違う (canon: facts/shellcheck/sc2015-version-difference) ので、その版を /usr/local/bin に入れて先に引かせる。
+      # 外せる条件: ubuntu-latest の同梱の shellcheck が shellcheckVersion と同じ版になったとき。
       - run: |
           curl -fsSLo "$RUNNER_TEMP/shellcheck.tar.xz" https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
           echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  $RUNNER_TEMP/shellcheck.tar.xz" | sha256sum -c -
