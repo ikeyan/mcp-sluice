@@ -43,32 +43,32 @@
 ## このリポの検証
 
 - clone したら、まず `./verify.sh` を 1 回回す。pre-push の hook (`PUSH_OK=1` の判定) は、このとき入る。
-- 単一検証コマンドは `./verify.sh`。CI も同じものを回す。含む検査:
-  - deno の版: `scripts/run-checks.ts` の先頭の範囲 (2.9.x で x が 7 以上) に入ること。
-  - `shellcheck`: このリポが持つ shell。agent-sync が置いたもの (`.agent-sync/generated` に載り、中身が記録した id と同じもの) は上流が検査するので除く。
-  - `deno fmt --check`・`deno lint`・`deno check`: git が知る `.ts`。`deno lint` は `no-unused-vars` だけ (recommended は deno の版で規則が増え、コードを変えていない CI が落ちうる)。
-  - `deno test`: git が知る `*_test.ts`。test は TMPDIR の下に fixture を作り、`verify.sh`・`scripts/run-checks.ts`・`scripts/check-json-md.ts` を子として回す。
-  - `scripts/check-json-md.ts`: git が知る `.json` の構文と、`.md` のリポ内リンク (生の HTML の `href`・`src` を含む)。
-  - `deno.json` の `imports`: 各キーが、git が知る `.ts` のどれかの import 指定子から使われていること (`deno lint` が見ない、未使用の依存を埋める。このリポの `.ts` が export を持つようになったら、未使用の export・module の検査を足す)。
-- `./verify.sh` は common git dir の `hooks` の pre-push を次のように扱う (CI でも同じ):
-  - 無い (壊れた symlink を含む): `hooks/pre-push` を写す。
-  - `hooks/pre-push` と同じ実行可能なファイル: 何もしない。
-  - それ以外: 触らずに落ち、置き換えのコマンドを示す。
-- `./verify.sh` は `core.hooksPath` が hook をよそへ向けていれば落ちる (設定は書かない)。
-- `./verify.sh` は `git rev-parse --local-env-vars` の変数 (`GIT_DIR` など) を消してから動くので、自分のあるリポだけを検査する。
-- `./verify.sh` を SIGHUP・SIGINT・SIGTERM で止めると、検査の段の子孫を止め、`deno test` の一時ディレクトリを消してから終わる。
-- 必要なもの:
-  - `shellcheck` (版は `scripts/run-checks.ts` の `shellcheckVersion` だけ。違えば `./verify.sh` が落ちる)
-  - `deno` (2.9.x で x が 7 以上。CI は 2.9.8)
-  - `git` (2.31 以降)
-- `deno.json` は `"lock": true` で、依存は完全な版で固定する。`minimumDependencyAge` は `P3D` (公開から 3 日未満の版を解決しない。deno の unstable の設定)。`./verify.sh` は `--frozen-lockfile` で回し、`deno.lock` が `deno.json` と食い違えば書き換えず落ちる (直すのは `deno install --frozen=false`)。
+- 単一検証コマンドは `./verify.sh`。CI も同じものを回す。
+- 規則の本文は次のファイルの先頭にある。変えるときはそこを直す:
+  - `verify.sh`: hook の状態ごとの扱い、消す環境変数、TMPDIR、事前条件。
+  - `scripts/run-checks.ts`: 検査の段と対象、名前の扱い、shellcheck から除くもの、lint の規則、imports の判定、出力の順と終了コード、中断、版の範囲とその上げ方。
+  - `scripts/check-json-md.ts`: リンクと anchor の解決。
+- 各検査が見るもの:
+  - 段より前: git が知るファイルの名前、作業ツリーに無い追跡ファイル、deno と shellcheck の版。
+  - `shellcheck`: このリポが持つ `*.sh`。
+  - `deno fmt --check`・`deno lint`・`deno check`: git が知る `.ts`。
+  - `deno test`: git が知る `*_test.ts`。
+  - `deno.json` の `imports`: 各キーが `.ts` の import 指定子から使われていること。このリポの `.ts` が export を持つようになったら、未使用の export・module の検査を足す。
+  - `scripts/check-json-md.ts`: `.json` の構文と、`.md` のリポ内リンク・anchor。
+- 必要なもの (版の範囲は `verify.sh` の事前条件と `scripts/run-checks.ts` の先頭の「版」。CI が使う版は `.github/workflows/verify.yml`):
+  - `bash`
+  - `shellcheck`
+  - `deno`
+  - `git`
+- `deno.json` は `"lock": true` で、依存は完全な版で固定する。`minimumDependencyAge` は `P3D` (canon: facts/deno/minimum-dependency-age)。`./verify.sh` は `--frozen-lockfile` で回し、`deno.lock` が `deno.json` と食い違えば書き換えず落ちる (直すのは `deno install --frozen=false`)。
 
 ## このリポの言語
 
 - 製品・テスト・開発用のスクリプトは TypeScript (Deno) で書く。
 - shell は次だけ:
-  - `verify.sh` の入口と、状態を揃える段 (deno の許可を広げずに hook を写すため)。
+  - `verify.sh`: 入口と、pre-push の hook の写し。
   - agent-sync が置くもの (`hooks/pre-push`・`.agent-sync/sync.sh`・`.claude/skills/pr-workflow/` の shell)。
+- deno で hook を写すには、run-checks.ts の許可に common git dir への write が要る。hook の写しを `verify.sh` に置くのは、この許可を足さないため。
 
 ## 外部依存の事実
 
