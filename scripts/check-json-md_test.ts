@@ -2,6 +2,7 @@
  * check-json-md.ts を子として、TMPDIR の下の一時ディレクトリの fixture に回す。
  * - 表の各行: fixture のファイルと引数に対し、終了コードと stderr の違反の行 (順を問わない集合) が一致すること。
  * - 性質: 生成した相対パスへのリンクについて、報告が、最初の # と、その前の最初の ? で割り、パスを segment ごとに decode して辿り、anchor を decode するモデルと一致すること。
+ * - 属性の値の前処理: 前・中・後と U+0001〜U+0020 の全部の組 (そのままの文字と文字参照) で、報告が URL の前処理のモデルと一致すること。
  */
 import fc from "fast-check";
 import { deepStrictEqual } from "node:assert/strict";
@@ -64,6 +65,16 @@ const assignable = (got: string[], want: string[], prefix: boolean) => {
     free.splice(i, 1);
     return true;
   });
+};
+
+/** 違反の行の、ファイルの後から — の前まで。 */
+const labels = {
+  malformed: "不正な %-エンコード。正しい %XX の列にする (% そのものは %25)",
+  outside: "リポの外を指す。リポ内を指すか、URL で書く",
+  missing: "リンク先が無い。git が知るファイルかディレクトリを指す",
+  anchor: "anchor が見出しに無い。リンク先の見出しの id に合わせる",
+  notMd:
+    ".md でないもの (ディレクトリを含む) の anchor は検査できない。行の anchor (L10・L10-L20) にするか、anchor を外す",
 };
 
 const heading = "# x\n\n## a\n\n## a\n";
@@ -130,9 +141,9 @@ const attributeCases = attributeClasses.flatMap(([names, kind]) =>
     code: kind === "ignored" || kind === "other" ? 0 : 1,
     stderr: kind === "url"
       ? [
-        "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — #nope",
-        "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#nope",
-        "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — gone.md",
+        `a.md: ${labels.anchor} — #nope`,
+        `a.md: ${labels.anchor} — b.md#nope`,
+        `a.md: ${labels.missing} — gone.md`,
       ]
       : kind === "urlList" || kind === "unconfirmed"
       ? attributeValues.filter((v) => v !== "").map((v) =>
@@ -141,6 +152,59 @@ const attributeCases = attributeClasses.flatMap(([names, kind]) =>
       : [],
   }))
 );
+/** 中身を要素にしない要素 (canon: facts/parse5/parse-tree-attributes)。 */
+const textElements = [
+  "title",
+  "textarea",
+  "style",
+  "xmp",
+  "iframe",
+  "noembed",
+  "noframes",
+  "noscript",
+  "script",
+  "plaintext",
+];
+/** 要素ごとに、html_block (開きタグだけの行で始まる) と段落の中の html_inline に置く。中の a は見ず、閉じタグの後の a は見る (plaintext は文書の終わりまでが中身)。 */
+const textElementCases = textElements.flatMap((e) =>
+  [
+    [
+      "html_block",
+      `<${e}>\n<a href="gone.md">x</a>\n</${e}>\n\n<a href="after.md">a</a>\n`,
+    ],
+    [
+      "html_inline",
+      `x <${e}><a href="gone.md">x</a></${e}> <a href="after.md">a</a>\n`,
+    ],
+  ].map(([form, content]) => ({
+    name: `生の HTML: ${e} の中 (${form})`,
+    files: { "a.md": content },
+    code: e === "plaintext" ? 0 : 1,
+    stderr: e === "plaintext" ? [] : [`a.md: ${labels.missing} — after.md`],
+  }))
+);
+/** svg・math の中の style・title の中の a は HTML の木構築のとおり。svg の desc と math の mi の中は HTML の規則に戻る (canon: facts/parse5/parse-tree-attributes)。 */
+const foreignCases = ([
+  ["svg", "style", true],
+  ["svg", "title", true],
+  ["math", "style", true],
+  ["math", "title", true],
+  ["svg", "desc><style", false],
+  ["math", "mi><style", false],
+] as const).flatMap(([outer, inner, seen]) => {
+  const body = `<${inner}><a href="gone.md">x</a>`;
+  return [
+    ["html_block", `<${outer}>\n${body}\n</${outer}>\n`],
+    ["html_inline", `x <${outer}>${body}</${outer}>\n`],
+  ].map(([form, content]) => ({
+    name: `生の HTML: ${outer} の中の ${
+      inner.replaceAll("><", " の中の ")
+    } の中の a (${form})`,
+    files: { "a.md": content },
+    code: seen ? 1 : 0,
+    stderr: seen ? [`a.md: ${labels.missing} — gone.md`] : [],
+  }));
+});
 const cases: {
   name: string;
   files: Record<string, string | Uint8Array | null>;
@@ -159,7 +223,7 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "docs/a.md: リンク先が無い。git が知るファイルかディレクトリを指す — /nope",
+      `docs/a.md: ${labels.missing} — /nope`,
     ],
   },
   {
@@ -171,9 +235,9 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "docs/a.md: リポの外を指す。リポ内を指すか、URL で書く — ../../LICENSE",
-      "docs/a.md: リポの外を指す。リポ内を指すか、URL で書く — /../LICENSE",
-      "docs/a.md: リポの外を指す。リポ内を指すか、URL で書く — ../docs/../../x",
+      `docs/a.md: ${labels.outside} — ../../LICENSE`,
+      `docs/a.md: ${labels.outside} — /../LICENSE`,
+      `docs/a.md: ${labels.outside} — ../docs/../../x`,
     ],
   },
   {
@@ -185,8 +249,8 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "b.md: リンク先が無い。git が知るファイルかディレクトリを指す — license",
-      "b.md: リンク先が無い。git が知るファイルかディレクトリを指す — Docs/a.md",
+      `b.md: ${labels.missing} — license`,
+      `b.md: ${labels.missing} — Docs/a.md`,
     ],
   },
   {
@@ -195,7 +259,7 @@ const cases: {
     args: ["a.md"],
     code: 1,
     stderr: [
-      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — untracked.md",
+      `a.md: ${labels.missing} — untracked.md`,
     ],
   },
   {
@@ -208,8 +272,8 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "docs/a.md: リンク先が無い。git が知るファイルかディレクトリを指す — ..%2FLICENSE",
-      "docs/a.md: リポの外を指す。リポ内を指すか、URL で書く — %2E%2E/%2e%2e/LICENSE",
+      `docs/a.md: ${labels.missing} — ..%2FLICENSE`,
+      `docs/a.md: ${labels.outside} — %2E%2E/%2e%2e/LICENSE`,
     ],
   },
   {
@@ -220,8 +284,8 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "x.md: リンク先が無い。git が知るファイルかディレクトリを指す — /a%2Fb.md",
-      "x.md: リンク先が無い。git が知るファイルかディレクトリを指す — a%2Fb.md",
+      `x.md: ${labels.missing} — /a%2Fb.md`,
+      `x.md: ${labels.missing} — a%2Fb.md`,
     ],
   },
   {
@@ -233,8 +297,8 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: 不正な %-エンコード。正しい %XX の列にする (% そのものは %25) — 100%zz.md",
-      "a.md: 不正な %-エンコード。正しい %XX の列にする (% そのものは %25) — b.md#%E3",
+      `a.md: ${labels.malformed} — 100%zz.md`,
+      `a.md: ${labels.malformed} — b.md#%E3`,
     ],
   },
   {
@@ -242,7 +306,7 @@ const cases: {
     files: { "b.md": heading, "a.md": "[l](b.md#x#y) [m](b.md#x)\n" },
     code: 1,
     stderr: [
-      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#x#y",
+      `a.md: ${labels.anchor} — b.md#x#y`,
     ],
   },
   {
@@ -250,7 +314,7 @@ const cases: {
     files: { "b.md": heading, "a.md": "[l](b.md?plain=1#x) [m](c.md?x=1)\n" },
     code: 1,
     stderr: [
-      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — c.md?x=1",
+      `a.md: ${labels.missing} — c.md?x=1`,
     ],
   },
   {
@@ -268,7 +332,7 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — gone.md",
+      `a.md: ${labels.missing} — gone.md`,
     ],
   },
   {
@@ -289,10 +353,10 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — img/no.png",
-      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — missing.md",
-      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — upper.md",
-      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md?a=1&b=2#nope",
+      `a.md: ${labels.missing} — img/no.png`,
+      `a.md: ${labels.missing} — missing.md`,
+      `a.md: ${labels.missing} — upper.md`,
+      `a.md: ${labels.anchor} — b.md?a=1&b=2#nope`,
       `a.md: srcset ${uncheckable} — srcset=img/ok.png 2x`,
     ],
   },
@@ -312,18 +376,14 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — gone.md",
-      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — \u00a0b.md",
+      `a.md: ${labels.missing} — gone.md`,
+      `a.md: ${labels.missing} — \u00a0b.md`,
     ],
   },
   {
-    name: "生の HTML: 閉じないコメントの後と、中身をタグとして読まない要素の中",
+    name: "生の HTML: 閉じないコメントの後",
     files: {
       "a.md": [
-        '<textarea><a href="in-textarea.md"></textarea>',
-        "",
-        "<script>document.write('<a href=\"in-script.md\">')</script>",
-        "",
         '<a href="after.md">a</a>',
         "",
         "<!-- memo",
@@ -333,19 +393,37 @@ const cases: {
       ].join("\n"),
     },
     code: 1,
-    stderr: [
-      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — after.md",
-    ],
+    stderr: [`a.md: ${labels.missing} — after.md`],
   },
   {
-    name: "大文字小文字だけ違う拡張子の名前は検査せず、リンク先としてだけ使う",
+    // canon: facts/parse5/parse-tree-attributes の「閉じない a は、次の p の中に同じ属性で複製される」
+    name: "生の HTML: 木構築が複製する閉じない a の違反は 1 行",
+    files: { "a.md": 'x <a href="gone.md">open\n\nnext\n' },
+    code: 1,
+    stderr: [`a.md: ${labels.missing} — gone.md`],
+  },
+  {
+    name: "生の HTML: template の中身",
+    files: { "a.md": '<template><a href="gone.md">x</a></template>\n' },
+    code: 1,
+    stderr: [`a.md: ${labels.missing} — gone.md`],
+  },
+  {
+    // markdown-it の normalize と parse5 が U+FFFD に替える (canon: facts/markdown-it/render-html、facts/parse5/parse-tree-attributes)
+    name: "生の HTML の属性の値: U+0000 と &#0; は U+FFFD として残る",
     files: {
-      "A.JSON": "{",
-      "B.MD": "[x](gone.md)\n",
-      "c.md": "[y](B.MD) [z](A.JSON)\n",
+      "b.md": "",
+      "a.md": 'x <a href="\0b.md">y</a> <a href="&#0;b.md">z</a>\n',
     },
-    code: 0,
-    stderr: [],
+    code: 1,
+    stderr: [`a.md: ${labels.missing} — \ufffdb.md`],
+  },
+  {
+    name: "大文字小文字だけ違う拡張子の引数は exit 2",
+    files: { "A.JSON": "{}", "B.Md": "", "c.md": "" },
+    code: 2,
+    prefix: true,
+    stderr: ["check-json-md.ts: 引数は git が知るファイルの"],
   },
   {
     name: ".md でないファイルとディレクトリの anchor",
@@ -357,8 +435,8 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: .md でないもの (ディレクトリを含む) の anchor は検査できない。行の anchor (L10・L10-L20) にするか、anchor を外す — LICENSE#intro",
-      "a.md: .md でないもの (ディレクトリを含む) の anchor は検査できない。行の anchor (L10・L10-L20) にするか、anchor を外す — docs#x",
+      `a.md: ${labels.notMd} — LICENSE#intro`,
+      `a.md: ${labels.notMd} — docs#x`,
     ],
   },
   {
@@ -369,8 +447,8 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#a-2",
-      "b.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — #a-2",
+      `a.md: ${labels.anchor} — b.md#a-2`,
+      `b.md: ${labels.anchor} — #a-2`,
     ],
   },
   {
@@ -398,9 +476,9 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#logo-project-name",
-      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#text-alt-word-tail",
-      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#html-alt-html-img",
+      `a.md: ${labels.anchor} — b.md#logo-project-name`,
+      `a.md: ${labels.anchor} — b.md#text-alt-word-tail`,
+      `a.md: ${labels.anchor} — b.md#html-alt-html-img`,
     ],
   },
   {
@@ -414,8 +492,8 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#title-x-y",
-      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — c.md#empty",
+      `a.md: ${labels.anchor} — b.md#title-x-y`,
+      `a.md: ${labels.anchor} — c.md#empty`,
     ],
   },
   {
@@ -426,7 +504,7 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#title-x",
+      `a.md: ${labels.anchor} — b.md#title-x`,
     ],
   },
   {
@@ -437,7 +515,7 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#title-x",
+      `a.md: ${labels.anchor} — b.md#title-x`,
     ],
   },
   {
@@ -448,7 +526,7 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#ab",
+      `a.md: ${labels.anchor} — b.md#ab`,
     ],
   },
   {
@@ -488,6 +566,8 @@ const cases: {
     ],
   },
   ...attributeCases,
+  ...textElementCases,
+  ...foreignCases,
   ...[[], ["/a.md"], ["a//b.md"], ["./a.md"], ["a/../b.md"], [""], ["a/"]].map((
     args,
   ) => ({
@@ -513,15 +593,6 @@ Deno.test("check-json-md.ts の表", async () => {
 
 /** リンクを置くファイル (a/b/x.md) の他に、git の一覧に載せるファイル。 */
 const known = ["a/b/x.md", "a/n.md", "a b/n.md", "a/c.json"];
-
-const labels = {
-  malformed: "不正な %-エンコード。正しい %XX の列にする (% そのものは %25)",
-  outside: "リポの外を指す。リポ内を指すか、URL で書く",
-  missing: "リンク先が無い。git が知るファイルかディレクトリを指す",
-  anchor: "anchor が見出しに無い。リンク先の見出しの id に合わせる",
-  notMd:
-    ".md でないもの (ディレクトリを含む) の anchor は検査できない。行の anchor (L10・L10-L20) にするか、anchor を外す",
-};
 
 /** a/b/x.md の url のリンクの報告のモデル。known の .md はどれも見出しを持たない。報告が無ければ undefined。 */
 const model = (url: string): keyof typeof labels | undefined => {
@@ -622,4 +693,38 @@ Deno.test("リンクの報告は、# と ? で割り、segment ごとに decode 
     ),
     { numRuns: 30, includeErrorInReport: true },
   );
+});
+
+Deno.test("属性の値の前処理: 前・中・後の U+0001〜U+0020 (tab・LF・CR・FF を含む)、そのままの文字と文字参照の全部の組", async () => {
+  // canon: facts/url/parser-strips-c0-space-and-tab-newline。前後は落とし、中は tab・LF・CR だけを消す
+  const codes = Array.from({ length: 0x20 }, (_, i) => i + 1);
+  const values = codes.flatMap((code) => {
+    const c = String.fromCharCode(code);
+    return (["前", "中", "後"] as const).flatMap((at) => {
+      const place = (x: string) =>
+        at === "前" ? `${x}b.md` : at === "中" ? `b${x}.md` : `b.md${x}`;
+      return [
+        { written: place(c), at, c },
+        { written: place(`&#x${code.toString(16)};`), at, c },
+      ];
+    });
+  });
+  const r = await check({
+    "b.md": "",
+    "a.md": [
+      "<p>",
+      ...values.map(({ written }) => `<a href="${written}">x</a>`),
+      "</p>",
+      "",
+    ].join("\n"),
+  });
+  // markdown-it と parse5 は CR を LF にする (canon: facts/markdown-it/render-html、facts/parse5/parse-tree-attributes)
+  const reported = new Set(
+    values.flatMap(({ at, c }) =>
+      at === "中" && !"\t\n\r".includes(c)
+        ? [`a.md: ${labels.missing} — b${c}.md`]
+        : []
+    ),
+  );
+  deepStrictEqual(lines(r.stderr), [...reported].sort());
 });

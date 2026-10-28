@@ -7,30 +7,37 @@
  *   - `.md` で終わるもの: リンクと anchor を検査する。
  *   - 全部: リンク先が在るかの判定に使う。
  *   - 拡張子の判定は大文字小文字を区別する。
- * - 事前条件: 大文字小文字だけ違う名前 (`.JSON`・`.MD` など) を渡さない (run-checks.ts が段の前で落とす)。渡されたものは検査せず、リンク先が在るかの判定にだけ使う。
  * - `.json`・`.md` は UTF-8 として読む。BOM は落とさない (canon: facts/git/path-output-quoting の TextDecoder)。
  * - 次のときは何も検査せず exit 2:
  *   - 引数が無い。
  *   - どれかが正規の相対パスでない (先頭の `/`、空・`.`・`..` の segment)。
- * - 違反があれば stderr に出して exit 1。無ければ件数を stdout に出して exit 0。
+ *   - どれかの拡張子が `.json`・`.md` と大文字小文字だけ違う (`.JSON`・`.Md` など。run-checks.ts が段の前で落とすので、渡されない)。
+ * - 違反があれば stderr に出して exit 1。同じ違反の行は 1 回だけ出す。無ければ件数を stdout に出して exit 0。
  *
  * リンク:
  * - 根拠: GitHub が追跡されたファイルを描画するときの解決に合わせる。ただし未確認の前提で、canon に事実が無く、下の規則は GitHub で確かめていない。
- * - 対象:
- *   - Markdown のリンク・画像 (参照スタイルを含む)。
- *   - 生の HTML (markdown-it の html_block・html_inline の token ごと) の開きタグの属性。
- *     - WHATWG HTML の tokenizer (parse5) で読む (canon: facts/parse5/tokenizer-start-tags)。属性の名前は小文字になり、値は引用符を外して文字参照を戻したもの。コメント (閉じないものは token の終わりまで) の中は見ない。
- *     - textarea・script など、中身をタグとして読まない要素の開きタグの後は、tokenizer を中身の状態に切り替える (svg・math の中でも切り替える)。
- *     - 値は、WHATWG URL の parser の前処理に合わせ、前後の C0 制御文字と空白を落とし、中の tab と改行を消してから扱う (canon: facts/url/parser-strips-c0-space-and-tab-newline)。
- *     - 属性の類 (attributeClasses。canon: facts/html/url-valued-attributes の一覧と「値の形」) と値の類ごとの扱い:
+ * - 対象: 文書を markdown-it で HTML に描画し、parse5 の parse で文書の木にした、全部の要素の属性 (canon: facts/markdown-it/render-html、facts/parse5/parse-tree-attributes)。
+ *   - parse5 を使うのは、HTML の仕様の木構築で読むため。正規表現や tokenizer 単独では、textarea・script・svg などの文脈の規則を写し続けることになる。
+ *   - 生の HTML はそのまま描画される。Markdown のリンク・画像 (参照スタイルを含む) は a の href・img の src になり、値は markdown-it が正規化した href・src と同じ。
+ *   - 木に属性が残らないものは見ない。木構築のとおりで、次を含む:
+ *     - 中身を要素にしない要素 (title・textarea・style・xmp・iframe・noembed・noframes・noscript・script・plaintext) の中。svg・math の直下の style・title の中は要素になるので見る。
+ *     - コメント (閉じないものは文書の終わりまで) の中。
+ *     - 木構築が捨てる開きタグ (body の中の head・frame、select の中の a など)。
+ *   - template の中身も見る。
+ *   - 木構築は閉じない a などを後の要素に複製するので、同じ違反が重なる (上の「同じ違反の行は 1 回だけ」)。
+ *   - 属性の名前は小文字。外来の要素の xlink:href などは prefix つきの名前で見る。値は引用符を外して文字参照を戻したもの。U+0000 と `&#0;` は U+FFFD になり、値の一部として残る。
+ *   - 値は、WHATWG URL の parser の前処理に合わせ、前後の C0 制御文字と空白を落とし、中の tab と改行を消してから扱う (canon: facts/url/parser-strips-c0-space-and-tab-newline)。
+ *   - 属性の類 (attributeClasses。canon: facts/html/url-valued-attributes の一覧と「値の形」) と値の類ごとの扱い:
  *
- *       | 属性の類 | 外部のスキーム (`http:`・`mailto:` など) | `//` で始まる | 空 | fragment だけ (`#x`) | リポ内に在る | リポ内に無い |
- *       | --- | --- | --- | --- | --- | --- | --- |
- *       | 単一の URL (`url`。`href`・`src` など) | 見ない | 見ない | ファイル自身 (違反でない) | ファイル自身の anchor | 通る (anchor は下の規則) | 違反 |
- *       | URL の列 (`urlList`。`srcset` など) と、値の形を canon で確かめていないもの (`unconfirmed`。`archive` など) | 違反 (検査できない) | 違反 | 見ない | 違反 | 違反 | 違反 |
- *       | 見ない (`ignored`。`usemap`。値は `<map name>` を指す `#名前` で、リポのファイルを指せない) と、attributeClasses に無いもの | 見ない | 見ない | 見ない | 見ない | 見ない | 見ない |
+ *     | 属性の類 | 外部のスキーム (`http:`・`mailto:` など) | `//` で始まる | 空 | fragment だけ (`#x`) | リポ内に在る | リポ内に無い |
+ *     | --- | --- | --- | --- | --- | --- | --- |
+ *     | 単一の URL (`url`。`href`・`src` など) | 見ない | 見ない | ファイル自身 (違反でない) | ファイル自身の anchor | 通る (anchor は下の規則) | 違反 |
+ *     | URL の列 (`urlList`。`srcset` など) と、値の形を canon で確かめていないもの (`unconfirmed`。`archive` など) | 違反 (検査できない) | 違反 | 見ない | 違反 | 違反 | 違反 |
+ *     | 見ない (`ignored`。`usemap`。値は `<map name>` を指す `#名前` で、リポのファイルを指せない) と、attributeClasses に無いもの | 見ない | 見ない | 見ない | 見ない | 見ない | 見ない |
  *
- * - 下の規則は、Markdown のリンク・画像と単一の URL の属性の値に当てる。スキームか `//` で始まるものは外部として見ない。
+ *   - `unconfirmed` の類を外せる条件: canon の facts/html/url-valued-attributes の「確かめていないもの」の値の形が確かめられたとき。各属性を `url` か `urlList` へ移し、この類を消す。
+ *
+ * - 下の規則は、単一の URL の属性 (Markdown のリンク・画像を含む) の値に当てる。スキームか `//` で始まるものは外部として見ない。
  * - 最初の `#` の後が anchor。その前の最初の `?` の後は query で、見ない。
  * - パス:
  *   - `/` で割ってから、segment ごとに %-decode する。`%2F` は区切りにならない。
@@ -46,16 +53,20 @@
  */
 import GithubSlugger from "github-slugger";
 import MarkdownIt from "markdown-it";
-import { Tokenizer, TokenizerMode } from "parse5";
+import { type DefaultTreeAdapterTypes, parse as parseHtml } from "parse5";
 
 const self = "check-json-md.ts";
-const nonCanonical = Deno.args.filter((f) =>
-  f.split("/").some((s) => s === "" || s === "." || s === "..")
+const checkedExts = [".json", ".md"];
+const badArgs = Deno.args.filter((f) =>
+  f.split("/").some((s) => s === "" || s === "." || s === "..") ||
+  checkedExts.some((e) => !f.endsWith(e) && f.toLowerCase().endsWith(e))
 );
-if (Deno.args.length === 0 || nonCanonical.length > 0) {
+if (Deno.args.length === 0 || badArgs.length > 0) {
   console.error(
-    `${self}: 引数は git が知るファイルの、リポのルートからの相対パス (1 つ以上)。./verify.sh から起動する (${
-      nonCanonical.map((f) => JSON.stringify(f)).join(" ")
+    `${self}: 引数は git が知るファイルの、リポのルートからの相対パス (1 つ以上) で、拡張子が ${
+      checkedExts.join("・")
+    } と大文字小文字だけ違うものを含まない。./verify.sh から起動する (${
+      badArgs.map((f) => JSON.stringify(f)).join(" ")
     })`,
   );
   Deno.exit(2);
@@ -74,9 +85,9 @@ const linkTargets = new Set(
   }),
 );
 
-const violations: string[] = [];
+const violations = new Set<string>();
 const report = (file: string, message: string) =>
-  violations.push(`${file}: ${message}`);
+  violations.add(`${file}: ${message}`);
 const messageOf = (e: unknown) => e instanceof Error ? e.message : String(e);
 
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -134,9 +145,8 @@ const anchorsOf = (tokens: Token[]): Set<string> => {
   return anchors;
 };
 
-/** 属性の類 (上の「属性の類」)。 */
 type AttributeClass = "url" | "urlList" | "unconfirmed" | "ignored";
-/** 生の HTML の属性の名前 (小文字) → 類。無い名前は見ない。 */
+/** 属性の名前 → 類。無い名前は見ない。 */
 const attributeClasses = new Map<string, AttributeClass>([
   ["action", "url"],
   ["background", "url"],
@@ -162,43 +172,23 @@ const attributeClasses = new Map<string, AttributeClass>([
   ["usemap", "ignored"],
 ]);
 
-/** 開きタグの後に tokenizer を切り替える、中身の状態 (canon: facts/parse5/tokenizer-start-tags の「属性と状態の切り替え」)。 */
-const textStates = new Map<string, Tokenizer["state"]>([
-  ["title", TokenizerMode.RCDATA],
-  ["textarea", TokenizerMode.RCDATA],
-  ["style", TokenizerMode.RAWTEXT],
-  ["xmp", TokenizerMode.RAWTEXT],
-  ["iframe", TokenizerMode.RAWTEXT],
-  ["noembed", TokenizerMode.RAWTEXT],
-  ["noframes", TokenizerMode.RAWTEXT],
-  ["noscript", TokenizerMode.RAWTEXT],
-  ["script", TokenizerMode.SCRIPT_DATA],
-  ["plaintext", TokenizerMode.PLAINTEXT],
-]);
-
-/** 生の HTML の開きタグの属性の全部。 */
+/** 描画した HTML の木の、全部の要素 (template の中身を含む) の属性。名前は prefix つき。 */
 const attributesOf = (html: string) => {
   const attrs: { name: string; value: string }[] = [];
-  const ignore = () => {};
-  const tokenizer: Tokenizer = new Tokenizer({}, {
-    onStartTag: (tag) => {
-      attrs.push(...tag.attrs);
-      const state = textStates.get(tag.tagName);
-      if (state !== undefined) tokenizer.state = state;
-    },
-    onEndTag: ignore,
-    onComment: ignore,
-    onDoctype: ignore,
-    onEof: ignore,
-    onCharacter: ignore,
-    onNullCharacter: ignore,
-    onWhitespaceCharacter: ignore,
-  });
-  tokenizer.write(html, true);
+  const pending: DefaultTreeAdapterTypes.Node[] = [parseHtml(html)];
+  for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
+    if (!("childNodes" in node)) continue;
+    if ("attrs" in node) {
+      for (const { prefix, name, value } of node.attrs) {
+        attrs.push({ name: prefix ? `${prefix}:${name}` : name, value });
+      }
+    }
+    for (const child of node.childNodes) pending.push(child);
+    if ("content" in node) pending.push(node.content);
+  }
   return attrs;
 };
 
-/** WHATWG URL の parser の前処理 (上の「値は、WHATWG URL の parser の前処理に合わせ」)。 */
 const urlPreprocess = (value: string) => {
   let start = 0;
   let end = value.length;
@@ -211,41 +201,22 @@ type Target = { url: string } | {
   uncheckable: { name: string; value: string };
 };
 
-/** 生の HTML の、単一の URL の属性の値と、URL の列か値の形を確かめていない属性の空でない値と名前。値は urlPreprocess の後のもの。 */
-const htmlTargets = (html: string): Target[] =>
-  attributesOf(html).flatMap(({ name, value: raw }): Target[] => {
-    const value = urlPreprocess(raw);
-    switch (attributeClasses.get(name)) {
-      case "url":
-        return [{ url: value }];
-      case "urlList":
-      case "unconfirmed":
-        return value === "" ? [] : [{ uncheckable: { name, value } }];
-      default:
-        return [];
-    }
-  });
-
-/** リンクと画像の参照先 (参照スタイルのリンクも解決済みで出てくる) と、生の HTML の参照先。 */
-const targetsOf = (tokens: Token[]): Target[] => {
-  const out: Target[] = [];
-  const walk = (tokens: Token[]) => {
-    for (const token of tokens) {
-      if (token.type === "html_block" || token.type === "html_inline") {
-        out.push(...htmlTargets(token.content));
+/** 文書の、単一の URL の属性の値と、URL の列か値の形を確かめていない属性の空でない値と名前。値は urlPreprocess の後のもの。 */
+const targetsOf = (tokens: Token[]): Target[] =>
+  attributesOf(md.renderer.render(tokens, md.options, {})).flatMap(
+    ({ name, value: raw }): Target[] => {
+      const value = urlPreprocess(raw);
+      switch (attributeClasses.get(name)) {
+        case "url":
+          return [{ url: value }];
+        case "urlList":
+        case "unconfirmed":
+          return value === "" ? [] : [{ uncheckable: { name, value } }];
+        default:
+          return [];
       }
-      const url = token.type === "link_open"
-        ? token.attrGet("href")
-        : token.type === "image"
-        ? token.attrGet("src")
-        : null;
-      if (typeof url === "string") out.push({ url });
-      if (token.children) walk(token.children);
-    }
-  };
-  walk(tokens);
-  return out;
-};
+    },
+  );
 
 type Resolved = { segments: string[] } | { problem: string };
 const malformed =
@@ -350,8 +321,8 @@ for (const { file, parsed } of markdown.values()) {
   }
 }
 
-if (violations.length > 0) {
-  console.error(violations.join("\n"));
+if (violations.size > 0) {
+  console.error([...violations].join("\n"));
   Deno.exit(1);
 }
 console.log(
