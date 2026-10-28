@@ -13,7 +13,11 @@
 #   - 本体の作業ツリーのルート: 回す。
 #   - linked worktree のルート: 回す。hook は common git dir に写す (下の「hook」)。
 #   - 親のリポの subdirectory (git が追跡するディレクトリに展開した写しなど): 落ちる。そのまま回すと git は親のリポを見て、hook を親のリポに写し、検査の対象も subdirectory の下に限られる。
-#   - git の作業ツリーでない (リポの外・git dir の中・bare のリポ・safe.directory が要る持ち主の違い): 落ちる。リポの外と持ち主の違いは、理由を git rev-parse が出す。
+#   - git の作業ツリーでない: 落ちる。次のどれか:
+#     - リポの外 (理由は git rev-parse が出す)。
+#     - git dir の中。
+#     - bare のリポ。
+#     - safe.directory が要る持ち主の違い (理由は git rev-parse が出す)。
 # - PATH にあるもの:
 #   - cmp・install: 無ければ hook を揃えられないとする。
 #   - shellcheck: run-checks.ts が確かめる。
@@ -101,12 +105,12 @@ while IFS= read -r v; do
     die "git rev-parse --local-env-vars の出力に、変数の名前でない行がある ($v)。git の版を確かめる"
   unset "$v"
 done <<<"$local_env"
-where=$(git rev-parse --is-inside-work-tree --show-prefix) ||
+worktree=$(git rev-parse --is-inside-work-tree --show-prefix) ||
   die "$PWD を git の作業ツリーとして読めない (理由は上の git)。リポの verify.sh を、git が読めるようにしてから回す"
 # ルートでは true と空の行、subdirectory では true と <prefix>/ を出す
-case $where in
+case $worktree in
 true) ;;
-true?*) die "$PWD は作業ツリーのルートでなく、親のリポの ${where#true?} にある。リポのルートの verify.sh を回す" ;;
+true?*) die "$PWD は作業ツリーのルートでなく、親のリポの ${worktree#true?} にある。リポのルートの verify.sh を回す" ;;
 *) die "$PWD は git の作業ツリーでない (git dir の中か bare のリポ)。リポの作業ツリーのルートの verify.sh を回す" ;;
 esac
 common=$(git rev-parse --path-format=absolute --git-common-dir)
@@ -130,7 +134,7 @@ hook=$hooks/pre-push
 hooks_path_shown=
 unset_cmd=
 config_exit=
-# -z でないと、origin のパスの特殊な文字が C の quote で出る (canon: facts/git/config-sources-and-scopes の「--show-origin の出力の形」)。git config の終了コードは、最後の項目 (exit <コード>) として受ける
+# git config の終了コードは、最後の項目 (exit <コード>) として受ける
 while IFS= read -r -d '' scope; do
   case $scope in
   exit\ *)
@@ -154,6 +158,7 @@ while IFS= read -r -d '' scope; do
 done < <(
   # 置換の中にも set -e が効くので、終了コードは || で受ける (canon: facts/shell/bash-process-substitution-inherits-errexit)
   status=0
+  # -z でないと、origin のパスの特殊な文字が C の quote で出る (canon: facts/git/config-sources-and-scopes の「--show-origin の出力の形」)
   git config -z --show-origin --show-scope --get-all core.hooksPath || status=$?
   printf 'exit %s\0' "$status"
 )
@@ -247,8 +252,7 @@ export TMPDIR
 flags=(--allow-run)
 # 段の子の環境から変数を消すには、Deno.env.toObject で環境を丸ごと写す。それには変数を絞らない --allow-env が要る (canon: facts/deno/env-to-object-requires-unscoped-allow-env)。
 flags+=(--allow-env)
-# run-checks.ts が書くのは、deno test の段の TMPDIR (TMPDIR の下に作る) だけ
+# 段の子の deno は別のプロセスで、この許可を受けない (run-checks.ts の先頭の規則)
 flags+=("--allow-write=$TMPDIR")
-# run-checks.ts が自分で読むファイルは deno.json だけ。段の子の deno は別のプロセスで、この許可を受けない
 flags+=(--allow-read=deno.json)
 exec deno run "${flags[@]}" scripts/run-checks.ts "$hook_failed"
