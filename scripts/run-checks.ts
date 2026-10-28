@@ -11,7 +11,7 @@
  *    - deno.lock は読むだけ。deno.json の lock.frozen による (canon: facts/deno/lock-frozen-config):
  *      - lock を読む subcommand (check・test・run): deno.lock が deno.json と食い違えば落ち、書き換えない。
  *      - fmt・lint: lock を読まない。
- *    - 前提: リポの祖先に、このリポを workspace の member に含む deno.json が無い (下の「入力と環境の定義域」の deno)。在ると lock.frozen は効かず、使う lock は workspace のルートの設定と deno.lock になる。
+ *    - 前提: リポの祖先に、このリポを workspace の member に含む deno.json が無い (在るときは下の「入力と環境の定義域」の deno)。
  * 3. 段の出力を steps の順に出す。
  *    - 通った段: 見出しと標準出力を stdout へ、標準エラーを stderr へ。
  *    - 落ちた段: 見出しと両方を stderr へ。
@@ -55,7 +55,7 @@
  *   - SIGTERM を無視するもの: 猶予の後の SIGKILL で止まる。
  *
  * deno test の段の TMPDIR:
- * - TMPDIR の下にこのプロセスが作ったディレクトリを段の TMPDIR にし、段の後に消す。段の後より前に終わるときは、終了の経路が消す。
+ * - TMPDIR の下にこのプロセスが作ったディレクトリを段の TMPDIR にし、段の後に消す。段の後の消しより前に終わるとき (中断など) は、終了の経路が消す。
  *   - 作るのは test (`*_test.ts`) があるときだけ。作れなければ、理由を出して段の前で exit 1。
  *   - 段の後に消せなければ、段の結果 (exec の例外ならその文言) に、消せないことと手で消すことを足して段を落とす。文言は終了の経路と同じ。
  * - test が中断で消さずに終わる一時ディレクトリ (canon: facts/deno/test-signal-listeners) を、これで消す。
@@ -73,13 +73,17 @@
  * - 環境はそのまま段の子に渡す。差し替えるのは次だけ:
  *   - git (git()): git の場所を決める変数 (git rev-parse --local-env-vars の一覧。canon: facts/git/local-env-vars-and-hook-env) を消す。git は cwd のリポを見る。
  *     - 一覧は、測った版 (git 2.43.0・2.55.0。canon の同じページ) では GIT_DIR などの値によらず同じものを出すので、このプロセスの環境のまま聞く。2.32〜2.42 は測っていない。
- *     - 次のときは理由を出して exit 1: 聞けない (git を起動できない・非 0 で終わる)、一覧のどれかの行が `^GIT_[A-Z_]+$` に合わない (知らない option を、リポの中の git は名前のまま出して exit 0 で終わる。canon の同じページの「知らない option」)。
+ *     - 次のときは理由を出して exit 1:
+ *       - git を起動できないか、git が非 0 で終わる。
+ *       - 一覧のどれかの行が `^GIT_[A-Z_]+$` に合わない。リポの中の git は、知らない option を名前のまま出して exit 0 で終わる (canon の同じページの「知らない option」)。
  *   - deno (deno()):
  *     - 消すもの: 検査の結果を変える変数 (canon: facts/deno/environment-and-config-inputs の「結果を変える」)。
  *     - 残すもの: 同じ canon の「取得だけを変える」「出力の形だけ」の変数。
  *     - 渡すもの: DENO_NO_PACKAGE_JSON=1。
  *     - deno test の段だけ: TMPDIR を段の TMPDIR にする。
- *     - リポの祖先に、このリポを workspace の member に含む deno.json があると、deno はその設定を読む。lint の規則 (同じ canon の「設定ファイル」) と lock (このリポの lock.frozen と deno.lock は使われない。canon: facts/deno/lock-frozen-config の「祖先の workspace の member のとき」) が変わる。flag で止められず (--frozen-lockfile もルートの deno.lock と比べる)、検出もしない。
+ *     - リポの祖先に、このリポを workspace の member に含む deno.json があると、deno はその設定を読む。flag で止められず、検出もしない。変わるもの:
+ *       - lint の規則 (同じ canon の「設定ファイル」)。
+ *       - lock: このリポの lock.frozen と deno.lock は使われず、workspace のルートの設定と deno.lock になる。--frozen-lockfile もルートの deno.lock と比べる (canon: facts/deno/lock-frozen-config の「祖先の workspace の member のとき」)。
  *   - shellcheck (shellcheck()。段と版の確かめ): SHELLCHECK_OPTS を消し、`--norc` を付ける。
  *     - shellcheck は引数の他に SHELLCHECK_OPTS と .shellcheckrc を読み (canon: facts/shellcheck/environment-and-config-inputs)、利用者の指定で手元と CI の結果が分かれる。
  *     - リポの .shellcheckrc も読まないので、directive は各 script に書く。
@@ -159,6 +163,7 @@
  *   - deno info --json の形 (modules[].dependencies[].specifier・modules[].error) は canon の実測。この段の試験が固定し、deno の版を上げたら測り直す。
  *   - deno info は、ネットワークに出ず、deno.json と deno.lock を読み書きしないフラグで回す。指定子は書かれた文字列のまま出る。
  *   - 落ちる (未使用の判定をしない) とき:
+ *     - deno.json の最上位か imports がオブジェクトでない。
  *     - deno info が非 0 で終わる。
  *     - graph の file: の module に error がある (ファイルが無い、構文が壊れている、相対 import 先が無い。deno info は exit 0)。npm: などの file: でない module の error (--no-npm で取らないもの) は見ない。
  *   - 数える参照は .ts の import の指定子だけ。
@@ -362,10 +367,10 @@ async function exec(
   // 待つまでに reject すると unhandled rejection でこのプロセスが落ち、グループが残る
   outputs.catch(() => {});
   let emptied: Promise<void> | undefined;
-  // 中断の経路と exec の finally の両方が呼ぶので、2 回目以降は同じ Promise を返す
+  // 終了の経路と exec の finally の両方が呼ぶので、2 回目以降は同じ Promise を返す
   const empty = () =>
     emptied ??= emptyGroup(child, outputs).then(() => {
-      // 空にできたときだけ記録を消す。空にできなければ残し、中断の経路からも報告する
+      // 空にできたときだけ記録を消す。空にできなければ残し、終了の経路からも報告する
       groups.delete(child.pid);
     });
   groups.set(child.pid, empty);
@@ -417,7 +422,7 @@ const localEnvVars = await (async () => {
     ]);
   }
   return names;
-})();
+})().catch((e) => failBeforeSteps([describe(e)]));
 const git = (args: string[]) => exec("git", args, { unset: localEnvVars });
 
 /** 検査の結果を変える deno の変数。deno 2.9.8 の --help が挙げるもののうちの分類で、文書に無い変数は分類していない (canon: facts/deno/environment-and-config-inputs)。 */
