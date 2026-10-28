@@ -70,6 +70,7 @@ mcp-sluice は、複数の子 MCP サーバーを 1 つのエンドポイント�
   - claude.ai の connector の docs が挙げる仕様は 2025-11-25 まで。
   - Claude Code は 2026-07-28 に対応している (Claude Code の CHANGELOG の v2.1.281 に、2026-07-28 の接続での URL mode の elicitation がある)。
 - SDK v2 は 1 つの handler で両世代を受けられる (`docs/protocol-versions.md`・`examples/dual-era`)。
+- 2025-11-25 の経路を外せる条件: 対象のクライアント (Claude Code・claude.ai・Codex・ChatGPT) が、どれも 2026-07-28 で接続するようになったとき。
 - 子へは、SDK v2 の client を `versionNegotiation: { mode: 'auto' }` で使う。
 - `tools/list` の結果:
   - 利用者ごとに絞るので、`cacheScope: "private"` を付ける (2026-07-28 の caching)。
@@ -115,7 +116,7 @@ authentik 2026.8.5 と main のソースで確認した。
     - `resource` = 公開 URL
     - `authorization_servers` = [issuer]
   - 未認証には 401 と `WWW-Authenticate: Bearer resource_metadata="…"` を返す。claude.ai は 401 でしか認証を始めない (claude.com の connector の docs の authentication の節。200 に付けた `WWW-Authenticate` は無視されると書いてある)。
-  - JWT は次を検証する:
+  - JWT は次を検証する (署名と期限の検証は JOSE のライブラリに任せる):
     - JWKS での署名
     - `iss`
     - `exp`・`nbf`
@@ -186,7 +187,7 @@ gateway:                            # ゲートウェイ自身のツールにも
 ### 4.2 名前
 
 - 公開する名前は `<server>__<tool>`。
-  - `.` を区切りにしない。Messages API のツール名は `^[a-zA-Z0-9_-]{1,128}$` なので。
+  - `.` を区切りにしない。Messages API のツール名は `^[a-zA-Z0-9_-]{1,128}$` なので (`platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools`、2026-10-26)。
 - server id は `^[a-z][a-z0-9_]{0,15}$`。JS の識別子として使える形にする。`gateway` は予約する。
 - 合成した名前が `^[A-Za-z0-9_-]{1,64}$` に収まらないツールは公開しない。そのときは警告を log に出す。
   - 64 の根拠: OpenAI の function 名の上限。
@@ -197,7 +198,7 @@ gateway:                            # ゲートウェイ自身のツールにも
 
 - 起動時に接続し、ツールの一覧をメモリに持つ。
 - 子から `list_changed` が来たら一覧を取り直し、クライアントへも `list_changed` を出す。
-- 切れたら、指数バックオフで再接続する。再接続するまで、その子のツールは一覧から消す。
+- 切れたら、指数バックオフで再接続する (SDK v2 の client が再接続を持てば、それを使う)。再接続するまで、その子のツールは一覧から消す。
 - stdio の子は全利用者で共有する 1 プロセスにする。利用者ごとに分けるのは範囲外。
 
 ### 4.4 同一性の表
@@ -412,7 +413,7 @@ gateway:                            # ゲートウェイ自身のツールにも
     - 時間
     - 引数の hash と大きさ
   - Code Mode のソース: 実行ごとに全文を 1 件出し、`trace_id`・`span_id` で trace とつなぐ。
-    - span の属性に入れない理由: Tempo は 2048 バイトを超える属性を既定で切り詰め、上限を上げると querier が out-of-memory になりうると docs が警告している。
+    - span の属性に入れない理由: Tempo は 2048 バイトを超える属性を既定で切り詰め (`max_attribute_bytes`)、上限を上げると querier が out-of-memory になりうると docs が警告している (grafana/tempo の `docs/sources/tempo/configuration/_index.md`、2026-10-27)。
     - Loki の 1 行の上限が 64 KiB の入力を受けられるかは、未確認 (実装の前に確かめる)。
   - 引数と結果の本文は、既定では記録しない。
 
@@ -452,7 +453,7 @@ compose に、Grafana・Tempo・Loki・Prometheus を同梱する。
 - 前段の reverse proxy で TLS を終端する。
 - claude.ai から使う場合:
   - ゲートウェイと authentik の両方が、インターネットから届く必要がある。
-  - claude.ai の docs は、AS が `160.79.104.0/21` から届くことを求めている。
+  - claude.ai の docs (`claude.com/docs/connectors/building/authentication`、2026-10-26) は、AS が `160.79.104.0/21` から届くことを求めている。
 - stdio の子は、ゲートウェイのコンテナの中で子プロセスとして動く。子は信頼する前提なので、子の IO は制限しない。
 - 秘密は env で渡す。設定ファイルには env の名前だけを書く。秘密は次の 2 つ (将来の `per_user` で、トークンの暗号化の鍵が加わる):
   - 子の資格情報

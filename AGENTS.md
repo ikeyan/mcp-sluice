@@ -29,6 +29,10 @@
 - リポ全体を検証する単一コマンドを用意し、変更時は必ず通す (テスト・lint・型・フォーマット・各種 validator を 1 つの入口に集約)。何を含めるかはリポごとに一度決める設計判断。単一コマンドの緑は必要条件で十分条件ではない。
 - 検査が模擬していない実行時契約 — 実行主体と権限・環境変数・呼び出し元 (orchestrator) — に触れる変更は、その経路を実条件で最低 1 回実測する。全周の再構築でなく変更点に標的を絞った実行プローブでよく、実物が使えなければ同等条件の再現で代替する。実測で確定した契約は可能なら検査として定着させる。
 
+## 初回の準備
+
+- `.claude/settings.json` は ikeyan-skills と superpowers の plugin を有効にするだけで、入れはしない。Claude Code で ikeyan の marketplace (`ikeyan/agent-files`) と公式の marketplace から入れ、信頼する。
+
 ## このリポの仕様
 
 - 仕様の正本は [docs/design.md](docs/design.md)。実装が設計と食い違ったら、同じ commit でどちらかを直して揃える。
@@ -36,6 +40,7 @@
 
 ## このリポの検証
 
+- clone したら、まず `./verify.sh` を 1 回回す。pre-push の hook (`PUSH_OK=1` の判定) は、このとき入る。
 - 単一検証コマンドは `./verify.sh`。CI も同じものを回す。含む検査:
   - `shellcheck`: このリポが持つ shell。agent-sync が置いたもの (`.agent-sync/generated` に載り、中身が記録した id と同じもの) は上流が検査するので除く。
   - `deno fmt --check`・`deno lint`・`deno check`: git が知る `.ts`。`deno lint` は `no-unused-vars` だけ (recommended 全体にすると、deno 2.x の更新で規則が増えて CI が落ちうる)。
