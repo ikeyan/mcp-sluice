@@ -38,7 +38,7 @@
 
 - 単一検証コマンドは `./verify.sh`。CI も同じものを回す。含むもの:
   - shellcheck (このリポが持つ shell。agent-sync が置くもの (`.agent-sync/generated` に載るもの) は上流が検査するので除く)
-  - `deno fmt --check`・`deno lint`・`deno check` (git が知る `.ts`)
+  - `deno fmt --check`・`deno lint`・`deno check` (git が知る `.ts`)。`deno lint` は `no-unused-vars` だけ (recommended 全体にすると、deno 2.x の更新で規則が増えて CI が落ちうる)
   - `deno test` (git が知る `*_test.ts`)
   - JSON の構文 (git が知る `.json`)
   - Markdown のリポ内リンク (git が知る `.md`)
@@ -47,7 +47,8 @@
   - 無ければ `hooks/pre-push` を写す。
   - `hooks/pre-push` と違えば、上書きせず落ちて置き換えのコマンドを示す。
 - `./verify.sh` は `core.hooksPath` が hook をよそへ向けていれば落ちる (設定は書かない)。
-- 必要なもの: `shellcheck` (0.11.0 だけ。違えば `./verify.sh` が落ちる)、`deno` (2.x)、`git`。
+- 必要なもの: `shellcheck` (0.11.0 だけ。違えば `./verify.sh` が落ちる)、`deno` (2.x)、`git` (2.31 以降)。
+- `deno.json` は `"lock": true` で、依存は完全な版で固定する。`minimumDependencyAge` は `P3D` (公開から 3 日未満の版を解決しない。deno の unstable の設定)。`./verify.sh` は `--frozen-lockfile` で回し、`deno.lock` が `deno.json` と食い違えば書き換えず落ちる (直すのは `deno install --frozen=false`)。
 
 ## このリポの言語
 

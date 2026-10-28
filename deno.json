@@ -1,0 +1,8 @@
+{
+  "lock": true,
+  "minimumDependencyAge": "P3D",
+  "imports": {
+    "github-slugger": "npm:github-slugger@2.0.0",
+    "markdown-it": "npm:markdown-it@15.0.2"
+  }
+}
