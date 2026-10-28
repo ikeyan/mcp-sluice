@@ -32,7 +32,7 @@
 ## 初回の準備
 
 - `.claude/settings.json` は ikeyan-skills と superpowers の plugin を宣言する。入り方は環境で違う:
-  - Claude Code on the web: セッションの開始時に自動で入る (canon: facts/claude-code/web-session-auto-installs-declared-plugins)。
+  - Claude Code on the web: この宣言は読まれない。届くのは claude.ai の account と組織で有効にした plugin だけ (canon: facts/claude-code/cloud-session-ignores-repo-declared-plugins)。
   - 手元の Claude Code: 各利用者が shell で次を回して入れる (canon: facts/claude-code/external-plugin-requires-per-user-install-trust)。
     1. marketplace を足す: `claude plugin marketplace add ikeyan/agent-files` (`ikeyan` の名前で登録される)。公式の marketplace (`claude-plugins-official`) は、対話のセッションを開いたことのない機械でだけ `claude plugin marketplace add anthropics/claude-plugins-official` が要る。
     2. plugin を入れる: `claude plugin install ikeyan-skills@ikeyan --scope project` と `claude plugin install superpowers@claude-plugins-official --scope project`。
