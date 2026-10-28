@@ -1,7 +1,7 @@
 /**
  * check-json-md.ts を子として、TMPDIR の下の一時ディレクトリの fixture に回す。
  * - 表の各行: fixture のファイルと引数に対し、終了コードと stderr の違反の行 (順を問わない集合) が一致すること。
- * - 性質: 生成した相対パスへのリンクについて、「リポの外を指す」「リンク先が無い」の報告が、segment ごとに decode して辿るモデルと一致すること。
+ * - 性質: 生成した相対パスへのリンクについて、報告が、最初の # と、その前の最初の ? で割り、パスを segment ごとに decode して辿るモデルと一致すること。
  */
 import fc from "fast-check";
 import { deepStrictEqual } from "node:assert/strict";
@@ -259,7 +259,9 @@ const cases: {
     files: {
       "b.md": "---\ntitle: x: y\n---\n# Real\n",
       "c.md": "---\n---\nEmpty\n",
-      "a.md": "[l](b.md#real) [m](b.md#title-x-y) [n](c.md#empty)\n",
+      "d.md": "---\n---\n# Heading\n",
+      "a.md":
+        "[l](b.md#real) [m](b.md#title-x-y) [n](c.md#empty) [o](d.md#heading)\n",
     },
     code: 1,
     stderr: [
@@ -296,7 +298,6 @@ const cases: {
       "dir.md: 読めない — Is a directory",
       "gone.md: 読めない — No such file or directory",
       "gone.json: 読めない — No such file or directory",
-      "a.md: リンク先を読めない — gone.md (No such file or directory",
     ],
   },
   {
@@ -332,25 +333,52 @@ Deno.test("check-json-md.ts の表", async () => {
 /** リンクを置くファイル (a/b/x.md) の他に、git の一覧に載せるファイル。 */
 const known = ["a/b/x.md", "a/n.md", "a b/n.md"];
 
-/** a/b から path を辿った結果のモデル。辿った先が known のファイルかその親ディレクトリ、外部、自分自身なら undefined。 */
-const model = (path: string): "outside" | "missing" | undefined => {
-  if (path === "" || path.startsWith("//")) return undefined;
-  const out = path.startsWith("/") ? [] : ["a", "b"];
-  for (const raw of path.split("/")) {
-    const s = decodeURIComponent(raw);
-    if (s === "" || s === ".") continue;
-    if (s !== "..") out.push(s);
-    else if (out.pop() === undefined) return "outside";
+const labels = {
+  outside: "リポの外を指す",
+  missing: "リンク先が無い",
+  anchor: "anchor が見出しに無い",
+  notMd: ".md でないファイルの anchor は検査できない",
+};
+
+/** a/b/x.md の url のリンクの報告のモデル。known の .md はどれも見出しを持たない。報告が無ければ undefined。 */
+const model = (url: string): keyof typeof labels | undefined => {
+  if (url.startsWith("//")) return undefined;
+  const hash = url.indexOf("#");
+  const raw = hash < 0 ? "" : url.slice(hash + 1);
+  const anchor = (() => {
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  })();
+  const path = (hash < 0 ? url : url.slice(0, hash)).split("?")[0];
+  const out = path === ""
+    ? ["a", "b", "x.md"]
+    : path.startsWith("/")
+    ? []
+    : ["a", "b"];
+  if (path !== "") {
+    for (const segment of path.split("/")) {
+      const s = decodeURIComponent(segment);
+      if (s === "" || s === ".") continue;
+      if (s !== "..") out.push(s);
+      else if (out.pop() === undefined) return "outside";
+    }
   }
+  const isFile = known.includes(out.join("/"));
   const exists = known.some((f) => {
     const segments = f.split("/");
     return segments.length >= out.length &&
       out.every((s, i) => s === segments[i]);
   });
-  return exists ? undefined : "missing";
+  if (!exists) return "missing";
+  if (anchor === "") return undefined;
+  if (!isFile) return /^L\d+(?:-L\d+)?$/.test(anchor) ? undefined : "notMd";
+  return "anchor";
 };
 
-Deno.test("リポの外を指す・リンク先が無いの報告は、segment ごとに decode して辿るモデルと一致する", async () => {
+Deno.test("リンクの報告は、# と ? で割って segment ごとに decode して辿るモデルと一致する", async () => {
   const path = fc.array(
     fc.constantFrom(
       ".",
@@ -366,6 +394,12 @@ Deno.test("リポの外を指す・リンク先が無いの報告は、segment �
       "%2E",
       "%2F",
       "a%20b",
+      "#",
+      "#L1",
+      "n.md#x",
+      "?q",
+      "x.md?q#y",
+      "%23",
     ),
     { minLength: 1, maxLength: 6 },
   ).map((s) => s.join("/"));
@@ -378,7 +412,6 @@ Deno.test("リポの外を指す・リンク先が無いの報告は、segment �
           "a b/n.md": "",
           "a/b/x.md": paths.map((p) => `- [l](<${p}>)\n`).join(""),
         });
-        const labels = { outside: "リポの外を指す", missing: "リンク先が無い" };
         deepStrictEqual(
           lines(r.stderr),
           paths.flatMap((p) => {

@@ -1,8 +1,8 @@
 /**
  * check-json-md.ts — git が知るファイルのうち、JSON の構文と、Markdown のリポ内リンク・anchor を検査する。run-checks.ts が起動する。
  *
- * 使い方: リポのルートを cwd にして `deno run --allow-read=. <このファイル> <path>...`。
- * - <path> は git が知るファイルの全部 (run-checks.ts が git ls-files から得た一覧)。それぞれリポのルートからの相対パス。
+ * 使い方: リポのルートを cwd にして `deno run --frozen-lockfile --allow-read=. <このファイル> <path>...`。
+ * - <path> は git が知るファイルの全部。それぞれリポのルートからの相対パス。
  *   - `.json` で終わるもの: 構文を検査する。
  *   - `.md` で終わるもの: リンクと anchor を検査する。
  *   - 全部: リンク先が在るかの判定に使う。
@@ -11,7 +11,7 @@
  *   - どれかが正規の相対パスでない (先頭の `/`、空・`.`・`..` の segment)。
  * - 違反があれば stderr に出して exit 1。無ければ件数を stdout に出して exit 0。
  *
- * リンク (GitHub が追跡されたファイルを描画するときの解決に合わせる):
+ * リンク (GitHub が追跡されたファイルを描画するときの解決に合わせる。ただし未確認の前提で、canon に事実が無く、下の規則は GitHub で確かめていない):
  * - 対象:
  *   - Markdown のリンク・画像 (参照スタイルを含む)。
  *   - 生の HTML のタグの `href`・`src`。
@@ -26,7 +26,7 @@
  * - anchor (空なら見ない。%-decode できなければそのままの綴りで比べる):
  *   - 辿った先が `.md` のファイル: その見出しの id のどれかと一致すること。id は github-slugger の規則で作る (canon: facts/github/heading-anchor-ids)。
  *   - 他: GitHub の行の anchor (`L10`・`L10-L20`) だけを受ける。他は検査できないので違反。
- * - ファイルを読めなければ (無い、を含む)、原因の文言のまま違反にする。
+ * - ファイルを読めなければ (無い、を含む)、そのファイル自身の違反 (`<file>: 読めない — <原因の文言>`) にする。読めないリンク先への anchor は見ない (リンク先は引数にあるので、リンク先自身の違反として出る)。
  */
 import GithubSlugger from "github-slugger";
 import MarkdownIt from "markdown-it";
@@ -82,7 +82,7 @@ for (const file of jsonFiles) {
 const md = new MarkdownIt({ html: true });
 type Token = ReturnType<typeof md.parse>[number];
 
-/** 先頭の --- のブロックは、空でも YAML として読めなくても GitHub が本文から外す (canon: facts/github/heading-anchor-ids)。 */
+/** 先頭の --- のブロックは、YAML として読めなくても GitHub が本文から外す (canon: facts/github/heading-anchor-ids)。空のブロックと CRLF の行末も同じ扱いとする (GitHub で確かめていない。同じ canon の「測っていない次元」)。 */
 const parse = (markdown: string): Token[] =>
   md.parse(
     // 残すと --- が見出しの下線になる
@@ -182,19 +182,14 @@ const decodeAnchor = (s: string): string => {
   }
 };
 
+/** path の見出しの anchor。読めなければ undefined (読めないことは path 自身の違反として出る)。 */
 const anchorCache = new Map<string, Set<string> | undefined>();
-const anchorsFor = async (
-  path: string,
-  from: string,
-): Promise<Set<string> | undefined> => {
+const anchorsFor = async (path: string): Promise<Set<string> | undefined> => {
   if (!anchorCache.has(path)) {
-    let text: string | undefined;
-    try {
-      text = await Deno.readTextFile(path);
-    } catch (e) {
-      report(from, `リンク先を読めない — ${path} (${messageOf(e)})`);
-    }
-    anchorCache.set(path, text === undefined ? undefined : anchorsOf(text));
+    anchorCache.set(
+      path,
+      await Deno.readTextFile(path).then(anchorsOf, () => undefined),
+    );
   }
   return anchorCache.get(path);
 };
@@ -214,9 +209,8 @@ for (const file of markdownFiles) {
     const { url } = target;
     if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(url)) continue;
     const hash = url.indexOf("#");
-    const beforeHash = hash < 0 ? url : url.slice(0, hash);
     const anchor = hash < 0 ? "" : decodeAnchor(url.slice(hash + 1));
-    const path = beforeHash.split("?")[0];
+    const path = (hash < 0 ? url : url.slice(0, hash)).split("?")[0];
     const resolved: Resolved = path === ""
       ? { segments: file.split("/") }
       : resolve(dir, path);
@@ -237,7 +231,7 @@ for (const file of markdownFiles) {
       }
       continue;
     }
-    const anchors = await anchorsFor(joined, file);
+    const anchors = await anchorsFor(joined);
     if (anchors !== undefined && !anchors.has(anchor)) {
       report(file, `anchor が見出しに無い — ${url}`);
     }
