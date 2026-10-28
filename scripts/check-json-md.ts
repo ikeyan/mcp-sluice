@@ -15,17 +15,21 @@
  * - 違反があれば stderr に出して exit 1。同じ違反の行は 1 回だけ出す。無ければ件数を stdout に出して exit 0。
  *
  * リンク:
- * - 根拠: GitHub が追跡されたファイルを描画するときの解決に合わせる。ただし未確認の前提で、canon に事実が無く、下の規則は GitHub で確かめていない。
- * - 対象: 文書を markdown-it で HTML に描画し、parse5 の parse で文書の木にした、全部の要素の属性 (canon: facts/markdown-it/render-html、facts/parse5/parse-tree-attributes)。
- *   - parse5 を使うのは、HTML の仕様の木構築で読むため。正規表現や tokenizer 単独では、textarea・script・svg などの文脈の規則を写し続けることになる。
- *   - 生の HTML はそのまま描画される。Markdown のリンク・画像 (参照スタイルを含む) は a の href・img の src になり、値は markdown-it が正規化した href・src と同じ。
+ * - 根拠:
+ *   - 見出しの id: canon の実測 (facts/github/heading-anchor-ids)。
+ *   - リンクのパスの解決 (segment の decode・`..`・起点): 未確認の前提で、GitHub では測っていない。
+ * - 対象: 文書を markdown-it で parse し、GFM の tagfilter を当ててから HTML に描画し、parse5 の parse で文書の木にした、全部の要素の属性 (canon: facts/github/gfm-tagfilter、facts/markdown-it/render-html、facts/parse5/parse-tree-attributes)。
+ *   - tagfilter: 生の HTML (html_block の中の全部の `<`、html_inline の先頭の `<`) のうち、title・textarea・style・xmp・iframe・noembed・noframes・script・plaintext の開き・閉じのタグの `<` を `&lt;` にする。名前は大文字小文字を問わず、名前の後は tab・LF・CR・空白・`>`・`/>` のどれか。
+ *     - 当たったタグは文字になり、中と後ろは木構築で読む。閉じない形も同じ。
+ *     - 当たらない形 (名前の後が FF など) で始まるものは、下の「木に属性が残らないもの」に入る。
+ *   - 生の HTML は tagfilter の後のまま描画される。Markdown のリンク・画像 (参照スタイルを含む) は a の href・img の src になり、値は markdown-it が正規化した href・src と同じ。
  *   - 木に属性が残らないものは見ない。木構築のとおりで、次を含む:
- *     - 中身を要素にしない要素 (title・textarea・style・xmp・iframe・noembed・noframes・noscript・script・plaintext) の中。svg・math の直下の style・title の中は要素になるので見る。
+ *     - 中身を要素にしない要素のうち、tagfilter が文字にしないものの中: noscript (parse5 の scripting の既定で中身が文字になる。閉じなければ文書の終わりまで) と、tagfilter に当たらない形のタグで始まる上の 9 要素。GitHub が noscript を同じに扱うかは未確認。
  *     - コメント (閉じないものは文書の終わりまで) の中。
  *     - 木構築が捨てる開きタグ (body の中の head・frame、select の中の a など)。
  *   - template の中身も見る。
- *   - 木構築は閉じない a などを後の要素に複製するので、同じ違反が重なる (上の「同じ違反の行は 1 回だけ」)。
- *   - 属性の名前は小文字。外来の要素の xlink:href などは prefix つきの名前で見る。値は引用符を外して文字参照を戻したもの。U+0000 と `&#0;` は U+FFFD になり、値の一部として残る。
+ *   - 木構築は閉じない a などを後の要素に複製するので、同じ違反が重なる (上の「同じ違反の行は 1 回だけ」。canon: facts/parse5/parse-tree-attributes)。
+ *   - 属性の名前は小文字。外来の要素の xlink:href などは prefix つきの名前で見る。値は引用符を外して文字参照を戻したもの。U+0000 と `&#0;` は U+FFFD になり、値の一部として残る (canon: facts/markdown-it/render-html、facts/parse5/parse-tree-attributes)。
  *   - 値は、WHATWG URL の parser の前処理に合わせ、前後の C0 制御文字と空白を落とし、中の tab と改行を消してから扱う (canon: facts/url/parser-strips-c0-space-and-tab-newline)。
  *   - 属性の類 (attributeClasses。canon: facts/html/url-valued-attributes の一覧と「値の形」) と値の類ごとの扱い:
  *
@@ -61,13 +65,19 @@ const badArgs = Deno.args.filter((f) =>
   f.split("/").some((s) => s === "" || s === "." || s === "..") ||
   checkedExts.some((e) => !f.endsWith(e) && f.toLowerCase().endsWith(e))
 );
-if (Deno.args.length === 0 || badArgs.length > 0) {
+const passPaths =
+  "git が知るファイルの、リポのルートからの相対パスを渡す (./verify.sh から起動する)";
+if (Deno.args.length === 0) {
+  console.error(`${self}: 引数が無い。${passPaths}`);
+  Deno.exit(2);
+}
+if (badArgs.length > 0) {
   console.error(
-    `${self}: 引数は git が知るファイルの、リポのルートからの相対パス (1 つ以上) で、拡張子が ${
-      checkedExts.join("・")
-    } と大文字小文字だけ違うものを含まない。./verify.sh から起動する (${
+    `${self}: 引数 ${
       badArgs.map((f) => JSON.stringify(f)).join(" ")
-    })`,
+    } が、正規の相対パスでないか、拡張子が ${
+      checkedExts.join("・")
+    } と大文字小文字だけ違う。${passPaths}`,
   );
   Deno.exit(2);
 }
@@ -172,6 +182,23 @@ const attributeClasses = new Map<string, AttributeClass>([
   ["usemap", "ignored"],
 ]);
 
+/** GFM の tagfilter が `<` を `&lt;` にするタグ (canon: facts/github/gfm-tagfilter)。名前の後に続く文字は cmark-gfm の is_tag のとおり。 */
+const filteredTag = String
+  .raw`\/?(?:title|textarea|style|xmp|iframe|noembed|noframes|script|plaintext)(?:[\t\n\r >]|\/>)`;
+const filteredInBlock = new RegExp(`<(?=${filteredTag})`, "gi");
+const filteredAtStart = new RegExp(`^<(?=${filteredTag})`, "i");
+/** GitHub の描画のとおり、生の HTML の token に tagfilter を当てる (tokens を書き換える)。 */
+const tagfilter = (tokens: Token[]) => {
+  for (const token of tokens) {
+    if (token.type === "html_block") {
+      token.content = token.content.replace(filteredInBlock, "&lt;");
+    } else if (token.type === "html_inline") {
+      token.content = token.content.replace(filteredAtStart, "&lt;");
+    }
+    if (token.children) tagfilter(token.children);
+  }
+};
+
 /** 描画した HTML の木の、全部の要素 (template の中身を含む) の属性。名前は prefix つき。 */
 const attributesOf = (html: string) => {
   const attrs: { name: string; value: string }[] = [];
@@ -202,8 +229,9 @@ type Target = { url: string } | {
 };
 
 /** 文書の、単一の URL の属性の値と、URL の列か値の形を確かめていない属性の空でない値と名前。値は urlPreprocess の後のもの。 */
-const targetsOf = (tokens: Token[]): Target[] =>
-  attributesOf(md.renderer.render(tokens, md.options, {})).flatMap(
+const targetsOf = (tokens: Token[]): Target[] => {
+  tagfilter(tokens);
+  return attributesOf(md.renderer.render(tokens, md.options, {})).flatMap(
     ({ name, value: raw }): Target[] => {
       const value = urlPreprocess(raw);
       switch (attributeClasses.get(name)) {
@@ -217,6 +245,7 @@ const targetsOf = (tokens: Token[]): Target[] =>
       }
     },
   );
+};
 
 type Resolved = { segments: string[] } | { problem: string };
 const malformed =

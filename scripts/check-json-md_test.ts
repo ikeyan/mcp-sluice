@@ -2,7 +2,7 @@
  * check-json-md.ts を子として、TMPDIR の下の一時ディレクトリの fixture に回す。
  * - 表の各行: fixture のファイルと引数に対し、終了コードと stderr の違反の行 (順を問わない集合) が一致すること。
  * - 性質: 生成した相対パスへのリンクについて、報告が、最初の # と、その前の最初の ? で割り、パスを segment ごとに decode して辿り、anchor を decode するモデルと一致すること。
- * - 属性の値の前処理: 前・中・後と U+0001〜U+0020 の全部の組 (そのままの文字と文字参照) で、報告が URL の前処理のモデルと一致すること。
+ * - 属性の値の前処理: 前・中・後と U+0000〜U+0020 の全部の組 (そのままの文字と文字参照) で、報告が URL の前処理のモデルと一致すること。
  */
 import fc from "fast-check";
 import { deepStrictEqual } from "node:assert/strict";
@@ -78,6 +78,9 @@ const labels = {
 };
 
 const heading = "# x\n\n## a\n\n## a\n";
+/** 不正な引数の違反の、引数の後から。 */
+const badArg =
+  "正規の相対パスでないか、拡張子が .json・.md と大文字小文字だけ違う。";
 /** 検査できない属性の違反の、属性の名前の後から値の前まで。 */
 const uncheckable =
   "の参照先は検査できない。リポ内のファイルを指すなら Markdown のリンク・画像で書き、この属性を外す";
@@ -152,45 +155,99 @@ const attributeCases = attributeClasses.flatMap(([names, kind]) =>
       : [],
   }))
 );
-/** 中身を要素にしない要素 (canon: facts/parse5/parse-tree-attributes)。 */
-const textElements = [
-  "title",
-  "textarea",
-  "style",
-  "xmp",
-  "iframe",
-  "noembed",
-  "noframes",
-  "noscript",
-  "script",
-  "plaintext",
+/**
+ * 中身を要素にしない要素 (canon: facts/parse5/parse-tree-attributes) の開き・閉じのタグ。
+ * - filtered: GFM の tagfilter が文字にするか (canon: facts/github/gfm-tagfilter)。
+ * - closes: 文字にしないとき、閉じのタグで元に戻るか。
+ */
+const textElements: {
+  open: string;
+  close: string;
+  filtered: boolean;
+  closes: boolean;
+}[] = [
+  ...[
+    "title",
+    "textarea",
+    "style",
+    "xmp",
+    "iframe",
+    "noembed",
+    "noframes",
+    "script",
+    "plaintext",
+    "TEXTAREA",
+  ].map((e) => ({
+    open: `<${e}>`,
+    close: `</${e}>`,
+    filtered: true,
+    closes: true,
+  })),
+  { open: "<textarea/>", close: "</textarea>", filtered: true, closes: true },
+  { open: "<style\t>", close: "</style\n>", filtered: true, closes: true },
+  // 閉じのタグは tagfilter が文字にするので、文書の終わりまで textarea の中
+  {
+    open: "<textarea\f>",
+    close: "</textarea>",
+    filtered: false,
+    closes: false,
+  },
+  { open: "<noscript>", close: "</noscript>", filtered: false, closes: true },
 ];
-/** 要素ごとに、html_block (開きタグだけの行で始まる) と段落の中の html_inline に置く。中の a は見ず、閉じタグの後の a は見る (plaintext は文書の終わりまでが中身)。 */
-const textElementCases = textElements.flatMap((e) =>
+/** タグごとに、閉じる形と閉じない形を、html_block (開きタグの行で始まる) と段落の中の html_inline に置く。 */
+const textElementCases = textElements.flatMap((
+  { open, close, filtered, closes },
+) =>
   [
-    [
-      "html_block",
-      `<${e}>\n<a href="gone.md">x</a>\n</${e}>\n\n<a href="after.md">a</a>\n`,
-    ],
-    [
-      "html_inline",
-      `x <${e}><a href="gone.md">x</a></${e}> <a href="after.md">a</a>\n`,
-    ],
-  ].map(([form, content]) => ({
-    name: `生の HTML: ${e} の中 (${form})`,
-    files: { "a.md": content },
-    code: e === "plaintext" ? 0 : 1,
-    stderr: e === "plaintext" ? [] : [`a.md: ${labels.missing} — after.md`],
-  }))
+    {
+      form: "html_block",
+      content:
+        `${open}\n<a href="gone.md">x</a>\n${close}\n\n<a href="after.md">a</a>\n`,
+      closed: closes,
+    },
+    {
+      form: "閉じない html_block",
+      content: `${open}\n<a href="gone.md">x</a>\n\n<a href="after.md">a</a>\n`,
+      closed: false,
+    },
+    {
+      form: "html_inline",
+      content:
+        `x ${open}<a href="gone.md">x</a>${close} <a href="after.md">a</a>\n`,
+      closed: closes,
+    },
+    {
+      form: "閉じない html_inline",
+      content: `x ${open}<a href="gone.md">x</a>\n\n<a href="after.md">a</a>\n`,
+      closed: false,
+    },
+  ].map(({ form, content, closed }) => {
+    const seen = filtered
+      ? ["gone.md", "after.md"]
+      : closed
+      ? ["after.md"]
+      : [];
+    return {
+      name: `生の HTML: ${JSON.stringify(open)} の中と後ろ (${form})`,
+      files: { "a.md": content },
+      code: seen.length ? 1 : 0,
+      stderr: seen.map((l) => `a.md: ${labels.missing} — ${l}`),
+    };
+  })
 );
-/** svg・math の中の style・title の中の a は HTML の木構築のとおり。svg の desc と math の mi の中は HTML の規則に戻る (canon: facts/parse5/parse-tree-attributes)。 */
+/** 外来の要素 (svg・math) の中の a (canon: facts/parse5/parse-tree-attributes)。 */
 const foreignCases = ([
+  // tagfilter が style・title を文字にし (canon: facts/github/gfm-tagfilter)、a は外来の要素
   ["svg", "style", true],
   ["svg", "title", true],
   ["math", "style", true],
   ["math", "title", true],
-  ["svg", "desc><style", false],
-  ["math", "mi><style", false],
+  // tagfilter に無い noscript は、svg・math の直下では外来の要素で、中の a も要素
+  ["svg", "noscript", true],
+  ["math", "noscript", true],
+  // 統合点 (svg の desc・math の mi) の中は HTML の規則に戻り、noscript の中身は文字
+  ["svg", "desc><noscript", false],
+  ["math", "mi><noscript", false],
 ] as const).flatMap(([outer, inner, seen]) => {
   const body = `<${inner}><a href="gone.md">x</a>`;
   return [
@@ -403,6 +460,39 @@ const cases: {
     stderr: [`a.md: ${labels.missing} — gone.md`],
   },
   {
+    name:
+      "生の HTML: 閉じない textarea (html_inline) の後の段落の Markdown のリンク",
+    files: { "a.md": "x <textarea>\n\n[l](gone.md)\n" },
+    code: 1,
+    stderr: [`a.md: ${labels.missing} — gone.md`],
+  },
+  {
+    // 閉じのタグの無い script の html_block は文書の終わりまで続き、Markdown のリンクは描画されない
+    name: "生の HTML: 閉じない script (html_block) の後の Markdown と生の HTML",
+    files: {
+      "a.md": 'y\n\n<script>\n\n[l](md.md)\n\n<a href="raw.md">r</a>\n',
+    },
+    code: 1,
+    stderr: [`a.md: ${labels.missing} — raw.md`],
+  },
+  {
+    // canon: facts/parse5/parse-tree-attributes の「body の中の head・frame の開きタグと、select の中の a は捨てられ」
+    name: "生の HTML: 木構築が捨てる開きタグの属性",
+    files: {
+      "a.md":
+        'x <select><a href="gone.md">x</a></select> <frame src="gone.md"> <head profile="gone.md"> <a href="after.md">a</a>\n',
+    },
+    code: 1,
+    stderr: [`a.md: ${labels.missing} — after.md`],
+  },
+  {
+    // canon: facts/parse5/parse-tree-attributes の「外来の要素の xlink:href は prefix "xlink"・name "href"」
+    name: "生の HTML: svg の中の a の xlink:href は prefix つきの名前",
+    files: { "a.md": 'x <svg><a xlink:href="gone.md">x</a></svg>\n' },
+    code: 1,
+    stderr: [`a.md: xlink:href ${uncheckable} — xlink:href=gone.md`],
+  },
+  {
     name: "生の HTML: template の中身",
     files: { "a.md": '<template><a href="gone.md">x</a></template>\n' },
     code: 1,
@@ -423,7 +513,7 @@ const cases: {
     files: { "A.JSON": "{}", "B.Md": "", "c.md": "" },
     code: 2,
     prefix: true,
-    stderr: ["check-json-md.ts: 引数は git が知るファイルの"],
+    stderr: [`check-json-md.ts: 引数 "A.JSON" "B.Md" が、${badArg}`],
   },
   {
     name: ".md でないファイルとディレクトリの anchor",
@@ -568,15 +658,21 @@ const cases: {
   ...attributeCases,
   ...textElementCases,
   ...foreignCases,
-  ...[[], ["/a.md"], ["a//b.md"], ["./a.md"], ["a/../b.md"], [""], ["a/"]].map((
-    args,
-  ) => ({
-    name: `引数 ${JSON.stringify(args)}`,
+  {
+    name: "引数が無い",
     files: { "a.md": "" },
-    args,
+    args: [],
     code: 2,
     prefix: true,
-    stderr: ["check-json-md.ts: 引数は git が知るファイルの"],
+    stderr: ["check-json-md.ts: 引数が無い。"],
+  },
+  ...["/a.md", "a//b.md", "./a.md", "a/../b.md", "", "a/"].map((arg) => ({
+    name: `引数 ${JSON.stringify(arg)}`,
+    files: { "a.md": "" },
+    args: ["a.md", arg],
+    code: 2,
+    prefix: true,
+    stderr: [`check-json-md.ts: 引数 ${JSON.stringify(arg)} が、${badArg}`],
   })),
 ];
 
@@ -695,17 +791,16 @@ Deno.test("リンクの報告は、# と ? で割り、segment ごとに decode 
   );
 });
 
-Deno.test("属性の値の前処理: 前・中・後の U+0001〜U+0020 (tab・LF・CR・FF を含む)、そのままの文字と文字参照の全部の組", async () => {
-  // canon: facts/url/parser-strips-c0-space-and-tab-newline。前後は落とし、中は tab・LF・CR だけを消す
-  const codes = Array.from({ length: 0x20 }, (_, i) => i + 1);
+Deno.test("属性の値の前処理: 前・中・後の U+0000〜U+0020 (tab・LF・CR・FF を含む)、そのままの文字と文字参照の全部の組", async () => {
+  const codes = Array.from({ length: 0x21 }, (_, i) => i);
   const values = codes.flatMap((code) => {
     const c = String.fromCharCode(code);
-    return (["前", "中", "後"] as const).flatMap((at) => {
+    return ["前", "中", "後"].flatMap((at) => {
       const place = (x: string) =>
         at === "前" ? `${x}b.md` : at === "中" ? `b${x}.md` : `b.md${x}`;
       return [
-        { written: place(c), at, c },
-        { written: place(`&#x${code.toString(16)};`), at, c },
+        { written: place(c), at, c, place },
+        { written: place(`&#x${code.toString(16)};`), at, c, place },
       ];
     });
   });
@@ -718,13 +813,14 @@ Deno.test("属性の値の前処理: 前・中・後の U+0001〜U+0020 (tab・L
       "",
     ].join("\n"),
   });
-  // markdown-it と parse5 は CR を LF にする (canon: facts/markdown-it/render-html、facts/parse5/parse-tree-attributes)
   const reported = new Set(
-    values.flatMap(({ at, c }) =>
-      at === "中" && !"\t\n\r".includes(c)
-        ? [`a.md: ${labels.missing} — b${c}.md`]
-        : []
-    ),
+    values.flatMap(({ at, c, place }) => {
+      // markdown-it の normalize と parse5 は U+0000 を U+FFFD にする (canon: facts/markdown-it/render-html、facts/parse5/parse-tree-attributes)
+      const read = c === "\0" ? "\ufffd" : c;
+      // canon: facts/url/parser-strips-c0-space-and-tab-newline。前後は U+0020 以下を落とし、中は tab・LF・CR だけを消す。markdown-it と parse5 は CR を LF にする (上と同じ canon)
+      const kept = read > " " || (at === "中" && !"\t\n\r".includes(read));
+      return kept ? [`a.md: ${labels.missing} — ${place(read)}`] : [];
+    }),
   );
   deepStrictEqual(lines(r.stderr), [...reported].sort());
 });
