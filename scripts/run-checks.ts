@@ -14,45 +14,46 @@
  *    - 書き込みは 1 つずつ行い、失敗しても残りを出す。
  *      - BrokenPipe (`./verify.sh | head`。canon: facts/deno/stdout-broken-pipe): 終了コードを変えない。
  *      - 他の失敗 (`/dev/full`、ファイルの大きさの上限など。canon: facts/deno/stdout-write-error-kinds): 理由を stderr に出し、exit 1。
- * 4. どれかの段が落ちたか、引数が 1 (下の「入力と環境の定義域」) なら exit 1。
+ * 4. どれかの段が落ちたか、引数が 1 (下の「入力と環境の定義域」) なら exit 1。exit はどれも下の「終了」の経路を通る。
  *
  * 段の子のプロセスグループ:
- * - 子は各自のプロセスグループで起動し (Deno.Command の detached。canon: facts/deno/command-spawn)、exec は正常終了でも中断でも、戻る前にグループに SIGTERM と SIGKILL を送る (emptyGroup)。
+ * - 子は各自のプロセスグループで起動し (Deno.Command の detached。canon: facts/deno/command-spawn)、exec は戻る前にグループに SIGTERM と SIGKILL を送る (emptyGroup)。exec の戻りを誰も待たなくても、下の「終了」の経路が exit の前に空にする。
  *   - 先頭が終わった後に残る孫も、段が終わる前に止まる。
  *   - 自分で setsid してグループを抜けた子孫は止めない。
  *   - Linux では、この uid で送れない子孫 (別の uid のもの) は止まらない。グループの中に送れたものが 1 つでもあれば kill は通るので、残ったことも検出しない (canon: facts/deno/command-spawn の「別の uid のグループへの kill」)。
  * - グループを空にできない (kill が投げる。別の uid のものだけが残ったグループなど) とき: emptyGroup が pgid と止め方 (`kill -KILL -- -<pgid>`) を含むエラーを投げる。
- *   - 通常の経路では、その段がその文言で落ちる (deno test の段は、TMPDIR を消せないことも足す)。
- *   - そのグループの記録は消さないので、後で中断しても、中断の経路が同じ文言を出す。
+ *   - 本流では、その段がその文言で落ちる (deno test の段は、TMPDIR を消せないことも足す)。
+ *   - そのグループの記録は消さないので、終了の経路も同じ文言を出す。
  * - exec が待つものと、その上限:
- *   - 先頭の終わり: 上限を置かない (段の実行そのもの)。中断では emptyGroup の SIGKILL で終わる。
+ *   - 先頭の終わり: 上限を置かない (段の実行そのもの)。中断では終了の経路の emptyGroup の SIGKILL で終わる。
  *   - emptyGroup: SIGTERM の後、先頭の終わりと出力の pipe が閉じるのを graceMs まで待つ。SIGKILL の後の先頭の回収は、SIGKILL を捕まえられないので返る。
  *   - 出力の pipe: emptyGroup の後、graceMs まで待つ。閉じなければ読み端を cancel し (読めた分が返る。canon: facts/deno/command-spawn の「出力の pipe を持ったまま残る子孫と、読み端の cancel」)、その子を「pipe が閉じない」の失敗にする。
  * - pipe の書き端を持ちうるもの:
  *   - 先頭: 終われば閉じる。
  *   - グループの中の子孫: emptyGroup が止める。
- *   - グループを抜けた子孫: 止めない。cancel の後の書き込みは EPIPE になる。
+ *   - グループを抜けた子孫: 止めない。
  * - 状態 (groups):
  *   - 対象: exec が起動した子のプロセスグループ。起動から、emptyGroup が成功するまで記録する。
  *   - 鍵: pgid (子の pid)。
  *   - 等しいとみなす条件: 同じ exec の呼び出し。
  *
- * 中断 (SIGHUP・SIGINT・SIGTERM。終了コードは 128 + シグナルの番号で、下の signals):
- * - 最初の 1 回で、次の後始末をしてから、そのシグナルの終了コードで終わる。後始末が失敗したら、理由と手で直す方法を stderr に出して次へ進む。
- *   1. 記録している全部のグループを同時に空にする。失敗の文言は emptyGroup のもの (上の「段の子のプロセスグループ」)。
- *   2. deno test の段の TMPDIR を消す。失敗するのは、消せないものがあるとき (グループを抜けた子孫が書き続けているなど)。
- * - 終了を決めるのはこの経路だけ。中断の後の本流は何も出さず、この経路の exit を待つ。
- * - 2 回目以降のシグナルは何もしない。
- * - 中断の後は子を起動しない。
+ * 終了:
+ * - このプロセスが終わる経路は finish の 1 つだけ。本流の exit (引数の誤り・段より前の失敗・段の後) も中断 (SIGHUP・SIGINT・SIGTERM) も finish を通る。
+ * - finish は次の後始末をしてから exit する。後始末が失敗したら、理由と手で直す方法を stderr に出して次へ進む。
+ *   1. 記録している全部のグループ (上の「状態 (groups)」) を同時に空にする。失敗の文言は emptyGroup のもの。
+ *   2. deno test の段の TMPDIR が残っていれば消す。失敗するのは、消せないものがあるとき (グループを抜けた子孫が書き続けているなど)。
+ * - 終了コードは最初の finish の呼び出しのもの。中断なら 128 + シグナルの番号 (下の signals)。
+ * - 後の呼び出し (2 回目以降のシグナル、中断の後の本流) は何もせず、最初の経路の exit を待つ。
+ * - finish が始まった後は、本流は何も出さず、exec は子を起動せずに待つ。
  * - 中断の時点ごとの扱い (run-checks_test.ts が固定する):
- *   - 段より前 (git ls-files などの最中): その子のグループを空にして終わる。
+ *   - 段より前 (git rev-parse・git ls-files などの最中): その子のグループを空にして終わる。
  *   - 先頭は SIGTERM で終わったが、孫が残っている: 孫は猶予の後の SIGKILL で止まる。
  *   - SIGTERM を無視するもの: 猶予の後の SIGKILL で止まる。
  *
  * deno test の段の TMPDIR:
- * - TMPDIR の下にこのプロセスが作ったディレクトリを段の TMPDIR にし、段の後と中断で消す。
+ * - TMPDIR の下にこのプロセスが作ったディレクトリを段の TMPDIR にし、段の後に消す。段の後より前に終わるときは、終了の経路が消す。
  *   - 作るのは test (`*_test.ts`) があるときだけ。作れなければ、理由を出して段の前で exit 1。
- *   - 段の後に消せなければ、段の結果 (exec の例外ならその文言) に、消せないことと手で消すことを足して段を落とす。文言は中断の経路と同じ。
+ *   - 段の後に消せなければ、段の結果 (exec の例外ならその文言) に、消せないことと手で消すことを足して段を落とす。文言は終了の経路と同じ。
  * - test が中断で消さずに終わる一時ディレクトリ (canon: facts/deno/test-signal-listeners) を、これで消す。
  * - 外せる条件: deno test が SIGTERM で finally を回し、SIGINT でも test の後始末を終えてから終わるようになったとき。
  *
@@ -155,15 +156,6 @@ const self = "run-checks.ts";
 const dec = new TextDecoder();
 const enc = new TextEncoder();
 
-const [state] = Deno.args;
-if (Deno.args.length !== 1 || (state !== "0" && state !== "1")) {
-  console.error(
-    `${self}: 引数は hook を揃えた結果 (0 か 1) の 1 つだけ。./verify.sh から起動する (${
-      Deno.args.join(" ")
-    })`,
-  );
-  Deno.exit(2);
-}
 const tmpdir = Deno.env.get("TMPDIR");
 
 interface Run {
@@ -258,35 +250,55 @@ async function emptyGroup(
 
 /** deno test の段の TMPDIR。消すのは remove で、並行に呼んでも 1 回だけ消す。 */
 let testTmp: { path: string; remove: () => Promise<void> } | undefined;
-/** testTmp を消せないときの文言。通常の経路と中断の経路で同じものを出す。 */
+/** testTmp を消せないときの文言。段の結果と終了の経路で同じものを出す。 */
 const testTmpLeft = (path: string, e: unknown) =>
   `${self}: deno test の段の TMPDIR (${path}) を消せない。手で消す — ${
     messageOf(e)
   }`;
 
-/** 中断が始まっていれば、その経路 (解決しない)。 */
-let interruption: Promise<never> | undefined;
+/** 終了の経路が始まっていれば、その経路 (解決しない)。 */
+let finishing: Promise<never> | undefined;
+/** 終了の経路 (上の「終了」)。後の呼び出しは最初の経路を返す。 */
+const finish = (code: number): Promise<never> =>
+  finishing ??= (async () => {
+    const emptied = await Promise.allSettled(
+      [...groups.values()].map((empty) => empty()),
+    );
+    for (const r of emptied) {
+      if (r.status === "rejected") {
+        console.error(`${self}: ${messageOf(r.reason)}`);
+      }
+    }
+    if (testTmp) {
+      try {
+        await testTmp.remove();
+      } catch (e) {
+        console.error(testTmpLeft(testTmp.path, e));
+      }
+    }
+    Deno.exit(code);
+  })();
 for (const [signal, code] of signals) {
-  Deno.addSignalListener(signal, () => {
-    interruption ??= (async () => {
-      const emptied = await Promise.allSettled(
-        [...groups.values()].map((empty) => empty()),
-      );
-      for (const r of emptied) {
-        if (r.status === "rejected") {
-          console.error(`${self}: ${messageOf(r.reason)}`);
-        }
-      }
-      if (testTmp) {
-        try {
-          await testTmp.remove();
-        } catch (e) {
-          console.error(testTmpLeft(testTmp.path, e));
-        }
-      }
-      Deno.exit(code);
-    })();
-  });
+  Deno.addSignalListener(signal, () => void finish(code));
+}
+/** 段より前の失敗を出して終わる。終了の経路が始まっていれば、何も出さずにそれを待つ。 */
+const failBeforeSteps = async (problems: string[]): Promise<never> => {
+  await finishing;
+  console.error(
+    problems.map((p) => `${self}: ${p}`).join("\n") +
+      "\n検査の段は回していない",
+  );
+  return finish(1);
+};
+
+const [state] = Deno.args;
+if (Deno.args.length !== 1 || (state !== "0" && state !== "1")) {
+  console.error(
+    `${self}: 引数は hook を揃えた結果 (0 か 1) の 1 つだけ。./verify.sh から起動する (${
+      Deno.args.join(" ")
+    })`,
+  );
+  await finish(2);
 }
 
 /** 子の環境の、このプロセスの環境からの差分。 */
@@ -321,7 +333,7 @@ async function exec(
   args: string[],
   { set = {}, unset = [] }: EnvChange = {},
 ): Promise<Run> {
-  if (interruption) throw new Error("中断した");
+  await finishing;
   const env = Deno.env.toObject();
   for (const name of unset) delete env[name];
   const child = new Deno.Command(cmd, {
@@ -373,20 +385,15 @@ const localEnvVars = await (async () => {
   try {
     r = await exec("git", ["rev-parse", "--local-env-vars"]);
   } catch (e) {
-    console.error(
-      `${self}: git rev-parse --local-env-vars を起動できない。git を PATH に置く — ${
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+    return failBeforeSteps([
+      `git rev-parse --local-env-vars を起動できない。git を PATH に置く — ${
         messageOf(e)
-      }\n検査の段は回していない`,
-    );
-    Deno.exit(1);
+      }`,
+    ]);
   }
   if (r.code !== 0) {
-    console.error(
-      `${self}: ${
-        exited("git rev-parse --local-env-vars", r)
-      }検査の段は回していない`,
-    );
-    Deno.exit(1);
+    return failBeforeSteps([exited("git rev-parse --local-env-vars", r)]);
   }
   return dec.decode(r.out).split("\n").filter(Boolean);
 })();
@@ -611,7 +618,7 @@ const [listing, others] = await Promise.all([
     ),
   ),
 ]);
-await interruption;
+await finishing;
 const files = listing.files;
 const withExt = (ext: string) => files.filter((f) => f.endsWith(ext));
 const dotSlash = (f: string) => `./${f}`;
@@ -620,7 +627,7 @@ const tests = ts.filter((f) => f.endsWith("_test.ts"));
 const preProblems = [...listing.problems, ...others.flat()];
 if (preProblems.length === 0 && tests.length) {
   try {
-    // 中断の経路が作りかけを見落とさないように、同期で作る
+    // 終了の経路が作りかけを見落とさないように、同期で作る
     const path = Deno.makeTempDirSync({ dir: tmpdir, prefix: "run-checks-" });
     let removal: Promise<void> | undefined;
     testTmp = {
@@ -637,13 +644,7 @@ if (preProblems.length === 0 && tests.length) {
     );
   }
 }
-if (preProblems.length) {
-  console.error(
-    preProblems.map((p) => `${self}: ${p}`).join("\n") +
-      "\n検査の段は回していない",
-  );
-  Deno.exit(1);
-}
+if (preProblems.length) await failBeforeSteps(preProblems);
 
 const noTargets = "対象のファイルが無い";
 /** targets があれば、`./` を前置した名前を run に渡す。無ければ段を通す。 */
@@ -770,7 +771,7 @@ const results = await Promise.all(
     ...await run().catch((e): Run => fail(describe(e))),
   })),
 );
-await interruption;
+await finishing;
 
 const writeErrors = new Set<string>();
 const write = (
@@ -801,6 +802,8 @@ for (const r of results) {
   }
 }
 for (const message of writeErrors) err(enc.encode(`${self}: ${message}\n`));
-Deno.exit(
+// TMPDIR の後始末は deno test の段の結果に出したので、終了の経路では扱わない
+testTmp = undefined;
+await finish(
   state === "1" || writeErrors.size > 0 || !results.every(passed) ? 1 : 0,
 );

@@ -802,6 +802,30 @@ Deno.test("段より前の確かめ: shellcheck の版、git ls-files、項目�
       })
     ),
     withRepo({}, async (dir) => {
+      const g = `${dir}/.git`;
+      // 孫は TERM を無視し、出力の pipe を持たずにグループに残る
+      const r = await runChecks(dir, "0", {
+        PATH: `${await fakePath(dir, {
+          git: [
+            "#!/bin/sh",
+            `[ "$*" = "ls-files -z --others --exclude-standard" ] && { (trap '' TERM; sleep 3; ${
+              mark("survived")
+            }) >/dev/null 2>&1 & echo boom >&2; exit 3; }`,
+            `exec "${which("git")}" "$@"`,
+          ].join("\n"),
+        })}:${baseEnv.PATH}`,
+        FAKE_MARKS: g,
+      });
+      await sleep(3500);
+      expect(
+        "段より前の失敗でも、exit の前に子のグループが空になる",
+        unstaged(r) &&
+          r.stderr.includes("git ls-files --others が exit 3") &&
+          !await exists(`${g}/survived`),
+        r.stdout + r.stderr,
+      );
+    }),
+    withRepo({}, async (dir) => {
       const bin = `${dir}/.git/no-git-bin`;
       await Deno.mkdir(bin);
       await ln(which("deno"), `${bin}/deno`);
@@ -1334,44 +1358,48 @@ Deno.test("中断: 段のグループを空にし、128 + シグナルの番号�
         )
       )
     ),
-    // 段より前 (git ls-files の最中)
-    withRepo({}, async (dir) => {
-      const g = `${dir}/.git`;
-      const bin = await fakePath(dir, {
-        git: [
-          "#!/bin/sh",
-          `if [ "$*" = "ls-files -z -s -t --cached" ]; then ${
-            mark("started")
-          }; sleep 4; ${mark("survived")}; exit 0; fi`,
-          `exec "${which("git")}" "$@"`,
-        ].join("\n"),
-        shellcheck: `#!/bin/sh\n${version}\n`,
-      });
-      const child = spawnChecks(dir, "0", { PATH: bin, FAKE_MARKS: g });
-      const started = await poll(() => exists(`${g}/started`));
-      killChild(child, "SIGTERM");
-      const r = await child.output();
-      await sleep(4500);
-      const got = {
-        started,
-        code: r.code,
-        stdout: dec.decode(r.stdout),
-        stderr: dec.decode(r.stderr),
-        survived: await exists(`${g}/survived`),
-      };
-      expect(
-        "段より前",
-        JSON.stringify(got) ===
-          JSON.stringify({
-            started: true,
-            code: 143,
-            stdout: "",
-            stderr: "",
-            survived: false,
-          }),
-        JSON.stringify(got),
-      );
-    }),
+    // 段より前 (git rev-parse・git ls-files の最中)
+    ...["rev-parse --local-env-vars", "ls-files -z -s -t --cached"].map((
+      args,
+    ) =>
+      withRepo({}, async (dir) => {
+        const g = `${dir}/.git`;
+        const bin = await fakePath(dir, {
+          git: [
+            "#!/bin/sh",
+            `if [ "$*" = "${args}" ]; then ${mark("started")}; sleep 4; ${
+              mark("survived")
+            }; exit 0; fi`,
+            `exec "${which("git")}" "$@"`,
+          ].join("\n"),
+          shellcheck: `#!/bin/sh\n${version}\n`,
+        });
+        const child = spawnChecks(dir, "0", { PATH: bin, FAKE_MARKS: g });
+        const started = await poll(() => exists(`${g}/started`));
+        killChild(child, "SIGTERM");
+        const r = await child.output();
+        await sleep(4500);
+        const got = {
+          started,
+          code: r.code,
+          stdout: dec.decode(r.stdout),
+          stderr: dec.decode(r.stderr),
+          survived: await exists(`${g}/survived`),
+        };
+        expect(
+          `段より前 (git ${args})`,
+          JSON.stringify(got) ===
+            JSON.stringify({
+              started: true,
+              code: 143,
+              stdout: "",
+              stderr: "",
+              survived: false,
+            }),
+          JSON.stringify(got),
+        );
+      })
+    ),
     // deno test の段。TERM を無視する孫が TMPDIR に書き続けても、TMPDIR は残らない
     withRepo({}, async (dir) => {
       // 孫のループと test の待ちは、run-checks.ts が猶予の後に止めるより長く、lifetimeMs より短い
