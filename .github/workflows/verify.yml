@@ -20,12 +20,16 @@ jobs:
           deno-version: "2.9.8"
       # runner image 同梱の shellcheck は版が違い、指摘の出方が違う (canon: facts/shellcheck/sc2015-version-difference)。
       # 外せる条件: ubuntu-24.04 の同梱の shellcheck が scripts/run-checks.ts の shellcheckVersion と同じ版になったとき。
+      # - 同梱の版を見る場所: https://raw.githubusercontent.com/actions/runner-images/main/images/ubuntu/Ubuntu2404-Readme.md の表の shellcheck の行 (canon: facts/github-actions/ubuntu-2404-runner-bundled-tools)。
+      # - 外すときの手順: この step と SHELLCHECK_VERSION を消し、CI の verify が通ることを確かめる。
       - env:
           # scripts/run-checks.ts の shellcheckVersion と同じ値にする
           SHELLCHECK_VERSION: "0.11.0"
         run: |
-          curl -fsSLo "$RUNNER_TEMP/shellcheck.tar.xz" "https://github.com/koalaman/shellcheck/releases/download/v$SHELLCHECK_VERSION/shellcheck-v$SHELLCHECK_VERSION.linux.x86_64.tar.xz"
-          echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  $RUNNER_TEMP/shellcheck.tar.xz" | sha256sum -c -
-          tar -xJf "$RUNNER_TEMP/shellcheck.tar.xz" -C "$RUNNER_TEMP"
-          sudo install -m 755 "$RUNNER_TEMP/shellcheck-v$SHELLCHECK_VERSION/shellcheck" /usr/local/bin/shellcheck
+          archive=$RUNNER_TEMP/shellcheck.tar.xz
+          extracted=$RUNNER_TEMP/shellcheck-v$SHELLCHECK_VERSION
+          curl -fsSLo "$archive" "https://github.com/koalaman/shellcheck/releases/download/v$SHELLCHECK_VERSION/shellcheck-v$SHELLCHECK_VERSION.linux.x86_64.tar.xz"
+          echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  $archive" | sha256sum -c -
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          sudo install -m 755 "$extracted/shellcheck" /usr/local/bin/shellcheck
       - run: ./verify.sh
