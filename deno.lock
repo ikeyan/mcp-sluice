@@ -1,6 +1,7 @@
 {
   "version": "5",
   "specifiers": {
+    "npm:fast-check@4.10.2": "4.10.2",
     "npm:github-slugger@2.0.0": "2.0.0",
     "npm:markdown-it@15.0.2": "15.0.2"
   },
@@ -10,6 +11,12 @@
     },
     "entities@8.1.0": {
       "integrity": "sha512-kxL7msIffSuh9aaFAMD7rxAIuTRMAHMeBtgHW2yUdWw732ZNh4MehkF2gdjvtdmikkaIP9bFDDJOPlsvm7avrA=="
+    },
+    "fast-check@4.10.2": {
+      "integrity": "sha512-iK2f+YrcmoeGqk6fA0ea2bptcu/itMIm4NfEozq6N25+aG6h7s5HZbB/k1aV7b5w5sFLMCbbtRUsTVR+BgC3xw==",
+      "dependencies": [
+        "pure-rand"
+      ]
     },
     "github-slugger@2.0.0": {
       "integrity": "sha512-IaOQ9puYtjrkq7Y0Ygl9KDZnrf/aiUJYUpVf89y8kyaxbRG7Y1SrX/jaumrv81vc61+kiMempujsM3Yw7w5qcw=="
@@ -38,12 +45,16 @@
     "punycode.js@2.3.1": {
       "integrity": "sha512-uxFIHU0YlHYhDQtV4R9J6a52SLx28BCjT+4ieh7IGbgwVJWO+km431c4yRlREUAsAmt/uMjQUyQHNEPf0M39CA=="
     },
+    "pure-rand@8.4.2": {
+      "integrity": "sha512-vvuOGgcuPJAirlHvuQw1TrOiw7ptaIXXmIbNuiNOY6lNGJJH49PQ1Kj4nd783nPdQhQdicgOjVI2yI/9BD6/Ng=="
+    },
     "uc.micro@3.0.0": {
       "integrity": "sha512-U3PppEkleoTnIfi8BozMx3yju3qc/L6SwqWo2Sw+54PX+PX0q9I+r1Um5HCmqD7n9VDX5/v3vQH/AjA6deDdtw=="
     }
   },
   "workspace": {
     "dependencies": [
+      "npm:fast-check@4.10.2",
       "npm:github-slugger@2.0.0",
       "npm:markdown-it@15.0.2"
     ]
