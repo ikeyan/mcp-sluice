@@ -5,7 +5,11 @@
  *   1. 最初の # と、その前の最初の ? で割る。
  *   2. パスを segment ごとに decode して辿る。
  *   3. anchor を decode する。
- *   4. a/c.txt への行の anchor を、形で判定し、次に中身を空・不正な UTF-8・NUL・CR の順に見て最初に当たる類で判定し、どれでもなければ行数で判定する。
+ *   4. a/c.txt への行の anchor を、形で判定する。形を受けるなら、中身の類を次の順に見て最初に当たるもので判定し、どれにも当たらなければ行数で判定する:
+ *      - 空。
+ *      - UTF-8 として不正。
+ *      - NUL を含む。
+ *      - CR を含む。
  * - 属性の値の前処理: 前・中・後と U+0000〜U+0020 の全部の組 (そのままの文字と文字参照) で、報告が URL の前処理のモデルと一致すること。
  */
 import fc from "fast-check";
@@ -79,7 +83,7 @@ const assignable = (got: string[], want: string[], prefix: boolean) => {
 };
 
 /** 検査できない形の anchor の違反の、先の名詞の後から — の前まで。 */
-const uncheckableAnchor = "への anchor は検査できない。anchor を外す";
+const uncheckableSuffix = "への anchor は検査できない。anchor を外す";
 /** 違反の行の、ファイルの後から — の前まで。 */
 const labels = {
   malformed:
@@ -89,11 +93,11 @@ const labels = {
   anchor: "anchor が見出しに無い。リンク先の見出しの id に合わせる",
   notMd:
     ".md でないファイルへの anchor は、L<行番号> の形 (先頭に 0 を置かない) だけ検査できる。L<行番号> にするか、anchor を外す",
-  emptyAnchor: `空のファイル${uncheckableAnchor}`,
-  nonUtf8Anchor: `UTF-8 として不正なファイル${uncheckableAnchor}`,
-  nulAnchor: `NUL を含むファイル${uncheckableAnchor}`,
-  crAnchor: `CR を含むファイル${uncheckableAnchor}`,
-  dirAnchor: `ディレクトリ${uncheckableAnchor}`,
+  emptyAnchor: `空のファイル${uncheckableSuffix}`,
+  nonUtf8Anchor: `UTF-8 として不正なファイル${uncheckableSuffix}`,
+  nulAnchor: `NUL を含むファイル${uncheckableSuffix}`,
+  crAnchor: `CR を含むファイル${uncheckableSuffix}`,
+  dirAnchor: `ディレクトリ${uncheckableSuffix}`,
   noLine:
     "行の anchor の行がファイルに無い。1 から行数までの番号にするか、anchor を外す",
 };
@@ -603,7 +607,7 @@ const cases: {
       "行の anchor: 空のファイル、UTF-8 として不正なファイル、NUL を含むファイル、CR を含むファイルは検査できない",
     files: {
       "empty.txt": "",
-      // 次の 6 つは UTF-8 として不正。不正の類は各行の右
+      // 次の 6 つは UTF-8 として不正。
       "ff.dat": new Uint8Array([0x61, 0xff, 0x0a]), // UTF-8 に現れないバイト
       "cont.dat": new Uint8Array([0x61, 0x80, 0x0a]), // 単独の継続バイト
       "cut.dat": new Uint8Array([0x61, 0x0a, 0xe3, 0x81]), // EOF で切れた列
@@ -819,9 +823,9 @@ Deno.test("check-json-md.ts の表", async () => {
 
 /**
  * a/c.txt の中身。canon: facts/github/blob-line-anchors の「行の anchor の入力の次元」の、区切り (LF・CRLF・CR)・LF の数・最後のバイト・空・テキストでない blob (不正な UTF-8・NUL) を、次の断片を並べて作る。
- * - `e3 81` は、後に `80` が来れば正しい UTF-8 の 1 文字になり、他が来るか終わりなら不正になる。
+ * - `e3 81` は、後に 80〜BF の 1 バイトが来れば正しい UTF-8 の 1 文字 (3 バイトの 1 文字) になり、それ以外のバイトや終わりなら不正になる。
  */
-const content = fc.array(
+const fileBytes = fc.array(
   fc.oneof(
     { arbitrary: fc.constant([0x61]), weight: 3 }, // a
     { arbitrary: fc.constant([0x0a]), weight: 3 }, // LF
@@ -838,18 +842,18 @@ const content = fc.array(
 /** 性質のテストの fixture のファイル。キーは相対パス、値はその中身 (a/c.txt の中身とリンクの列から作る)。 */
 const propertyFiles: Record<
   string,
-  (c: Uint8Array, links: string[]) => string | Uint8Array
+  (bytes: Uint8Array, links: string[]) => string | Uint8Array
 > = {
   "a/b/x.md": (_, links) => links.map((p) => `- [l](<${p}>)\n`).join(""),
   "a/n.md": () => "",
   "a b/n.md": () => "",
-  "a/c.txt": (c) => c,
+  "a/c.txt": (bytes) => bytes,
 };
 /** git の一覧に載せるファイル。 */
 const known = Object.keys(propertyFiles);
 
 /** %-decode したもの。できなければ undefined。 */
-const decode = (s: string) => {
+const percentDecodeModel = (s: string) => {
   try {
     return decodeURIComponent(s);
   } catch (e) {
@@ -861,14 +865,14 @@ const decode = (s: string) => {
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 /** a/c.txt への L<行番号> の行の anchor の報告のモデル。検査できる中身なら、行数は LF で割った行の数 (最後の LF の後の空の行は数えない)。 */
 const lineModel = (
-  c: Uint8Array,
+  bytes: Uint8Array,
   line: number,
 ): keyof typeof labels | undefined => {
-  // 空・テキストでない blob・CR を含むファイルの行の anchor は、GitHub で測っていない (canon: facts/github/blob-line-anchors の「測っていないもの」)
-  if (c.length === 0) return "emptyAnchor";
+  // 検査できない類と、当たるものが複数のときの順は check-json-md.ts の「行の anchor」
+  if (bytes.length === 0) return "emptyAnchor";
   let text: string;
   try {
-    text = utf8.decode(c);
+    text = utf8.decode(bytes);
   } catch (e) {
     if (!(e instanceof TypeError)) throw e;
     return "nonUtf8Anchor";
@@ -879,10 +883,10 @@ const lineModel = (
   return line >= 1 && line <= rows ? undefined : "noLine";
 };
 
-/** a/b/x.md の url のリンクの報告のモデル。known の .md はどれも見出しを持たない。a/c.txt の中身は c。報告が無ければ undefined。 */
+/** a/b/x.md の url のリンクの報告のモデル。known の .md はどれも見出しを持たない。a/c.txt の中身は bytes。報告が無ければ undefined。 */
 const model = (
   url: string,
-  c: Uint8Array,
+  bytes: Uint8Array,
 ): keyof typeof labels | undefined => {
   if (url.startsWith("//")) return undefined;
   const hash = url.indexOf("#");
@@ -895,7 +899,7 @@ const model = (
     : ["a", "b"];
   if (path !== "") {
     for (const segment of path.split("/")) {
-      const s = decode(segment);
+      const s = percentDecodeModel(segment);
       if (s === undefined) return "malformed";
       if (s === "" || s === ".") continue;
       if (s !== "..") out.push(s);
@@ -913,7 +917,7 @@ const model = (
   });
   if (!exists) return "missing";
   if (raw === "") return undefined;
-  const anchor = decode(raw);
+  const anchor = percentDecodeModel(raw);
   if (anchor === undefined) return "malformed";
   if (file === undefined) return "dirAnchor";
   if (!file.endsWith(".md")) {
@@ -921,7 +925,7 @@ const model = (
     if (line === null || (line[1].length > 1 && line[1].startsWith("0"))) {
       return "notMd";
     }
-    return lineModel(c, Number(line[1]));
+    return lineModel(bytes, Number(line[1]));
   }
   return "anchor";
 };
@@ -967,8 +971,8 @@ Deno.test("リンクと a/c.txt への行の anchor の報告は、ファイル�
     fc.asyncProperty(
       fc.uniqueArray(lineLink, { maxLength: 15 }),
       fc.uniqueArray(path, { minLength: 1, maxLength: 20 }),
-      content,
-      async (generated, paths, c) => {
+      fileBytes,
+      async (generated, paths, bytes) => {
         const links = [
           ...new Set([
             ...[...fixedLines, ...generated].map((l) => `../c.txt#${l}`),
@@ -979,13 +983,13 @@ Deno.test("リンクと a/c.txt への行の anchor の報告は、ファイル�
           Object.fromEntries(
             Object.entries(propertyFiles).map((
               [f, make],
-            ) => [f, make(c, links)]),
+            ) => [f, make(bytes, links)]),
           ),
         );
         deepStrictEqual(
           lines(r.stderr),
           links.flatMap((p) => {
-            const m = model(p, c);
+            const m = model(p, bytes);
             return m === undefined ? [] : [`a/b/x.md: ${labels[m]} — ${p}`];
           }).sort(),
         );

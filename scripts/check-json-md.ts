@@ -68,13 +68,14 @@
  *     - 行数を数えるのは、行の anchor の先になった .md でないファイルだけ。
  *     - 読めなければ、リンクを置いた .md の違反。
  *   - 次は GitHub の描画を測っていない (blob の canon の「測っていないもの」) ので、検査できない形として違反にする:
- *     - 他の形の anchor (範囲の `L10-L20`、先頭に 0 のある行番号 `L01` を含む)。L<行番号> の形にすれば受ける。
+ *     - 他の形の anchor (範囲の `L10-L20`、先頭に 0 のある行番号 `L01` を含む)。
  *     - 次のファイルへの行の anchor (当たるものが複数なら、上から最初のものの文言で報告する):
  *       - 空のファイル。
- *       - テキストでない blob: UTF-8 として不正なファイルと、NUL を含むファイル。
+ *       - UTF-8 として不正なファイル。
+ *       - NUL を含むファイル。
  *       - CR を含むファイル (CRLF と CR だけの区切りを含む)。
  *   - 検査できない形 (上の箇条とディレクトリ):
- *     - 直し方は anchor を外すこと。
+ *     - 直し方は anchor を外す。他の形の anchor だけは、L<行番号> の形にしてもよい。
  *     - blob の canon の「確かめ方」で GitHub の描画を確かめ、行が在ると分かれば、受ける形に足す。
  * - `.json`・`.md` を読めない (無い、を含む) か UTF-8 として不正なら、そのファイル自身の違反にする。そういう .md への anchor は見ない。
  * - 違反の行は `<file>: <何が>。<どう直すか> — <リンクか原因の文言>`。
@@ -301,7 +302,7 @@ type Resolved = { segments: string[] } | { problem: string };
 const malformed =
   "不正な %-エンコード。% の後に 16 進 2 桁を置くか、%XX の列を UTF-8 の 1 文字に完成させる (% そのものは %25)";
 
-/** %-decode できなければ undefined。decodeURIComponent は、文字列の引数には URIError だけを投げる (canon: facts/ecmascript/decode-uri-component-throws-only-urierror)。 */
+/** %-decode できなければ undefined。URIError 以外の例外は投げ直す。 */
 const percentDecode = (s: string): string | undefined => {
   try {
     return decodeURIComponent(s);
