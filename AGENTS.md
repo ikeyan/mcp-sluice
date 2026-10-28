@@ -34,13 +34,16 @@
 - `.claude/settings.json` は ikeyan-skills と superpowers の plugin を宣言する。入り方は環境で違う:
   - Claude Code on the web: 公式 docs (2026-10-28) によると、届くのは claude.ai の account と組織で有効にした plugin。このリポの宣言は手元の Claude Code 向け (canon: facts/claude-code/cloud-session-ignores-repo-declared-plugins)。
   - 手元の Claude Code: 各利用者が shell で入れる (canon: facts/claude-code/external-plugin-requires-per-user-install-trust)。
+    - 版の範囲: claude 2.1.195 以降 (外部の plugin を各利用者が入れる版)。下の手順の `--scope project` の書き先は 2.1.312 で測った (canon の同じページ)。
     - 前提: 公式の marketplace (`claude-plugins-official`) が登録されている。
       - 最初の対話のセッションで Claude Code が足す。
       - 対話のセッションを開いたことのない機械では、先に `claude plugin marketplace add anthropics/claude-plugins-official` で足す。
     - 手順 (cwd はこのリポのルート):
       1. marketplace を足す: `claude plugin marketplace add ikeyan/agent-files` (`ikeyan` の名前で登録される)。
       2. plugin を入れる: `claude plugin install ikeyan-skills@ikeyan --scope project` と `claude plugin install superpowers@claude-plugins-official --scope project`。
-    - cwd がリポのルートでなくても、`--scope project` はエラーにならずに cwd の `.claude/settings.json` に書く (リポのルートの `.claude/settings.json` には書かない)。
+    - cwd がリポのルートでなくても、`--scope project` はエラーにならずに cwd の `.claude/settings.json` に書く (リポのルートの `.claude/settings.json` には書かない。canon: facts/claude-code/external-plugin-requires-per-user-install-trust)。
+      - 測った範囲: claude 2.1.312・Linux、cwd がリポの subdirectory。
+      - 確かめていないもの: macOS と、cwd の祖先に既存の `.claude/settings.json` があるとき。
 
 ## このリポの仕様
 
@@ -68,7 +71,7 @@
     - imports の判定。
     - 出力の順と終了コード。
     - 終了 (中断を含む)。
-    - 版の範囲とその上げ方。
+    - 版の範囲とその上げ方。CI が使う版は `.github/workflows/verify.yml` にある。
   - `scripts/check-json-md.ts`: リンクと anchor の解決。
 - 各検査が見るもの:
   - 段より前:
@@ -85,10 +88,6 @@
   - `deno.json` の `imports`: 各キーが `.ts` の import 指定子から使われていること。
   - `scripts/check-json-md.ts`: `.json` の構文と、`.md` のリポ内リンク・anchor。
 - このリポの `.ts` が export を持つようになったら、未使用の export・module の検査を足す。
-- 版の範囲は次の場所に書く。
-  - `verify.sh` の事前条件。
-  - `scripts/run-checks.ts` の先頭の「版」。
-  - CI が使う版: `.github/workflows/verify.yml`。
 - 必要なもの:
   - `bash`
   - `cmp`
@@ -96,6 +95,7 @@
   - `shellcheck`
   - `deno`
   - `git`
+  - `uname`・`dirname`・`rm`・`mkdir`・`ln`
 - 依存は `deno.json` に完全な版で書き、`deno.lock` で固定する。新しすぎる版を避ける `minimumDependencyAge` の意味は canon: facts/deno/minimum-dependency-age。
 - `deno.lock` が `deno.json` と食い違えば `./verify.sh` が落ちる。直すのは `deno install --frozen=false`。
 
