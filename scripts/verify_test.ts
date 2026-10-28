@@ -16,9 +16,11 @@
  * - 中断の test: 写している最中に SIGTERM を受けると、一時ファイルを残さない。
  * - TMPDIR の値は、canon: facts/shell/string-input-categories の分類から生成して回す。
  * - git rev-parse --local-env-vars の各行の形は、fake の git が出す行を生成して、[A-Z] が ASCII の外の大文字を含む locale で回す (canon: facts/shell/bash-regex-range-locale)。
- *   - 回し方: その locale の環境で verify.sh を回す。回す前に、その環境の bash で `[[ É =~ ^[A-Z]$ ]]` が真になることを確かめる。
- *   - locale: Linux では en_US.UTF-8 を localedef で一時の dir に作り (test の終わりに消す)、LOCPATH で指す。他の OS では系の en_US.UTF-8。
- *   - 確かめが偽のとき: Linux では、次元を確かめられないので落ちる。他の OS では、その OS の bash ではこの次元が起きないことを stderr に出し、locale を替えずに回す。
+ *   - 回す前に、その locale の bash で `[[ É =~ ^[A-Z]$ ]]` が真になることを確かめる。
+ *   - OS ごとの違い:
+ *     - Linux: en_US.UTF-8 を localedef で一時の dir に作り、LOCPATH で指す (canon: facts/glibc/localedef-and-locpath-inputs)。確かめが偽なら、次元を確かめられないので落ちる。
+ *     - 他の OS: 系の en_US.UTF-8。確かめが偽なら、その OS の bash ではこの次元が起きないことを stderr に出し、現在の locale のまま回す。
+ *   - 後始末: localedef で作った dir は test の終わりに消す。
  * - 子の環境と symlink の作り方、test が起動したものの寿命と fixture の消し方は、run-checks_test.ts の先頭と同じ。
  */
 import fc from "fast-check";
@@ -277,13 +279,14 @@ async function readHooks(gitDir: string) {
   return out;
 }
 
-/** verify.sh の起動のしかた。cwd と $0。exec なら bash を介さず $0 を直に起動する (1 行目の env が bash を引く)。 */
+/** verify.sh の起動のしかた。cwd と $0。shebang なら bash を介さず $0 を直に起動する (1 行目の env が bash を引く)。 */
 interface Invocation {
   cwd: string;
   arg0: string;
-  exec?: true;
+  shebang?: true;
 }
-const direct = (dir: string): Invocation => ({
+/** dir を cwd にし、bash に dir の verify.sh を渡して起動する。 */
+const viaBash = (dir: string): Invocation => ({
   cwd: dir,
   arg0: `${dir}/verify.sh`,
 });
@@ -293,7 +296,7 @@ type EnvChange = Record<string, string | undefined>;
 
 /** verify.sh を回す。 */
 async function verify(
-  { cwd, arg0, exec }: Invocation,
+  { cwd, arg0, shebang }: Invocation,
   change: EnvChange,
   args: string[] = [],
 ) {
@@ -302,7 +305,7 @@ async function verify(
     if (value !== undefined) env[name] = value;
   }
   const r =
-    await (exec
+    await (shebang
       ? spawn(arg0, { args, cwd, env, clearEnv: true })
       : spawn("bash", {
         // -- が無いと、- で始まる $0 を bash が option と読む
@@ -551,10 +554,10 @@ const missingTools: (
   {
     tools: ["bash"],
     state: "無い",
-    invoke: (dir) => Promise.resolve({ ...direct(dir), exec: true }),
+    invoke: (dir) => Promise.resolve({ ...viaBash(dir), shebang: true }),
     code: 127,
     hooks: {},
-    // env の文言は OS で違う (Linux の coreutils は 'bash'、macOS は bash)
+    // env の文言は OS で違う
     stderr: ["bash", ": No such file or directory"],
   },
 ];
@@ -784,7 +787,7 @@ cases.push(
     name: "親のリポの subdirectory に写しを置いた",
     invoke: async (_, e) => {
       await placeFixture(`${e}/sub`);
-      return direct(`${e}/sub`);
+      return viaBash(`${e}/sub`);
     },
     code: 1,
     hooks: null,
@@ -794,7 +797,7 @@ cases.push(
     name: "git dir の中に写しを置いた",
     invoke: async (_, e) => {
       await placeFixture(`${e}/.git/sub`);
-      return direct(`${e}/.git/sub`);
+      return viaBash(`${e}/.git/sub`);
     },
     code: 1,
     hooks: null,
@@ -1035,7 +1038,7 @@ const runCase = (c: Case): Promise<string[]> =>
         env.PATH = `${bin}:${baseEnv.PATH}`;
       }
       const lock = await Deno.readTextFile(`${dir}/deno.lock`);
-      const invocation = await c.invoke?.(dir, elsewhere) ?? direct(dir);
+      const invocation = await c.invoke?.(dir, elsewhere) ?? viaBash(dir);
       const r = await verify(invocation, env, c.args);
       const got = {
         code: r.code,
@@ -1092,16 +1095,21 @@ Deno.test("verify.sh の hook の状態と環境", async () => {
   deepStrictEqual((await Promise.all(cases.map(runCase))).flat(), []);
 });
 
-/** [A-Z] が ASCII の外の大文字を含む locale の変数 (このファイルの先頭の「locale」)。Linux では dir に locale を作る。 */
+/** [A-Z] が ASCII の外の大文字を含む locale の名前 (このファイルの先頭の「OS ごとの違い」)。 */
+const wideLocale = "en_US.UTF-8";
+/** wideLocale を使う子の環境の差分。Linux では dir に locale を作る。 */
 async function wideRangeLocale(dir: string): Promise<Record<string, string>> {
   const linux = Deno.build.os === "linux";
   const env: Record<string, string> = linux
-    ? { LOCPATH: dir, LC_ALL: "en_US.UTF-8" }
-    : { LC_ALL: "en_US.UTF-8" };
+    ? { LOCPATH: dir, LC_ALL: wideLocale }
+    : { LC_ALL: wideLocale };
   if (linux) {
+    // localedef は -i の定義を cwd と I18NPATH からも探し、POSIXLY_CORRECT で振る舞いを変える (canon: facts/glibc/localedef-and-locpath-inputs)
+    const { I18NPATH: _, POSIXLY_CORRECT: __, ...localedefEnv } = baseEnv;
     const r = await spawn("localedef", {
-      args: ["-i", "en_US", "-f", "UTF-8", `${dir}/en_US.UTF-8`],
-      env: baseEnv,
+      args: ["-i", "en_US", "-f", "UTF-8", `${dir}/${wideLocale}`],
+      cwd: dir,
+      env: localedefEnv,
       clearEnv: true,
     }).output();
     if (!r.success) {
@@ -1116,11 +1124,11 @@ async function wideRangeLocale(dir: string): Promise<Record<string, string>> {
   if (probe.success) return env;
   if (linux) {
     throw new Error(
-      "localedef で作った en_US.UTF-8 で [[ É =~ ^[A-Z]$ ]] が偽。[A-Z] が ASCII の外を含む locale の次元を確かめられない",
+      `localedef で作った ${wideLocale} で [[ É =~ ^[A-Z]$ ]] が偽。[A-Z] が ASCII の外を含む locale の次元を確かめられない`,
     );
   }
   console.error(
-    `${Deno.build.os} の bash では、en_US.UTF-8 の [A-Z] が É を含まない (この次元が起きない)。locale を替えずに回す`,
+    `${Deno.build.os} の bash では、${wideLocale} の [A-Z] が É を含まない (この次元が起きない)。現在の locale のまま回す`,
   );
   return {};
 }
@@ -1273,7 +1281,7 @@ Deno.test("linked worktree で回すと、hook は common git dir の hooks に�
         "x",
       );
       await git(dir, "worktree", "add", "-q", `${outside}/wt`);
-      const r = await verify(direct(`${outside}/wt`), {});
+      const r = await verify(viaBash(`${outside}/wt`), {});
       const real = await Deno.realPath(dir);
       deepStrictEqual(
         {
