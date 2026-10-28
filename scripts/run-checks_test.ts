@@ -594,12 +594,12 @@ Deno.test("中断: 段のグループを空にし、128 + シグナルの番号�
             "#!/bin/sh",
             version,
             `trap 'echo > "${g}/terminated"; exit 143' TERM`,
-            `(sleep 1; echo > "${g}/survived") &`,
+            `(sleep 3; echo > "${g}/survived") &`,
             `echo > "${g}/started"`,
             "wait",
           ].join("\n"),
         [signal],
-        1500,
+        3500,
       ).then((r) =>
         expect(
           `段の最中の ${signal}`,
@@ -616,12 +616,12 @@ Deno.test("中断: 段のグループを空にし、128 + シグナルの番号�
           "#!/bin/sh",
           version,
           "trap 'exit 143' TERM",
-          `(trap '' TERM; sleep 3; echo > "${g}/survived") &`,
+          `(trap '' TERM; sleep 5; echo > "${g}/survived") &`,
           `echo > "${g}/started"`,
           "wait",
         ].join("\n"),
       ["SIGTERM"],
-      2000,
+      3500,
     ).then((r) =>
       expect(
         "孫が残る",
@@ -638,11 +638,11 @@ Deno.test("中断: 段のグループを空にし、128 + シグナルの番号�
             version,
             "trap '' TERM",
             `echo > "${g}/started"`,
-            "sleep 3",
+            "sleep 5",
             `echo > "${g}/survived"`,
           ].join("\n"),
         signals as Deno.Signal[],
-        2000,
+        3500,
       ).then((r) =>
         expect(
           `TERM を無視する先頭 (${signals.join(" → ")})`,
@@ -658,7 +658,7 @@ Deno.test("中断: 段のグループを空にし、128 + シグナルの番号�
       const bin = await fakePath(dir, {
         git: [
           "#!/bin/sh",
-          `if [ "$1 $2 $3" = "ls-files -z --cached" ]; then echo > "${g}/started"; sleep 2; echo > "${g}/survived"; exit 0; fi`,
+          `if [ "$1 $2 $3" = "ls-files -z --cached" ]; then echo > "${g}/started"; sleep 4; echo > "${g}/survived"; exit 0; fi`,
           `exec "${which("git")}" "$@"`,
         ].join("\n"),
         shellcheck: `#!/bin/sh\n${version}\n`,
@@ -667,7 +667,7 @@ Deno.test("中断: 段のグループを空にし、128 + シグナルの番号�
       const started = await poll(() => exists(`${g}/started`));
       child.kill("SIGTERM");
       const r = await child.output();
-      await sleep(2500);
+      await sleep(4500);
       const got = {
         started,
         code: r.code,
