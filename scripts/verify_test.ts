@@ -84,13 +84,20 @@ async function removeEventually(dir: string) {
   }
 }
 
+/** dir を作って fn に渡し、終われば消す。fn が投げたら、消せなくても fn の例外を投げる (消せないことは stderr に出す)。 */
 const withTempDir = async <T>(fn: (dir: string) => Promise<T>): Promise<T> => {
   const dir = await Deno.makeTempDir({ dir: tmpdir });
+  let result: T;
   try {
-    return await fn(dir);
-  } finally {
-    await removeEventually(dir);
+    result = await fn(dir);
+  } catch (e) {
+    await removeEventually(dir).catch((left) =>
+      console.error(`${dir} を消せない — ${left}`)
+    );
+    throw e;
   }
+  await removeEventually(dir);
+  return result;
 };
 
 const spawn = (cmd: string, options: Deno.CommandOptions) =>
@@ -767,7 +774,7 @@ cases.push(
     hooks: null,
     stderr: "verify.sh: 引数は受けない (x)",
   },
-  ...([["空", ""], ["未設定", undefined]] as const).map(([name, value]) => ({
+  ...[["空", ""], ["未設定", undefined]].map(([name, value]) => ({
     name: `TMPDIR が${name}なら /tmp を解決したもの`,
     env: () => ({ TMPDIR: value }),
     ...copied,
@@ -810,6 +817,33 @@ cases.push(
     code: 1,
     hooks: copiedHooks,
     stderr: "が , を含む",
+  },
+  {
+    // hook は deno の exec より前に揃える
+    name: "deno が PATH に無い",
+    prepare: async (dir) => {
+      const bin = `${dir}/.git/no-deno-bin`;
+      await Deno.mkdir(bin);
+      for (
+        const name of [
+          "bash",
+          "uname",
+          "dirname",
+          "git",
+          "cmp",
+          "install",
+          "mkdir",
+          "ln",
+          "rm",
+        ]
+      ) {
+        await ln(await which(name), `${bin}/${name}`);
+      }
+    },
+    env: (_, dir) => ({ PATH: `${dir}/.git/no-deno-bin` }),
+    code: 127,
+    hooks: copiedHooks,
+    stderr: "deno: not found",
   },
   {
     name: "deno.lock が deno.json と食い違えば落ちる",
@@ -921,7 +955,7 @@ Deno.test("verify.sh の hook の状態と環境", async () => {
 });
 
 Deno.test("TMPDIR の値の文字", async () => {
-  // 次元: canon: facts/shell/string-input-categories の全分類と、glob の ? [、改行 (, は cases の行)
+  // 次元: canon: facts/shell/string-input-categories の全分類と、glob の ? [、改行。`,` は cases の行で検査する
   const chars = [
     "\t",
     "\x01",
@@ -938,25 +972,33 @@ Deno.test("TMPDIR の値の文字", async () => {
     "[",
     "\n",
   ];
+  /** TMPDIR を .git の下の name のディレクトリにして回した、期待との違い。 */
+  const runName = (name: string) =>
+    runCase({
+      name: `TMPDIR が ${JSON.stringify(name)}`,
+      prepare: (dir) => Deno.mkdir(`${dir}/.git/${name}`),
+      env: (_, dir) => ({ TMPDIR: `${dir}/.git/${name}` }),
+      ...copied,
+      tmpdir: (realDir) => `${realDir}/.git/${name}`,
+    });
+  // 各文字を 1 つずつ
+  deepStrictEqual(
+    (await Promise.all(chars.map((c) => runName(`a${c}b`)))).flat(),
+    [],
+  );
+  // 組み合わせ: 先頭の - と、2 文字以上の並び
   const nameArb = fc.record({
     head: fc.constantFrom("", "-x", "--help"),
-    body: fc.array(fc.constantFrom(...chars), { minLength: 1, maxLength: 4 }),
+    body: fc.array(fc.constantFrom(...chars), { minLength: 2, maxLength: 4 }),
   }).map(({ head, body }) => `${head}a${body.join("")}b`);
   await fc.assert(
     fc.asyncProperty(
       fc.uniqueArray(nameArb, { minLength: 1, maxLength: 4 }),
-      async (names) => {
-        const mismatches = await Promise.all(names.map((name) =>
-          runCase({
-            name: `TMPDIR が ${JSON.stringify(name)}`,
-            prepare: (dir) => Deno.mkdir(`${dir}/.git/${name}`),
-            env: (_, dir) => ({ TMPDIR: `${dir}/.git/${name}` }),
-            ...copied,
-            tmpdir: (realDir) => `${realDir}/.git/${name}`,
-          })
-        ));
-        deepStrictEqual(mismatches.flat(), []);
-      },
+      async (names) =>
+        deepStrictEqual(
+          (await Promise.all(names.map(runName))).flat(),
+          [],
+        ),
     ),
     { numRuns: 5, includeErrorInReport: true },
   );

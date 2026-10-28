@@ -63,13 +63,20 @@ async function removeEventually(dir: string) {
   }
 }
 
+/** dir を作って fn に渡し、終われば消す。fn が投げたら、消せなくても fn の例外を投げる (消せないことは stderr に出す)。 */
 const withTempDir = async <T>(fn: (dir: string) => Promise<T>): Promise<T> => {
   const dir = await Deno.makeTempDir({ dir: tmpdir });
+  let result: T;
   try {
-    return await fn(dir);
-  } finally {
-    await removeEventually(dir);
+    result = await fn(dir);
+  } catch (e) {
+    await removeEventually(dir).catch((left) =>
+      console.error(`${dir} を消せない — ${left}`)
+    );
+    throw e;
   }
+  await removeEventually(dir);
+  return result;
 };
 
 const spawn = (cmd: string, options: Deno.CommandOptions) =>
@@ -129,7 +136,7 @@ const verifyFlags = await withTempDir(async (dir) => {
   await Deno.mkdir(`${dir}/bin`);
   await Deno.writeTextFile(
     `${dir}/bin/deno`,
-    `#!/bin/sh\nprintf '%s\\0' "$@" > "$FAKE_ARGS"\n`,
+    `#!/bin/sh\nprintf '%s\\0' "$@" > "\${FAKE_ARGS:?FAKE_ARGS が無い}"\n`,
     { mode: 0o755 },
   );
   await spawn("bash", {
@@ -217,6 +224,9 @@ async function fakePath(dir: string, fakes: Record<string, string>) {
 }
 
 const bad = "#!/bin/sh\necho $1\n";
+/** 指摘の無い .ts と、通る test。 */
+const emptyModule = "export {};\n";
+const passingTest = 'Deno.test("t", () => {});\n';
 /** 段の見出し。 */
 const failedHead = (name: string) => `== ${name}: 落ちた`;
 const passedHead = (name: string) => `== ${name}: 通った`;
@@ -334,7 +344,7 @@ Deno.test("引数・TMPDIR・出力の経路と順", async () => {
         ),
       },
     ].map(({ name, value, flags }) =>
-      withRepo({ "a_test.ts": 'Deno.test("t", () => {});\n' }, async (dir) => {
+      withRepo({ "a_test.ts": passingTest }, async (dir) => {
         const r = await runChecks(dir, "0", { TMPDIR: value }, flags);
         expect(
           `TMPDIR が${name}なら、deno test の段の TMPDIR を作らずに段の前で落ちる`,
@@ -345,7 +355,7 @@ Deno.test("引数・TMPDIR・出力の経路と順", async () => {
         );
       })
     ),
-    withRepo({ "a.ts": "export {};\n" }, async (dir) => {
+    withRepo({ "a.ts": emptyModule }, async (dir) => {
       const r = await runChecks(dir, "0", { TMPDIR: "" });
       expect(
         "test が無ければ、TMPDIR が空でも通る",
@@ -353,7 +363,7 @@ Deno.test("引数・TMPDIR・出力の経路と順", async () => {
         `${r.stdout}\n${r.stderr}`,
       );
     }),
-    withRepo({ "a_test.ts": 'Deno.test("t", () => {});\n' }, async (dir) => {
+    withRepo({ "a_test.ts": passingTest }, async (dir) => {
       const r = await runChecks(dir, "0", { TMPDIR: `${dir}/.git/nowhere` });
       expect(
         "deno test の段の TMPDIR を作れない",
@@ -364,7 +374,7 @@ Deno.test("引数・TMPDIR・出力の経路と順", async () => {
         r.stderr,
       );
     }),
-    withRepo({ "a.ts": "export {};\n" }, async (dir) => {
+    withRepo({ "a.ts": emptyModule }, async (dir) => {
       const r = await runChecks(dir, "0", { TMPDIR: `${dir}/.git/nowhere` });
       expect(
         "test が無ければ、TMPDIR に作れなくても通る",
@@ -490,7 +500,7 @@ Deno.test("deno の子の環境", async () => {
   ];
   const ts = ["a.ts", "a_test.ts"];
   await withRepo({
-    ...Object.fromEntries(ts.map((f) => [f, "export {};\n"])),
+    ...Object.fromEntries(ts.map((f) => [f, emptyModule])),
     "a.md": "",
   }, async (dir) => {
     const g = `${dir}/.git`;
@@ -500,10 +510,10 @@ Deno.test("deno の子の環境", async () => {
     const bin = await fakePath(dir, {
       deno: [
         "#!/bin/sh",
-        'case " $* " in *" $FAKE_SELF "*) ;; *)',
+        'case " $* " in *" ${FAKE_SELF:?FAKE_SELF が無い} "*) ;; *)',
         `  { echo "$1"; for v in DENO_NO_PACKAGE_JSON ${
           resultVars.join(" ")
-        }; do printenv "$v" || echo "$v=-"; done; } > "$FAKE_CALLS/$$" ;;`,
+        }; do printenv "$v" || echo "$v=-"; done; } > "\${FAKE_CALLS:?FAKE_CALLS が無い}/$$" ;;`,
         "esac",
         `exec "${which("deno")}" "$@"`,
       ].join("\n"),
@@ -543,8 +553,8 @@ Deno.test("deno.lock が deno.json と食い違えば、lock を読む段 (deno 
   await withRepo({
     "deno.json": JSON.stringify(json),
     "deno.lock": lock,
-    "a.ts": "export {};\n",
-    "a_test.ts": 'Deno.test("t", () => {});\n',
+    "a.ts": emptyModule,
+    "a_test.ts": passingTest,
   }, async (dir) => {
     const r = await runChecks(dir, "0");
     const outdated = (name: string) =>
@@ -646,7 +656,7 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
     }),
     withRepo({
       "deno.json": importsX,
-      "x.ts": "export {};\n",
+      "x.ts": emptyModule,
       "main.ts": 'import "x";\n',
     }, async (dir) => {
       const real = which("deno");
@@ -677,7 +687,7 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
     ].map(([name, code, error]) =>
       withRepo({
         "deno.json": importsX,
-        "x.ts": "export {};\n",
+        "x.ts": emptyModule,
         "main.ts": code,
       }, async (dir) => {
         const r = await runChecks(dir, "0");
@@ -716,7 +726,7 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
     ),
     withRepo({
       "deno.json": importsX,
-      "x.ts": "export {};\n",
+      "x.ts": emptyModule,
       "main.ts": 'import "x";\nimport "npm:left-pad@1.3.0";\n',
     }, async (dir) => {
       // deno check が npm から取ろうとするのを、届かない registry ですぐ落とす
@@ -943,7 +953,7 @@ Deno.test("段より前の確かめ: shellcheck の版、git ls-files、項目�
     }),
     ...trackedKinds.map(([name, make, line]) =>
       withRepo(
-        { "f.ts": "export {};\n", "d/x.ts": "export {};\n" },
+        { "f.ts": emptyModule, "d/x.ts": emptyModule },
         async (dir) => {
           await make(dir);
           await run("git", ["add", "-A"], dir);
@@ -957,7 +967,7 @@ Deno.test("段より前の確かめ: shellcheck の版、git ls-files、項目�
         },
       )
     ),
-    withRepo({ "s.ts": "export {};\n" }, async (dir) => {
+    withRepo({ "s.ts": emptyModule }, async (dir) => {
       await run("git", ["add", "-A"], dir);
       await commit(dir);
       await run("git", ["update-index", "--skip-worktree", "s.ts"], dir);
@@ -1019,7 +1029,7 @@ Deno.test("段より前の確かめ: shellcheck の版、git ls-files、項目�
       })
     ),
     withRepo(
-      { "gone.ts": "export {};\n", "kept.ts": "export {};\n" },
+      { "gone.ts": emptyModule, "kept.ts": emptyModule },
       async (dir) => {
         await run("git", ["add", "-A"], dir);
         await Deno.remove(`${dir}/gone.ts`);
@@ -1351,7 +1361,8 @@ const signalCodes: [Deno.Signal, number][] = [
 /** TERM を無視する先頭に送る列。2 回目のシグナルは何もしない。 */
 const termThenOthers: Deno.Signal[][] = [["SIGTERM"], ["SIGTERM", "SIGINT"]];
 /** fake が FAKE_MARKS (環境変数) の下に印のファイル name を書く shell の文。 */
-const mark = (name: string) => `echo > "$FAKE_MARKS/${name}"`;
+const mark = (name: string) =>
+  `echo > "\${FAKE_MARKS:?FAKE_MARKS が無い}/${name}"`;
 
 Deno.test("中断: 段のグループを空にし、128 + シグナルの番号で終わる", async () => {
   const { failures, expect } = collector();
