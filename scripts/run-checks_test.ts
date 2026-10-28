@@ -5,7 +5,7 @@
  * - 子の環境: このプロセスの環境から git の場所を決める変数 (canon: facts/git/local-env-vars-and-hook-env) を消し、GIT_CONFIG_GLOBAL=/dev/null・GIT_CONFIG_NOSYSTEM=1 で利用者の git の設定を読まないもの。git 2.32 以降を要る (canon: facts/git/config-sources-and-scopes)。
  * - symlink は ln -s で作る。Deno.symlink は絞らない read・write を要り (canon: facts/deno/symlink-requires-unscoped-permissions)、deno test の段の許可では作れない。Deno.symlink が絞った write で通るようになったら替える。
  * - test と、test が起動したものが書くもの:
- *   - 書く場所は fixture の下だけ。run-checks.ts に渡す TMPDIR は fixture の .git/tmp で、deno test の段の TMPDIR もその下にできる。
+ *   - 書く場所は fixture の下だけ。run-checks.ts に渡す TMPDIR は fixture の .git/tmp で、段の一時ディレクトリもその下にできる。
  *   - fake の shell は、書き先を環境変数 (FAKE_*) で受ける。パスを script に埋め込むと、TMPDIR の `$`・`"` などで壊れる。
  *   - 消すのは withTempDir。
  * - test が起動したもの (fake の段とその孫、fixture の deno test とその子、グループを抜けた子孫) の寿命:
@@ -234,6 +234,8 @@ const bad = "#!/bin/sh\necho $1\n";
 /** 指摘の無い .ts と、通る test。 */
 const emptyModule = "export {};\n";
 const passingTest = 'Deno.test("t", () => {});\n';
+/** 段より前の失敗のときに run-checks.ts が出す行。 */
+const notRun = "検査の段は回していない";
 /** 段の見出し。 */
 const failedHead = (name: string) => `== ${name}: 落ちた`;
 const passedHead = (name: string) => `== ${name}: 通った`;
@@ -356,54 +358,61 @@ Deno.test("引数・TMPDIR・出力の経路と順", async () => {
           })),
       },
     ].map(({ name, run }) =>
-      withRepo({ "a_test.ts": passingTest }, async (dir) => {
+      withRepo({ "a.ts": emptyModule }, async (dir) => {
         const r = await run(dir);
         expect(
-          `TMPDIR が${name}なら、deno test の段の TMPDIR を作らずに段の前で落ちる`,
+          `.ts があり TMPDIR が${name}なら、段の一時ディレクトリを作らずに段の前で落ちる`,
           r.code === 1 && !r.stdout.includes("==") &&
             r.stderr.includes("TMPDIR が未設定か空") &&
-            r.stderr.includes("検査の段は回していない"),
+            r.stderr.includes(notRun),
           r.stderr,
         );
       })
     ),
-    withRepo({ "a_test.ts": passingTest }, async (dir) => {
+    withRepo({ "a.ts": emptyModule }, async (dir) => {
       const r = await runChecks(dir, "0", { TMPDIR: ".git/tmp" });
       expect(
-        "TMPDIR が相対パスなら、deno test の段の TMPDIR を作らずに段の前で落ちる",
+        "TMPDIR が相対パスなら、段の一時ディレクトリを作らずに段の前で落ちる",
         r.code === 1 && !r.stdout.includes("==") &&
-          r.stderr.includes("TMPDIR (.git/tmp) が絶対パスでない") &&
-          r.stderr.includes("検査の段は回していない"),
+          r.stderr.includes("TMPDIR (.git/tmp) が / で始まらない") &&
+          r.stderr.includes(notRun),
         r.stderr,
       );
     }),
-    withRepo({ "a.ts": emptyModule }, async (dir) => {
-      const r = await runChecks(dir, "0", { TMPDIR: "" });
-      expect(
-        "test が無ければ、TMPDIR が空でも通る",
-        r.code === 0 && r.stdout.includes(passedHead("deno check")),
-        `${r.stdout}\n${r.stderr}`,
-      );
-    }),
-    withRepo({ "a_test.ts": passingTest }, async (dir) => {
-      const r = await runChecks(dir, "0", { TMPDIR: `${dir}/.git/nowhere` });
-      expect(
-        "deno test の段の TMPDIR を作れない",
-        r.code === 1 && !r.stdout.includes("==") &&
-          r.stderr.includes("deno test の段の TMPDIR を、TMPDIR (") &&
-          r.stderr.includes("の下に作れない") &&
-          r.stderr.includes("検査の段は回していない"),
-        r.stderr,
-      );
-    }),
-    withRepo({ "a.ts": emptyModule }, async (dir) => {
-      const r = await runChecks(dir, "0", { TMPDIR: `${dir}/.git/nowhere` });
-      expect(
-        "test が無ければ、TMPDIR に作れなくても通る",
-        r.code === 0 && r.stdout.includes(passedHead("deno check")),
-        `${r.stdout}\n${r.stderr}`,
-      );
-    }),
+    ...["", ".git/nowhere"].map((tmp) =>
+      withRepo({ "a.md": "" }, async (dir) => {
+        const r = await runChecks(dir, "0", { TMPDIR: tmp && `${dir}/${tmp}` });
+        expect(
+          `.ts が無ければ、TMPDIR を使わない (${tmp || "空"})`,
+          r.code === 0 && r.stdout.includes(passedHead("JSON と Markdown")),
+          `${r.stdout}\n${r.stderr}`,
+        );
+      })
+    ),
+    ...[
+      {
+        files: { "a_test.ts": passingTest } as Record<string, string>,
+        stages: ["deno test", "deno.json の imports"],
+      },
+      { files: { "a.ts": emptyModule }, stages: ["deno.json の imports"] },
+    ].map(({ files, stages }) =>
+      withRepo(files, async (dir) => {
+        const r = await runChecks(dir, "0", { TMPDIR: `${dir}/.git/nowhere` });
+        const failed = stages.filter((stage) =>
+          sectionOf(r.stderr, stage).includes(
+            `${stage} の段の一時ディレクトリを、TMPDIR (${dir}/.git/nowhere) の下に作れない`,
+          )
+        );
+        expect(
+          `段の一時ディレクトリを作れない段が落ちる (${
+            Object.keys(files).join(" ")
+          }。落ちたもの: ${failed.join("・")})`,
+          r.code === 1 && failed.length === stages.length &&
+            r.stdout.includes(passedHead("deno check")),
+          `${r.stdout}\n${r.stderr}`,
+        );
+      })
+    ),
     ...["0", "1"].map((state) =>
       withRepo({}, async (dir) => {
         const r = await runChecks(dir, state);
@@ -637,46 +646,38 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
   await Promise.all([
     withRepo({
       "deno.json": JSON.stringify({
-        imports: { a: "./lib/a.ts", "dir/": "./lib/", unused: "./lib/u.ts" },
+        imports: { a: "node:fs", "dir/": `${leftPad}/`, unused: "node:os" },
       }),
-      "lib/a.ts": "export const a = 1;\n",
-      "lib/b.ts": "export const b = 1;\n",
-      "lib/u.ts": "export const u = 1;\n",
       "main.ts":
-        'import { a } from "a";\nimport { b } from "dir/b.ts";\nconsole.log(a, b);\n',
+        'import { readFileSync } from "a";\nimport "dir/index.js";\nconsole.log(readFileSync);\n',
     }, async (dir) => {
-      const r = await runChecks(dir, "0");
+      const r = await runChecks(dir, "0", unreachableRegistry);
       expect(
         "使うキー・接頭辞のキーは通り、使わないキーは落ちる",
         r.code === 1 && r.stderr.includes(failedHead("deno.json の imports")) &&
-          r.stderr.includes('imports の "unused" が、どの .ts の') &&
-          !r.stderr.includes('"a" が、どの') &&
-          !r.stderr.includes('"dir/" が、どの') &&
-          r.stdout.includes(passedHead("deno check")),
+          r.stderr.includes(unusedLine("unused")) &&
+          !r.stderr.includes(unusedLine("a")) &&
+          !r.stderr.includes(unusedLine("dir/")),
         `${r.stdout}\n${r.stderr}`,
       );
     }),
     withRepo({
       "deno.json": JSON.stringify({
         imports: {
-          n: "npm:left-pad@1.3.0",
+          n: leftPad,
           j: "jsr:@std/path@1.0.8",
-          both: "npm:left-pad@1.3.0",
-          "both/": "./lib/",
-          local: "./lib/a.ts",
+          both: leftPad,
+          "both/": "npm:/is-odd@3.0.1/",
+          local: "node:fs",
         },
       }),
-      "lib/a.ts": "export const a = 1;\n",
       "main.ts":
-        'import "n/index.js";\nimport "j/posix";\nimport "both/a.ts";\nimport "local/a.ts";\n',
+        'import "n/index.js";\nimport "j/posix";\nimport "both/a.js";\nimport "local/a.ts";\n',
     }, async (dir) => {
-      // deno check が npm から取ろうとするのを、届かない registry ですぐ落とす
-      const r = await runChecks(dir, "0", {
-        NPM_CONFIG_REGISTRY: "http://127.0.0.1:9/",
-      });
+      const r = await runChecks(dir, "0", unreachableRegistry);
       const section = sectionOf(r.stderr, "deno.json の imports");
       const reported = ["n", "j", "both", "both/", "local"].filter((key) =>
-        section.includes(`imports の "${key}" が、どの .ts の`)
+        section.includes(unusedLine(key))
       );
       // canon: facts/deno/import-map-prefix-keys の「deno.json の imports の展開」
       expect(
@@ -689,19 +690,86 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
     }),
     withRepo({
       "deno.json": JSON.stringify({
+        imports: {
+          "a/": `${leftPad}/`,
+          "a/b/": "npm:/is-odd@3.0.1/",
+          "c/": `${leftPad}/`,
+          "c/b.js": "node:fs",
+          p: `${leftPad}/`,
+          q: 1,
+          r: null,
+        },
+      }),
+      "main.ts": [
+        'import "a/b/d.js";',
+        'import "c/b.js";',
+        'import "p/index.js";',
+        'import "q";',
+        "",
+      ].join("\n"),
+    }, async (dir) => {
+      const r = await runChecks(dir, "0", unreachableRegistry);
+      const section = sectionOf(r.stderr, "deno.json の imports");
+      const keys = ["a/", "a/b/", "c/", "c/b.js", "p", "q", "r"];
+      const reported = keys.filter((key) => section.includes(unusedLine(key)));
+      // canon: facts/deno/import-map-prefix-keys
+      expect(
+        `重なる接頭辞は最長が、完全一致は接頭辞より先に使われ、値が / で終わる npm: のキーは展開せず、文字列でない値は null の entry になる (報告されたもの: ${
+          reported.join(" ")
+        })`,
+        JSON.stringify(reported) === JSON.stringify(["a/", "c/", "p", "r"]),
+        r.stderr,
+      );
+    }),
+    withRepo({
+      "deno.json": JSON.stringify({
+        imports: {
+          "./k.ts": "node:fs",
+          v: "./x.ts",
+          w: "/x.ts",
+          f: "file:///x.ts",
+          ok: "node:fs",
+        },
+        scopes: {
+          "./lib/": { s: "node:fs" },
+          "https://example.com/": { t: "../y.ts" },
+        },
+      }),
+      "main.ts": 'import "ok";\n',
+    }, async (dir) => {
+      const r = await runChecks(dir, "0");
+      const section = sectionOf(r.stderr, "deno.json の imports");
+      const listed = [
+        '- "./k.ts": "node:fs"',
+        '- "v": "./x.ts"',
+        '- "w": "/x.ts"',
+        '- "f": "file:///x.ts"',
+        '- scopes の "./lib/"',
+        '- "t": "../y.ts"',
+      ];
+      expect(
+        "写しの場所で解決が変わるキーと値があれば、未使用の判定をせずに落ちる",
+        section.includes("写しの場所で解決が変わるもの") &&
+          listed.every((l) =>
+            section.includes(`${l}\n`) || section.endsWith(l)
+          ) &&
+          !section.includes('"ok"') && !section.includes("を除いても"),
+        r.stderr,
+      );
+    }),
+    withRepo({
+      "deno.json": JSON.stringify({
         imports: Object.fromEntries(
-          syntaxes.map(([, key]) => [key, "./lib/t.ts"]),
+          syntaxes.map(([, key]) => [key, "node:fs"]),
         ),
       }),
-      "lib/t.ts":
-        "export default 1;\nexport const y = 1;\nexport type Z = number;\n",
       ...Object.fromEntries(
         syntaxes.map(([code, key], i) => [`s${i}.ts`, code(key)]),
       ),
     }, async (dir) => {
       const r = await runChecks(dir, "0");
       const wrong = syntaxes.filter(([, key, counted]) =>
-        r.stderr.includes(`imports の "${key}" が、どの .ts の`) === counted
+        r.stderr.includes(unusedLine(key)) === counted
       ).map(([, key]) => key);
       expect(
         `数える構文と数えない構文 (違ったもの: ${wrong.join(" ")})`,
@@ -717,8 +785,11 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
       const real = which("deno");
       const r = await runChecks(dir, "0", {
         PATH: `${await fakePath(dir, {
-          deno:
-            `#!/bin/sh\n[ "$1" = info ] && { echo boom >&2; exit 4; }\nexec "${real}" "$@"\n`,
+          deno: [
+            "#!/bin/sh",
+            `case " $* " in *" --config "*) echo boom >&2; exit 4 ;; esac`,
+            `exec "${real}" "$@"`,
+          ].join("\n"),
         })}:${baseEnv.PATH}`,
       });
       expect(
@@ -728,7 +799,7 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
             "main.ts: deno info が exit 4。下のエラーを直す\nboom",
           ) &&
           r.stderr.includes("未使用の判定をしていない") &&
-          !r.stderr.includes("見つからない"),
+          !r.stderr.includes("を除いても"),
         r.stderr,
       );
     }),
@@ -772,7 +843,7 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
           `deno info の file: の module の error があれば未使用の判定をしない (${name})`,
           r.code === 1 && r.stderr.includes(error) &&
             r.stderr.includes("未使用の判定をしていない") &&
-            !r.stderr.includes("見つからない"),
+            !r.stderr.includes("を除いても"),
           r.stderr,
         );
       })
@@ -804,12 +875,9 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
     withRepo({
       "deno.json": importsX,
       "x.ts": emptyModule,
-      "main.ts": 'import "x";\nimport "npm:left-pad@1.3.0";\n',
+      "main.ts": `import "x";\nimport "${leftPad}";\n`,
     }, async (dir) => {
-      // deno check が npm から取ろうとするのを、届かない registry ですぐ落とす
-      const r = await runChecks(dir, "0", {
-        NPM_CONFIG_REGISTRY: "http://127.0.0.1:9/",
-      });
+      const r = await runChecks(dir, "0", unreachableRegistry);
       expect(
         "npm: の module の error (--no-npm) は報告しない",
         r.stdout.includes(passedHead("deno.json の imports")) &&
@@ -823,8 +891,18 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
 
 /** git commit の作者の設定。fixture は利用者の git の設定を読まない。 */
 const identity = ["-c", "user.name=t", "-c", "user.email=t@example.com"];
+/** 使わないキー key の報告の行の先頭。 */
+const unusedLine = (key: string) => `imports の "${key}" を除いても`;
+/** npm: の指定子。 */
+const leftPad = "npm:left-pad@1.3.0";
+/**
+ * npm: の指定子を持つ fixture で、deno check・deno test の段が npm から取ろうとするのを、すぐ落とす registry (canon: facts/deno/environment-and-config-inputs の「取得だけを変える」)。
+ * - 要るのは、runChecks が段を選べず全部を回すため。
+ * - 外せる条件: runChecks が段を選べるようになるか、fixture が npm の取得を要さなくなったとき。
+ */
+const unreachableRegistry = { NPM_CONFIG_REGISTRY: "http://127.0.0.1:9/" };
 /** 使うキーを 1 つ持つ deno.json。 */
-const importsX = '{"imports": {"x": "./x.ts"}}';
+const importsX = '{"imports": {"x": "node:fs"}}';
 /** オブジェクトでない JSON の値。 */
 const nonObjects = ['"x"', "[]", "null"];
 
@@ -894,7 +972,7 @@ Deno.test("段より前の確かめ: shellcheck の版、git ls-files、項目�
   const { failures, expect } = collector();
   const unstaged = (r: Awaited<ReturnType<typeof runChecks>>) =>
     r.code === 1 && !r.stdout.includes("==") && !r.stderr.includes("==") &&
-    r.stderr.includes("検査の段は回していない");
+    r.stderr.includes(notRun);
   const commit = (dir: string) =>
     run("git", [...identity, "commit", "-q", "-m", "x"], dir);
   await Promise.all([
@@ -1266,7 +1344,7 @@ Deno.test("名前の拡張子の類ごとに、検査する・段の前で落ち
         expect(
           describeCell(c),
           r.code === 1 && !r.stdout.includes("==") &&
-            r.stderr.includes("検査の段は回していない") &&
+            r.stderr.includes(notRun) &&
             r.stderr.includes(`\n- ${c.path}: `) === (c.outcome === "listed"),
           r.stdout + r.stderr,
         );
@@ -1607,18 +1685,19 @@ Deno.test("中断: 段のグループを空にし、128 + シグナルの番号�
       killChild(child, "SIGTERM");
       const r = await child.output();
       await sleep(500);
+      const left = await Array.fromAsync(Deno.readDir(fixtureTmp(dir)));
       expect(
         "deno test の段の TMPDIR",
         started && r.code === 143 && dec.decode(r.stdout) === "" &&
-          testTmp !== undefined && !await exists(testTmp),
-        JSON.stringify({ started, code: r.code, testTmp }),
+          testTmp !== undefined && left.length === 0,
+        JSON.stringify({ started, code: r.code, testTmp, left }),
       );
     }),
   ]);
   deepStrictEqual(failures, []);
 });
 
-Deno.test("段が普通に終わると、残った孫を止め、deno test の段の TMPDIR を消す", async () => {
+Deno.test("段が普通に終わると、残った孫を止め、段の一時ディレクトリを消す", async () => {
   await withRepo({
     "a.sh": "#!/bin/sh\n",
     "ok_test.ts":
@@ -1643,10 +1722,10 @@ Deno.test("段が普通に終わると、残った孫を止め、deno test の�
       {
         code: r.code,
         testTmp: testTmp?.startsWith(`${fixtureTmp(dir)}/run-checks-`),
-        left: testTmp !== undefined && await exists(testTmp),
+        left: (await Array.fromAsync(Deno.readDir(fixtureTmp(dir)))).length,
         survived: await exists(`${g}/survived`),
       },
-      { code: 0, testTmp: true, left: false, survived: false },
+      { code: 0, testTmp: true, left: 0, survived: false },
       r.stderr,
     );
   });

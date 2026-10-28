@@ -78,7 +78,7 @@
 # - 無い・ディレクトリでない・入れない: 落ちる。理由は cd が出す。
 # - 在る、入れるディレクトリ (symlink を含む): symlink を解決した絶対パスにする。
 #   - それが `,` を含む: --allow-write の区切りと読まれる (canon: facts/deno/allow-flag-comma-separates-values) ので落ちる。deno が --allow-write の値の `,` を escape できるようになったら外せる。
-#   - 書けるかは、`*_test.ts` があるときだけ、deno test の段の TMPDIR を作れるかで run-checks.ts が判定する (作れなければ落ちる)。
+#   - 書けるかは、`.ts` があるときだけ、段の一時ディレクトリを作れるかで run-checks.ts が判定する (作れなければ、それを使う段が落ちる)。
 set -euo pipefail
 # $2 は終了コード (既定は 1)
 die() {
@@ -267,7 +267,7 @@ export TMPDIR
 flags=(--allow-run)
 # 段の子の環境から変数を消すには、Deno.env.toObject で環境を丸ごと写す。それには変数を絞らない --allow-env が要る (canon: facts/deno/env-to-object-requires-unscoped-allow-env)。
 flags+=(--allow-env)
-# deno test の段の TMPDIR を作って消す
+# 段の一時ディレクトリを作って消す
 flags+=("--allow-write=$TMPDIR")
 # deno.json の imports を読む
 flags+=(--allow-read=deno.json)
