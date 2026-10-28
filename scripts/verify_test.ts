@@ -19,7 +19,9 @@
  *   - 回す前に、その locale の bash で `[[ É =~ ^[A-Z]$ ]]` が真になることを確かめる。
  *   - OS ごとの違い:
  *     - Linux: en_US.UTF-8 を localedef で一時の dir に作り、LOCPATH で指す (canon: facts/glibc/localedef-and-locpath-inputs)。確かめが偽なら、次元を確かめられないので落ちる。
- *     - 他の OS: 系の en_US.UTF-8。確かめが偽なら、その OS の bash ではこの次元が起きないことを stderr に出し、現在の locale のまま回す。
+ *     - 他の OS: OS に入っている en_US.UTF-8。確かめが偽なら、そのことを stderr に出し、この次元を確かめずに現在の locale のまま回す。
+ *       - 偽の理由 (bash の [A-Z] が É を含まない、その locale が OS に無い) は区別しない。
+ *       - 外せる条件: macOS の /bin/bash 3.2 で、OS に入っている en_US.UTF-8 の [A-Z] が É を含むかを測ったとき。含めば、偽を Linux と同じく落ちる扱いにする。
  *   - 後始末: localedef で作った dir は test の終わりに消す。
  * - 子の環境と symlink の作り方、test が起動したものの寿命と fixture の消し方は、run-checks_test.ts の先頭と同じ。
  */
@@ -449,6 +451,9 @@ const otherHooks = {
 const copied = { code: 0, hooks: copiedHooks, tmpdir: realTmpdir };
 /** bash が PATH に無いコマンドに出す行。 */
 const notFound = (tool: string) => `: ${tool}: command not found`;
+/** 写す途中の一時ファイルの rm -f が落ちたときの stderr の、一時ファイルの後からコマンドの先頭まで。 */
+const rmFailed =
+  ": 写す途中の一時ファイルの rm -f が落ち、残っているかもしれない (理由は上の rm)。Execute: rm -f";
 /** 写せないときの stderr の、写す先の後からコマンドの先頭まで。 */
 const cannotCopy =
   "/pre-push: hooks/pre-push を写せない (理由は上)。Execute: mkdir -p";
@@ -491,11 +496,11 @@ const missingTools: (
     stderr: [
       notFound("rm"),
       "/pre-push.verify-",
-      ": 一時ファイルを消せない (理由は上の rm)。Execute: rm -f",
+      rmFailed,
     ],
     fix: true,
   },
-  // 一時ファイルは作られないが、在るかを見ずに消すので、消せないことも出す
+  // rm -f の失敗は、一時ファイルが在ったかを問わずに出す (写す前に落ちたときも)
   {
     tools: ["rm", "install"],
     state: "無い",
@@ -505,7 +510,7 @@ const missingTools: (
     stderr: [
       notFound("rm"),
       notFound("install"),
-      ": 一時ファイルを消せない (理由は上の rm)。Execute: rm -f",
+      rmFailed,
       cannotCopy,
     ],
   },
@@ -532,8 +537,7 @@ const missingTools: (
     ],
     fix: true,
   },
-  // hook は deno の exec より前に揃える
-  // 使わない状態では、無くても揃う。写す先に pre-push が在れば cmp は使う
+  // cmp・chmod は、それを使う写す先の状態でだけ要る (verify.sh の先頭の「PATH にあるもの」)
   ...([
     { tools: ["cmp", "chmod"], state: "無い" },
     { tools: ["chmod"], state: "同じ" },
@@ -544,6 +548,7 @@ const missingTools: (
     hooks: copiedHooks,
     tmpdir: realTmpdir,
   })),
+  // hook は deno の exec より前に揃える
   {
     tools: ["deno"],
     state: "無い",
@@ -557,7 +562,7 @@ const missingTools: (
     invoke: (dir) => Promise.resolve({ ...viaBash(dir), shebang: true }),
     code: 127,
     hooks: {},
-    // env の文言は OS で違う
+    // env が出す文言は実装で違う (canon: facts/shell/env-utility-not-found-exit-127)
     stderr: ["bash", ": No such file or directory"],
   },
 ];
@@ -1128,7 +1133,7 @@ async function wideRangeLocale(dir: string): Promise<Record<string, string>> {
     );
   }
   console.error(
-    `${Deno.build.os} の bash では、${wideLocale} の [A-Z] が É を含まない (この次元が起きない)。現在の locale のまま回す`,
+    `${Deno.build.os} で、${wideLocale} の bash の [[ É =~ ^[A-Z]$ ]] が偽 (bash の [A-Z] が É を含まないか、locale が無い)。この次元を確かめずに、現在の locale のまま回す`,
   );
   return {};
 }
