@@ -71,7 +71,9 @@
  *   - その下に作れない (無い・書けないなど)。
  * - cwd はリポのルート。読むファイルは deno.json だけ。書くのは TMPDIR の下だけ。許可は verify.sh が渡す。
  * - 環境はそのまま段の子に渡す。差し替えるのは次だけ:
- *   - git (git()): git の場所を決める変数 (git rev-parse --local-env-vars の一覧。canon: facts/git/local-env-vars-and-hook-env) を消す。git は cwd のリポを見る。一覧は、どの環境でも同じものを出す (canon の同じページ) ので、このプロセスの環境のまま聞く。聞けなければ理由を出して exit 1。
+ *   - git (git()): git の場所を決める変数 (git rev-parse --local-env-vars の一覧。canon: facts/git/local-env-vars-and-hook-env) を消す。git は cwd のリポを見る。
+ *     - 一覧は、測った版 (git 2.43.0・2.55.0。canon の同じページ) では GIT_DIR などの値によらず同じものを出すので、このプロセスの環境のまま聞く。2.32〜2.42 は測っていない。
+ *     - 次のときは理由を出して exit 1: 聞けない (git を起動できない・非 0 で終わる)、一覧のどれかの行が `^GIT_[A-Z_]+$` に合わない (知らない option を、リポの中の git は名前のまま出して exit 0 で終わる。canon の同じページの「知らない option」)。
  *   - deno (deno()):
  *     - 消すもの: 検査の結果を変える変数 (canon: facts/deno/environment-and-config-inputs の「結果を変える」)。
  *     - 残すもの: 同じ canon の「取得だけを変える」「出力の形だけ」の変数。
@@ -405,7 +407,16 @@ const localEnvVars = await (async () => {
   if (r.code !== 0) {
     return failBeforeSteps([exited("git rev-parse --local-env-vars", r)]);
   }
-  return dec.decode(r.out).split("\n").filter(Boolean);
+  const names = dec.decode(r.out).split("\n").filter(Boolean);
+  const odd = names.filter((n) => !/^GIT_[A-Z_]+$/.test(n));
+  if (odd.length) {
+    return failBeforeSteps([
+      `git rev-parse --local-env-vars の出力に、変数の名前でない行がある (${
+        odd.join(" ")
+      })。git の版を確かめる`,
+    ]);
+  }
+  return names;
 })();
 const git = (args: string[]) => exec("git", args, { unset: localEnvVars });
 

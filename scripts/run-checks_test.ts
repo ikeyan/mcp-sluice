@@ -866,6 +866,26 @@ Deno.test("段より前の確かめ: shellcheck の版、git ls-files、項目�
       );
     }),
     withRepo({}, async (dir) => {
+      const r = await runChecks(dir, "0", {
+        PATH: `${await fakePath(dir, {
+          git: [
+            "#!/bin/sh",
+            // --local-env-vars を知らない git が、リポの中で option の名前をそのまま出す形 (canon: facts/git/local-env-vars-and-hook-env の「知らない option」)
+            `[ "$*" = "rev-parse --local-env-vars" ] && { echo --local-env-vars; exit 0; }`,
+            `exec "${which("git")}" "$@"`,
+          ].join("\n"),
+        })}:${baseEnv.PATH}`,
+      });
+      expect(
+        "git rev-parse --local-env-vars が変数の名前でない行を出す",
+        unstaged(r) &&
+          r.stderr.includes(
+            "git rev-parse --local-env-vars の出力に、変数の名前でない行がある (--local-env-vars)",
+          ),
+        r.stdout + r.stderr,
+      );
+    }),
+    withRepo({}, async (dir) => {
       const bin = `${dir}/.git/no-git-bin`;
       await Deno.mkdir(bin);
       await ln(which("deno"), `${bin}/deno`);

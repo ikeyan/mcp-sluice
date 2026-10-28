@@ -5,7 +5,10 @@
 # - bash 3.2 以降。
 # - git 2.32 以降。
 #   - rev-parse --path-format は 2.31 から (canon: facts/git/rev-parse-path-format-since-2-31)、テストが使う GIT_CONFIG_GLOBAL・GIT_CONFIG_SYSTEM は 2.32 から (canon: facts/git/config-sources-and-scopes)。
-#   - hook の判定が読む config -z --show-origin の並び (canon: facts/git/config-sources-and-scopes) と、run-checks.ts が読む ls-files -s -t の形 (canon: facts/git/repository-shapes) は git 2.43.0 で測った。2.32〜2.42 は測っていない。
+#   - 次は git 2.43.0 で測った。2.32〜2.42 は測っていない。
+#     - hook の判定が読む config -z --show-origin の並び (canon: facts/git/config-sources-and-scopes)。
+#     - run-checks.ts が読む ls-files -s -t の形 (canon: facts/git/repository-shapes)。
+#     - verify.sh と run-checks.ts が読む rev-parse --local-env-vars の一覧 (canon: facts/git/local-env-vars-and-hook-env)。各行が ^GIT_[A-Z_]+$ に合わなければ (知らない option を、リポの中の git は名前のまま出して exit 0 で終わる。同じ canon の「知らない option」)、変数の名前として使わずに落ちる。
 # - このファイルの dir の状態ごとの扱い (canon: facts/git/repository-shapes の「スクリプトを置いた dir の位置」):
 #   - 本体の作業ツリーのルート: 回す。
 #   - linked worktree のルート: 回す。hook は common git dir に写す (下の「hook」)。
@@ -93,7 +96,11 @@ if ! [[ $git_version =~ $version_re ]] || [ "${BASH_REMATCH[1]}" -lt 2 ] ||
   die "git が 2.32 以降でない ($git_version)。git 2.32 以降を PATH の先に置く"
 fi
 local_env=$(git rev-parse --local-env-vars)
-while IFS= read -r v; do unset "$v"; done <<<"$local_env"
+while IFS= read -r v; do
+  [[ $v =~ ^GIT_[A-Z_]+$ ]] ||
+    die "git rev-parse --local-env-vars の出力に、変数の名前でない行がある ($v)。git の版を確かめる"
+  unset "$v"
+done <<<"$local_env"
 where=$(git rev-parse --is-inside-work-tree --show-prefix) ||
   die "$PWD を git の作業ツリーとして読めない (理由は上の git)。リポの verify.sh を、git が読めるようにしてから回す"
 # ルートでは true と空の行、subdirectory では true と <prefix>/ を出す

@@ -739,6 +739,18 @@ cases.push(
     }),
   })),
   {
+    name: "git rev-parse --local-env-vars が変数の名前でない行を出す",
+    // --local-env-vars を知らない git が、リポの中で option の名前をそのまま出す形 (canon: facts/git/local-env-vars-and-hook-env の「知らない option」)
+    fakes: {
+      git:
+        `#!/bin/sh\n[ "$*" = "rev-parse --local-env-vars" ] && { echo --local-env-vars; exit 0; }\nexec '${realGit}' "$@"\n`,
+    },
+    code: 1,
+    hooks: null,
+    stderr:
+      "verify.sh: git rev-parse --local-env-vars の出力に、変数の名前でない行がある (--local-env-vars)",
+  },
+  {
     name: "git --version の形が読めない",
     fakes: {
       git:
