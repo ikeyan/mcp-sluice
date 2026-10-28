@@ -121,10 +121,9 @@ authentik 2026.8.5 と main のソースで確認した。
     - `iss`
     - `exp`・`nbf`
     - `aud` == 設定の client_id
-  - `aud` == resource は要求しない。authentik が `resource` を読まないので。
+  - authentik は `resource` を読まないので、`aud` は client_id になる。
 - ブラウザのページ (`/i/<id>`):
   - 同じ client で authorization code + PKCE のログインをし、セッションの cookie を発行する。
-  - provider を増やさない。
 - 設定は 2 つの値だけにする: `issuer` と `client_id`。authentik 以外の IdP でも同じ形で動く。
 - 退けた方式: ゲートウェイ自身を OAuth の AS にし、ログインだけ IdP に任せる。
   - 退けた理由: トークンの発行・保存・失効を自前で抱えることになる。対象のクライアントは、どれも事前登録の client_id を受ける。
@@ -151,7 +150,7 @@ authentik 2026.8.5 と main のソースで確認した。
   3. DCR
 - 暗号化の鍵は env で渡す。鍵を失ったら、保存したトークンは全部無効になり、利用者は再接続する。
 - 子が返すツールの一覧は、利用者によって違いうる。この種類の子に限り、一覧を (利用者, server id) ごとに持ち、子の `list_changed` を受けたら、その server id の全利用者の分を捨てる。
-- まだ接続していない利用者には、その子のツールを一覧に出さない。代わりに `gateway__connect` を出す。
+- まだ接続していない利用者の一覧には、その子のツールの代わりに `gateway__connect` を載せる。
 
 ## 4. 子サーバーの登録と名前
 
@@ -187,7 +186,7 @@ gateway:                            # ゲートウェイ自身のツールにも
 ### 4.2 名前
 
 - 公開する名前は `<server>__<tool>`。
-  - `.` を区切りにしない。Messages API のツール名は `^[a-zA-Z0-9_-]{1,128}$` なので (`platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools`、2026-10-26)。
+  - 区切りは `__` にする。Messages API のツール名は `^[a-zA-Z0-9_-]{1,128}$` で、`.` を含められない (`platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools`、2026-10-26)。
 - server id は `^[a-z][a-z0-9_]{0,15}$`。JS の識別子として使える形にする。`gateway` は予約する。
 - 合成した名前が `^[A-Za-z0-9_-]{1,64}$` に収まらないツールは公開しない。そのときは警告を log に出す。
   - 64 の根拠: OpenAI の function 名の上限。
@@ -226,7 +225,7 @@ gateway:                            # ゲートウェイ自身のツールにも
 3. 当たる規則が無ければ、全体の `default` (既定は ask) を採る。
 
 - 上から順に評価する理由: 「admins だけ ask、他は deny」のような例外を、否定を使わずに書ける。
-- tool annotations (`readOnlyHint` など) では判定しない。仕様は annotations を信頼しない入力として扱うよう求めている。annotations はそのままクライアントへ渡す。
+- 判定は `groups` と `rules` だけで行う。仕様は tool annotations (`readOnlyHint` など) を信頼しない入力として扱うよう求めている。annotations はそのままクライアントへ渡す。
 
 ### 5.2 効果
 
@@ -438,7 +437,7 @@ compose に、Grafana・Tempo・Loki・Prometheus を同梱する。
 - Grafana:
   - ログインは authentik に任せる。
   - 見られるのは、管理者のグループだけ (`role_attribute_path` と `allowed_groups`)。
-  - trace・ソース・監査の log には利用者の操作が全部載るので、利用者の全員には見せない。
+  - trace・ソース・監査の log には、利用者の操作が全部載る。
 - リポに入れるもの:
   - Grafana のデータソースとダッシュボードの provisioning。ダッシュボードは 3 枚:
     - 全体
