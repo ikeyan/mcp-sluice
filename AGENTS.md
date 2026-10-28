@@ -43,10 +43,12 @@
       2. plugin を入れる: `claude plugin install ikeyan-skills@ikeyan --scope project` と `claude plugin install superpowers@claude-plugins-official --scope project`。
     - cwd がリポのルートでなくても、`--scope project` はエラーにならずに cwd の `.claude/settings.json` に書く (リポのルートの `.claude/settings.json` には書かない。canon: facts/claude-code/external-plugin-requires-per-user-install-trust)。
       - 測った範囲:
-        - claude 2.1.312
-        - Linux
-        - cwd がリポの subdirectory
-      - 確かめていないもの: macOS と、cwd の祖先に既存の `.claude/settings.json` があるとき。
+        - claude の版: 2.1.312
+        - OS: Linux
+        - cwd の位置: リポの subdirectory
+      - 確かめていないもの:
+        - OS: macOS
+        - cwd の祖先: 既存の `.claude/settings.json` がある
 
 ## このリポの仕様
 
@@ -56,6 +58,9 @@
 ## このリポの検証
 
 - clone したら、まず `./verify.sh` を 1 回回す。pre-push の hook (`PUSH_OK=1` の判定) は、このとき入る。
+- `hooks/pre-push` を変える checkout・pull の後も、`./verify.sh` を回す。写しが前の版なら、`./verify.sh` は上書きせずに落ちて置き換えのコマンドを示すので、それを実行する。
+  - git が呼ぶ hook は common git dir の写しで、置き換えるまで前のまま。それまでの push は、前の写しで判定される。
+  - 写しの状態ごとの扱いは、`verify.sh` の先頭の「hook」にある。
 - 単一検証コマンドは `./verify.sh`。CI も同じものを回す。
 - 規則の本文は次のファイルの先頭にある。変えるときはそこを直す:
   - `verify.sh`:
