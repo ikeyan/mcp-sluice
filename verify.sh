@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # このリポの単一検証コマンド。hook を揃えてから scripts/run-checks.ts を exec し、hook を揃えた結果 (0: 揃えた、1: 揃えられなかった) を引数で渡す。検査の規則の本文は scripts/run-checks.ts の先頭にある。
-# 事前条件 (外れれば exit 1):
+# 事前条件 (外れれば exit 1。PATH に deno が無いときだけ 127):
 # - OS は Linux か macOS (uname -s が Linux か Darwin)。
 # - bash 3.2 以降。
 # - git 2.32 以降。
 #   - rev-parse --path-format は 2.31 から (canon: facts/git/rev-parse-path-format-since-2-31)、テストが使う GIT_CONFIG_GLOBAL・GIT_CONFIG_SYSTEM は 2.32 から (canon: facts/git/config-sources-and-scopes)。
 #   - hook の判定が読む config -z --show-origin の並び (canon: facts/git/config-sources-and-scopes) と、run-checks.ts が読む ls-files -s -t の形 (canon: facts/git/repository-shapes) は git 2.43.0 で測った。2.32〜2.42 は測っていない。
-# - このファイルの dir を git が作業ツリーとして読める (safe.directory が要る持ち主の違いを含む)。読めなければ git rev-parse が理由を出す。
+# - このファイルの dir の状態ごとの扱い (canon: facts/git/repository-shapes の「スクリプトを置いた dir の位置」):
+#   - 本体の作業ツリーのルート: 回す。
+#   - linked worktree のルート: 回す。hook は common git dir に写す (下の「hook」)。
+#   - 親のリポの subdirectory (git が追跡するディレクトリに展開した写しなど): 落ちる。そのまま回すと git は親のリポを見て、hook を親のリポに写し、検査の対象も subdirectory の下に限られる。
+#   - git の作業ツリーでない (リポの外・git dir の中・bare のリポ・safe.directory が要る持ち主の違い): 落ちる。リポの外と持ち主の違いは、理由を git rev-parse が出す。
 # - PATH にあるもの:
 #   - cmp・install: 無ければ hook を揃えられないとする。
 #   - shellcheck: run-checks.ts が確かめる。
-#   - deno: exec が確かめる。
+#   - deno: 無ければ、最後の exec が exit 127 で終わる (canon: facts/shell/bash-exec-missing-command-exit-status)。
 # - ネットワークは、deno が依存 (npm) を未取得のときだけ要る。
 # 入力:
 # - 引数: 受けない。渡されたら exit 2。
@@ -58,7 +62,7 @@
 # - 無い・ディレクトリでない・入れない: 落ちる。理由は cd が出す。
 # - 在る、入れるディレクトリ (symlink を含む): symlink を解決した絶対パスにする。
 #   - それが `,` を含む: --allow-write の区切りと読まれる (canon: facts/deno/allow-flag-comma-separates-values) ので落ちる。deno が --allow-write の値の `,` を escape できるようになったら外せる。
-#   - 書けるかは確かめない。deno test の段の TMPDIR を作れなければ、run-checks.ts が落ちる。
+#   - 書けるかは、deno test の段の TMPDIR を作れるかで run-checks.ts が判定する (作れなければ落ちる)。
 set -euo pipefail
 # $2 は終了コード (既定は 1)
 die() {
@@ -90,8 +94,15 @@ if ! [[ $git_version =~ $version_re ]] || [ "${BASH_REMATCH[1]}" -lt 2 ] ||
 fi
 local_env=$(git rev-parse --local-env-vars)
 while IFS= read -r v; do unset "$v"; done <<<"$local_env"
-common=$(git rev-parse --path-format=absolute --git-common-dir) ||
+where=$(git rev-parse --is-inside-work-tree --show-prefix) ||
   die "$PWD を git の作業ツリーとして読めない (理由は上の git)。リポの verify.sh を、git が読めるようにしてから回す"
+# ルートでは true と空の行、subdirectory では true と <prefix>/ を出す
+case $where in
+true) ;;
+true?*) die "$PWD は作業ツリーのルートでなく、親のリポの ${where#true?} にある。リポのルートの verify.sh を回す" ;;
+*) die "$PWD は git の作業ツリーでない (git dir の中か bare のリポ)。リポの作業ツリーのルートの verify.sh を回す" ;;
+esac
+common=$(git rev-parse --path-format=absolute --git-common-dir)
 
 hook_failed=0
 fail() {
@@ -126,7 +137,7 @@ while IFS= read -r -d '' scope; do
   case $origin in
   file:/*) file=${origin#file:} ;;
   file:*) file=$PWD/${origin#file:} ;;
-  *) die "core.hooksPath の出どころ ($scope $origin) が file でない。git の場所と設定の差し替えの変数を消した後には来ない想定" ;;
+  *) die "core.hooksPath の出どころ ($scope $origin) が file でない。想定外。verify.sh の不具合として報告する" ;;
   esac
   one="git config --file $(printf %q "$file") --unset-all core.hooksPath"
   case $unset_cmd in
@@ -140,7 +151,7 @@ done < <(
   printf 'exit %s\0' "$status"
 )
 case $config_exit in
-0) refuse "core.hooksPath が設定されている ($hooks_path_shown)。hook は $hooks に置くので消す" "$unset_cmd" ;;
+0) refuse "core.hooksPath が設定されている ($hooks_path_shown)。消す" "$unset_cmd" ;;
 1) ;;
 *) fail "core.hooksPath が設定されているかを読めない (git config が exit $config_exit。理由は上の git)。直してから回し直す" ;;
 esac
@@ -226,5 +237,11 @@ case $TMPDIR in
 esac
 export TMPDIR
 # Deno.kill で段のプロセスグループに送るには、パスを付けない --allow-run が要る (canon: facts/deno/command-spawn の「Deno.kill」)。パスで絞った --allow-run で通るようになったら、段が起動するもの (git・shellcheck・deno) に絞る。
+flags=(--allow-run)
 # 段の子の環境から変数を消すには、Deno.env.toObject で環境を丸ごと写す。それには変数を絞らない --allow-env が要る (canon: facts/deno/env-to-object-requires-unscoped-allow-env)。
-exec deno run --allow-run --allow-env --allow-write="$TMPDIR" --allow-read=deno.json scripts/run-checks.ts "$hook_failed"
+flags+=(--allow-env)
+# run-checks.ts が書くのは、deno test の段の TMPDIR (TMPDIR の下に作る) だけ
+flags+=("--allow-write=$TMPDIR")
+# run-checks.ts が自分で読むファイルは deno.json だけ。段の子の deno は別のプロセスで、この許可を受けない
+flags+=(--allow-read=deno.json)
+exec deno run "${flags[@]}" scripts/run-checks.ts "$hook_failed"

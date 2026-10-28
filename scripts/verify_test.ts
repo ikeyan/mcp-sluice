@@ -14,8 +14,10 @@
  * - 道具の失敗 (install・cmp・chmod・uname・git) は、PATH の先に置いた fake で作る。
  * - linked worktree の test: worktree で回すと、hook は common git dir の hooks にだけ写る。
  * - 中断の test: 写している最中に SIGTERM を受けると、一時ファイルを残さない。
- * - 子の環境と symlink の作り方は run-checks_test.ts の先頭と同じ。
+ * - TMPDIR の値は、canon: facts/shell/string-input-categories の分類から生成して回す。
+ * - 子の環境と symlink の作り方、test が起動したものの寿命と fixture の消し方は、run-checks_test.ts の先頭と同じ。
  */
+import fc from "fast-check";
 import { deepStrictEqual } from "node:assert/strict";
 
 const root = Deno.realPathSync(`${import.meta.dirname}/..`);
@@ -65,12 +67,29 @@ Deno.exit(Number(Deno.args[0]));
 const hookBytes = await Deno.readFile(`${root}/hooks/pre-push`);
 const other = new TextEncoder().encode("#!/bin/sh\nexit 0\n");
 
+/** test が起動したものが自分で終わるまでの上限。 */
+const lifetimeMs = 10_000;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** 止め損ねたものが書き足しても消えるように、lifetimeMs まで消し直す。 */
+async function removeEventually(dir: string) {
+  const deadline = Date.now() + lifetimeMs;
+  for (;;) {
+    try {
+      return await Deno.remove(dir, { recursive: true });
+    } catch (e) {
+      if (Date.now() > deadline) throw e;
+      await sleep(100);
+    }
+  }
+}
+
 const withTempDir = async <T>(fn: (dir: string) => Promise<T>): Promise<T> => {
   const dir = await Deno.makeTempDir({ dir: tmpdir });
   try {
     return await fn(dir);
   } finally {
-    await Deno.remove(dir, { recursive: true });
+    await removeEventually(dir);
   }
 };
 
@@ -96,9 +115,8 @@ const ln = async (target: string, path: string) => {
   if (!r.success) throw new Error(dec.decode(r.stderr));
 };
 
-/** fixture のリポを作る。hooks の置き場は作らない (git init --template=)。 */
-async function makeRepo(dir: string) {
-  await git(dir, "init", "-q", "--template=");
+/** fixture のファイルを dir に置く。 */
+async function placeFixture(dir: string) {
   for (const path of fixtureFiles) {
     await Deno.mkdir(`${dir}/${path.slice(0, path.lastIndexOf("/") + 1)}`, {
       recursive: true,
@@ -107,6 +125,12 @@ async function makeRepo(dir: string) {
   }
   await Deno.mkdir(`${dir}/scripts`);
   await Deno.writeTextFile(`${dir}/scripts/run-checks.ts`, stub);
+}
+
+/** fixture のリポを作る。hooks の置き場は作らない (git init --template=)。 */
+async function makeRepo(dir: string) {
+  await git(dir, "init", "-q", "--template=");
+  await placeFixture(dir);
 }
 
 /**
@@ -251,17 +275,24 @@ const direct = (dir: string): Invocation => ({
   arg0: `${dir}/verify.sh`,
 });
 
+/** baseEnv からの差分。undefined の変数は消す。 */
+type EnvChange = Record<string, string | undefined>;
+
 /** verify.sh を回す。 */
 async function verify(
   { cwd, arg0 }: Invocation,
-  env: Record<string, string>,
+  change: EnvChange,
   args: string[] = [],
 ) {
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries({ ...baseEnv, ...change })) {
+    if (value !== undefined) env[name] = value;
+  }
   const r = await spawn("bash", {
     // -- が無いと、- で始まる $0 を bash が option と読む
     args: ["--", arg0, ...args],
     cwd,
-    env: { ...baseEnv, ...env },
+    env,
     clearEnv: true,
   }).output();
   return {
@@ -285,6 +316,7 @@ const reportOf = (stdout: string): Report | undefined => {
 type Hook = { bytes: number[]; executable: boolean };
 const copiedHook: Hook = { bytes: Array.from(hookBytes), executable: true };
 const realTmpdir = await Deno.realPath(tmpdir);
+const realTmp = await Deno.realPath("/tmp");
 /** 子の PATH で name を引く (command -v)。 */
 const which = async (name: string) => {
   const r = await spawn("sh", {
@@ -311,7 +343,7 @@ interface Case {
   name: string;
   prepare?: (dir: string, elsewhere: string) => Promise<void>;
   /** elsewhere は別の空のリポ。どの行でもそこに hook を置かず、その場所を stdout に出さないこと。 */
-  env?: (elsewhere: string, dir: string) => Record<string, string>;
+  env?: (elsewhere: string, dir: string) => EnvChange;
   /** PATH の先 (dir の .git/fake-bin) に置く fake (名前 → 中身)。 */
   fakes?: Record<string, string>;
   args?: string[];
@@ -437,6 +469,9 @@ for (const [state, code, hooks, stderr] of states) {
             `#!/bin/sh\nif [ -n "$(find "$2" -prune -perm 0)" ]; then echo "cmp: $2: Permission denied" >&2; exit 2; fi\nexec '${realCmp}' "$@"\n`,
         },
       }
+      // 実行可能なら chmod を呼ばない
+      : state === "同じ"
+      ? { fakes: { chmod: failing("chmod") } }
       : {}),
     code,
     hooks,
@@ -501,7 +536,7 @@ cases.push(
     prepare: (dir) => git(dir, "config", "core.hooksPath", "elsewhere"),
     ...hooksPathSet,
     stderr:
-      "core.hooksPath が設定されている (local file:.git/config elsewhere)。hook は ",
+      "core.hooksPath が設定されている (local file:.git/config elsewhere)。消す。",
   },
   {
     name: "core.hooksPath を worktree の scope に書いた",
@@ -558,7 +593,7 @@ cases.push(
       await git(dir, "config", "--add", "core.hooksPath", "b");
     },
     ...hooksPathSet,
-    stderr: "(local file:.git/config a; local file:.git/config b)。hook は ",
+    stderr: "(local file:.git/config a; local file:.git/config b)。消す。",
     // ファイルごとに 1 つの --unset-all で、両方の値が消える
     stderrLacks: " && git config",
   },
@@ -584,6 +619,26 @@ cases.push(
     code: 1,
     hooks: null,
     stderr: "を git の作業ツリーとして読めない (理由は上の git)",
+  },
+  {
+    name: "親のリポの subdirectory に写しを置いた",
+    invoke: async (_, e) => {
+      await placeFixture(`${e}/sub`);
+      return direct(`${e}/sub`);
+    },
+    code: 1,
+    hooks: null,
+    stderr: "は作業ツリーのルートでなく、親のリポの sub/ にある",
+  },
+  {
+    name: "git dir の中に写しを置いた",
+    invoke: async (_, e) => {
+      await placeFixture(`${e}/.git/sub`);
+      return direct(`${e}/.git/sub`);
+    },
+    code: 1,
+    hooks: null,
+    stderr: "は git の作業ツリーでない (git dir の中か bare のリポ)",
   },
   {
     name: "install が落ちる",
@@ -684,18 +739,28 @@ cases.push(
     }),
   })),
   {
+    name: "git --version の形が読めない",
+    fakes: {
+      git:
+        `#!/bin/sh\n[ "$1" = --version ] && { echo 'unknown'; exit 0; }\nexec '${realGit}' "$@"\n`,
+    },
+    code: 1,
+    hooks: null,
+    stderr: "git が 2.32 以降でない (unknown)",
+  },
+  {
     name: "引数を受けない",
     args: ["x"],
     code: 2,
     hooks: null,
     stderr: "verify.sh: 引数は受けない (x)",
   },
-  {
-    name: "TMPDIR が未設定なら /tmp を解決したもの",
-    env: () => ({ TMPDIR: "" }),
+  ...([["空", ""], ["未設定", undefined]] as const).map(([name, value]) => ({
+    name: `TMPDIR が${name}なら /tmp を解決したもの`,
+    env: () => ({ TMPDIR: value }),
     ...copied,
-    tmpdir: await Deno.realPath("/tmp"),
-  },
+    tmpdir: realTmp,
+  })),
   {
     name: "TMPDIR が symlink",
     prepare: (dir) => ln(realTmpdir, `${dir}/.git/tmp-link`),
@@ -734,14 +799,6 @@ cases.push(
     hooks: copiedHooks,
     stderr: "が , を含む",
   },
-  // 次元: canon: facts/shell/string-input-categories の空白・shell の特殊文字と、glob の ? [、改行
-  ...["a b", "a*b", "a?b", "a[b", "a\nb"].map((name) => ({
-    name: `TMPDIR が ${JSON.stringify(name)} を含む`,
-    prepare: (dir: string) => Deno.mkdir(`${dir}/.git/${name}`),
-    env: (_: string, dir: string) => ({ TMPDIR: `${dir}/.git/${name}` }),
-    ...copied,
-    tmpdir: (realDir: string) => `${realDir}/.git/${name}`,
-  })),
   {
     name: "deno.lock が deno.json と食い違えば落ちる",
     prepare: async (dir) => {
@@ -759,7 +816,7 @@ cases.push(
 async function fixAndRerun(
   invocation: Invocation,
   gitDir: string,
-  env: Record<string, string>,
+  env: EnvChange,
   stderr: string,
 ) {
   const command = stderr.split("\n").find((l) => l.includes("Execute: "))
@@ -775,81 +832,122 @@ async function fixAndRerun(
   return { code: again.code, hooks: await readHooks(gitDir) };
 }
 
+/** c を回し、期待と違えば違いの説明を返す。 */
+const runCase = (c: Case): Promise<string[]> =>
+  withTempDir((dir) =>
+    withTempDir(async (elsewhere) => {
+      await makeRepo(dir);
+      await git(elsewhere, "init", "-q", "--template=");
+      await c.prepare?.(dir, elsewhere);
+      const env = c.env?.(elsewhere, dir) ?? {};
+      if (c.fakes) {
+        const bin = `${dir}/.git/fake-bin`;
+        await Deno.mkdir(bin);
+        for (const [name, content] of Object.entries(c.fakes)) {
+          await Deno.writeTextFile(`${bin}/${name}`, content, {
+            mode: 0o755,
+          });
+        }
+        env.PATH = `${bin}:${baseEnv.PATH}`;
+      }
+      const lock = await Deno.readTextFile(`${dir}/deno.lock`);
+      const invocation = await c.invoke?.(dir, elsewhere) ?? direct(dir);
+      const r = await verify(invocation, env, c.args);
+      const got = {
+        code: r.code,
+        hooks: await readHooks(`${dir}/.git`),
+        strayHooks: await readHooks(`${elsewhere}/.git`),
+        strayStdout: r.stdout.includes(elsewhere),
+        report: reportOf(r.stdout),
+        lockUnchanged: await Deno.readTextFile(`${dir}/deno.lock`) === lock,
+        stderr: c.stderr === undefined || r.stderr.includes(c.stderr),
+        stderrLacks: c.stderrLacks === undefined ||
+          !r.stderr.includes(c.stderrLacks),
+        fixed: c.fix &&
+          await fixAndRerun(invocation, `${dir}/.git`, env, r.stderr),
+      };
+      const want = {
+        code: c.code,
+        hooks: c.hooks,
+        strayHooks: null,
+        strayStdout: false,
+        report: c.tmpdir === undefined ? undefined : {
+          gitDir: `${await Deno.realPath(dir)}/.git`,
+          gitVars: [],
+          tmpdir: typeof c.tmpdir === "string"
+            ? c.tmpdir
+            : c.tmpdir(await Deno.realPath(dir)),
+          permissions,
+        },
+        lockUnchanged: true,
+        stderr: true,
+        stderrLacks: true,
+        fixed: c.fix && { code: 0, hooks: copiedHooks },
+      };
+      if (got.report) {
+        got.report.gitVars = got.report.gitVars.filter((v) =>
+          localEnv.includes(v)
+        );
+      }
+      try {
+        deepStrictEqual(got, want);
+        return [];
+      } catch {
+        return [
+          `${c.name}\n${
+            JSON.stringify({ ...got, hooks: undefined }, null, 1)
+          }\nhooks の一致: ${
+            JSON.stringify(got.hooks) === JSON.stringify(want.hooks)
+          }\n${r.stdout}${r.stderr}`,
+        ];
+      }
+    })
+  );
+
 Deno.test("verify.sh の hook の状態と環境", async () => {
-  const mismatches = (await Promise.all(
-    cases.map((c) =>
-      withTempDir((dir) =>
-        withTempDir(async (elsewhere) => {
-          await makeRepo(dir);
-          await git(elsewhere, "init", "-q", "--template=");
-          await c.prepare?.(dir, elsewhere);
-          const env = c.env?.(elsewhere, dir) ?? {};
-          if (c.fakes) {
-            const bin = `${dir}/.git/fake-bin`;
-            await Deno.mkdir(bin);
-            for (const [name, content] of Object.entries(c.fakes)) {
-              await Deno.writeTextFile(`${bin}/${name}`, content, {
-                mode: 0o755,
-              });
-            }
-            env.PATH = `${bin}:${baseEnv.PATH}`;
-          }
-          const lock = await Deno.readTextFile(`${dir}/deno.lock`);
-          const invocation = await c.invoke?.(dir, elsewhere) ?? direct(dir);
-          const r = await verify(invocation, env, c.args);
-          const got = {
-            code: r.code,
-            hooks: await readHooks(`${dir}/.git`),
-            strayHooks: await readHooks(`${elsewhere}/.git`),
-            strayStdout: r.stdout.includes(elsewhere),
-            report: reportOf(r.stdout),
-            lockUnchanged: await Deno.readTextFile(`${dir}/deno.lock`) === lock,
-            stderr: c.stderr === undefined || r.stderr.includes(c.stderr),
-            stderrLacks: c.stderrLacks === undefined ||
-              !r.stderr.includes(c.stderrLacks),
-            fixed: c.fix &&
-              await fixAndRerun(invocation, `${dir}/.git`, env, r.stderr),
-          };
-          const want = {
-            code: c.code,
-            hooks: c.hooks,
-            strayHooks: null,
-            strayStdout: false,
-            report: c.tmpdir === undefined ? undefined : {
-              gitDir: `${await Deno.realPath(dir)}/.git`,
-              gitVars: [],
-              tmpdir: typeof c.tmpdir === "string"
-                ? c.tmpdir
-                : c.tmpdir(await Deno.realPath(dir)),
-              permissions,
-            },
-            lockUnchanged: true,
-            stderr: true,
-            stderrLacks: true,
-            fixed: c.fix && { code: 0, hooks: copiedHooks },
-          };
-          if (got.report) {
-            got.report.gitVars = got.report.gitVars.filter((v) =>
-              localEnv.includes(v)
-            );
-          }
-          try {
-            deepStrictEqual(got, want);
-            return [];
-          } catch {
-            return [
-              `${c.name}\n${
-                JSON.stringify({ ...got, hooks: undefined }, null, 1)
-              }\nhooks の一致: ${
-                JSON.stringify(got.hooks) === JSON.stringify(want.hooks)
-              }\n${r.stdout}${r.stderr}`,
-            ];
-          }
-        })
-      )
+  deepStrictEqual((await Promise.all(cases.map(runCase))).flat(), []);
+});
+
+Deno.test("TMPDIR の値の文字", async () => {
+  // 次元: canon: facts/shell/string-input-categories の全分類と、glob の ? [、改行 (, は cases の行)
+  const chars = [
+    "\t",
+    "\x01",
+    " ",
+    "$",
+    "*",
+    '"',
+    "'",
+    "\\",
+    "é",
+    "あ",
+    "ｚ",
+    "?",
+    "[",
+    "\n",
+  ];
+  const nameArb = fc.record({
+    head: fc.constantFrom("", "-x", "--help"),
+    body: fc.array(fc.constantFrom(...chars), { minLength: 1, maxLength: 4 }),
+  }).map(({ head, body }) => `${head}a${body.join("")}b`);
+  await fc.assert(
+    fc.asyncProperty(
+      fc.uniqueArray(nameArb, { minLength: 1, maxLength: 4 }),
+      async (names) => {
+        const mismatches = await Promise.all(names.map((name) =>
+          runCase({
+            name: `TMPDIR が ${JSON.stringify(name)}`,
+            prepare: (dir) => Deno.mkdir(`${dir}/.git/${name}`),
+            env: (_, dir) => ({ TMPDIR: `${dir}/.git/${name}` }),
+            ...copied,
+            tmpdir: (realDir) => `${realDir}/.git/${name}`,
+          })
+        ));
+        deepStrictEqual(mismatches.flat(), []);
+      },
     ),
-  )).flat();
-  deepStrictEqual(mismatches, []);
+    { numRuns: 5, includeErrorInReport: true },
+  );
 });
 
 Deno.test("linked worktree で回すと、hook は common git dir の hooks にだけ写る", async () => {
@@ -920,7 +1018,7 @@ Deno.test("写している最中に SIGTERM を受けると、一時ファイル
     let started = false;
     for (let i = 0; i < 100 && !started; i++) {
       started = await exists(installed);
-      if (!started) await new Promise((r) => setTimeout(r, 100));
+      if (!started) await sleep(100);
     }
     try {
       child.kill("SIGTERM");
