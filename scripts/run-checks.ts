@@ -4,7 +4,7 @@
  * 流れ:
  * 1. 段より前の確かめ。並行に回し、外れたものを全部出して、段を回さずに exit 1。
  *    - git が知るファイルの一覧と、その名前 (下の「名前」)。
- *    - 作業ツリーに無い追跡ファイル (`git ls-files --deleted`)。deno lint はその名前を黙って飛ばす (canon: facts/deno/missing-file-args)。
+ *    - 作業ツリーに無い追跡ファイル (`git ls-files --deleted`)。deno lint はその名前を黙って飛ばす (canon: facts/deno/missing-file-args)。deno lint が存在しない引数を error にするようになったら外せる。
  *    - deno と shellcheck の版 (下の「版」)。
  * 2. 段 (下の steps) を全部同時に始め、全部を待つ。段が共有して書くのは deno の cache (DENO_DIR) だけ。deno.lock は `--frozen-lockfile` で読むだけ。
  * 3. 段の出力を steps の順に出す。
@@ -55,7 +55,9 @@
  *   - deno: denoRange (下の定数)。このプロセスを動かす deno を見る (段の子も同じ PATH で引く)。
  *   - shellcheck: shellcheckVersion だけ。版で出す指摘が違う (canon: facts/shellcheck/sc2015-version-difference)。
  *   - git: verify.sh の事前条件 (verify.sh が確かめる)。
- *   - 範囲を広げる・版を上げるとき: このファイルが引く canon の事実を新しい版で測り直し、同じ commit で .github/workflows/verify.yml・AGENTS.md・この定数を揃える。
+ *   - 範囲を広げる・版を上げるとき: 次を新しい版で測り直し、同じ commit で .github/workflows/verify.yml・AGENTS.md・この定数を揃える。
+ *     - このファイルが引く canon の事実。
+ *     - deno lint の `--rules-tags=` (空の値) の挙動と、deno info --json の形 (どちらも下の「deno lint」「deno.json の imports」)。
  * - 名前: git が知るファイル (追跡と、無視されない未追跡) を -z で受ける (canon: facts/git/path-output-quoting)。次の述語を全部満たす名前だけを処理する。外れる名前が 1 つでもあれば、理由と名前 (バイトを escape したもの) を出して、段を回さずに落ちる。
  *   - UTF-8 として正しい。不正な名前はコマンドへ渡す引数 (文字列) で表せない。
  *   - 改行を含まない。
@@ -66,11 +68,14 @@
  *   - check-json-md.ts: 名前を全部、そのまま渡す (canon: facts/deno/run-args-passthrough)。check-json-md.ts はこのファイルの隣のものを起動する。
  * - 拡張子で対象を決める: shellcheck は `*.sh`、deno は `*.ts` (test は `*_test.ts`)。拡張子の無い shell は検査しないので、このリポの shell は `*.sh` と名付ける。対象が無い段は回さずに通す (shellcheck は引数が無いと落ちる。canon: facts/shellcheck/no-files-argument)。
  * - deno lint は cwd の deno.json の lint 設定を読む (canon: facts/deno/lint-file-args-and-rules)。この段は lint が空であることを前提にし、規則を no-unused-vars 1 つに絞る。recommended は deno の版で規則が増え、コードを変えていない CI が落ちうるため。足すときは `--rules-include` を足す。
+ *   - `--rules-tags=` (空の値) で recommended を外せるのは、文書に無い実測の挙動。この段の試験 (run-checks_test.ts) が固定し、deno の版を上げたら測り直す。recommended に戻すのは、版を上げて増えた規則の修正が済んだとき。
  * - deno test の許可:
  *   - write: 段の TMPDIR だけ (canon: facts/deno/make-temp-dir-permissions)。Deno.symlink は絞らない write を要る (canon: facts/deno/symlink-requires-unscoped-permissions) ので、test は symlink を ln -s で作る。
  *   - read・env・run: 絞らない。test は fixture から verify.sh・run-checks.ts・check-json-md.ts と、PATH を差し替えた fake を子として回す。run を許すと、test は子を通して net の既定の拒否も迂回できる。
  *   - 外せる条件: `--allow-run=deno` で、差し替えた PATH の dir の deno を起動できるようになったら (canon: facts/deno/allow-run-name-with-child-path)、run を起動するものに絞る。
  * - deno.json の imports の各キー (importKeys 段): git が知る .ts のそれぞれに `deno info --json` を回し (canon: facts/deno/info-json-dependencies)、graph の esm の module (相対 import で辿った先を含む) の dependencies[].specifier のどれかと一致するとき使われているとみなす。末尾が / のキーは、指定子がその接頭辞のときも使われているとみなす。
+ *   - 指定子に入る構文: 静的 import (`import x from "a"`・`import "a"`)、`export … from "a"`、`import type`、リテラルの動的 import (`import("a")`)。入らないもの: コメント・文字列の中、`/// <reference>`、JSDoc の `@import`、リテラルでない動的 import。
+ *   - deno info --json の形 (modules[].dependencies[].specifier・modules[].error) は文書の schema が無い。この段の試験が固定し、deno の版を上げたら測り直す。
  *   - deno info には `--no-config --no-lock --no-npm --no-remote` を付け、deno.json・deno.lock・ネットワークを使わずに回す。指定子は書かれた文字列のまま出る。
  *   - deno info が落ちるか、graph の file: の module に error (ファイルが無い、構文が壊れている、相対 import 先が無い。deno info は exit 0) があれば、それを報告し、未使用の判定をせずに落ちる。
  *   - 数える参照は .ts の import の指定子だけ (deno.json の tasks などは数えない)。
@@ -292,13 +297,13 @@ const splitNul = (b: Uint8Array): Uint8Array[] => {
   return names;
 };
 
-/** 段より前の確かめの結果。files は名前が全部述語を満たすときだけ使う。 */
-interface Pre {
+/** git が知るファイルの一覧。files は problems が空のときだけ使う。 */
+interface Listing {
   files: string[];
   problems: string[];
 }
 
-async function gitFiles(): Promise<Pre> {
+async function gitFiles(): Promise<Listing> {
   const r = await exec("git", [
     "ls-files",
     "-z",
@@ -337,45 +342,39 @@ async function gitFiles(): Promise<Pre> {
   };
 }
 
-async function deletedFiles(): Promise<Pre> {
+/** 段より前の確かめの、外れたものの理由。 */
+type Problems = string[];
+
+async function deletedFiles(): Promise<Problems> {
   const r = await exec("git", ["ls-files", "-z", "--deleted"]);
   if (r.code !== 0) {
-    return {
-      files: [],
-      problems: [
-        `git ls-files --deleted が exit ${r.code}\n${dec.decode(r.err)}`,
-      ],
-    };
+    return [`git ls-files --deleted が exit ${r.code}\n${dec.decode(r.err)}`];
   }
   const names = splitNul(r.out);
-  return {
-    files: [],
-    problems: names.length
-      ? [
-        `作業ツリーに無い追跡ファイルがある。戻すか git rm する: ${
-          names.map(escapeBytes).join(" ")
-        }`,
-      ]
-      : [],
-  };
+  return names.length
+    ? [
+      `作業ツリーに無い追跡ファイルがある。戻すか git rm する: ${
+        names.map(escapeBytes).join(" ")
+      }`,
+    ]
+    : [];
 }
 
 const denoMinor = "2.9";
 const denoMinPatch = 7;
 const denoRange = `${denoMinor}.x (x は ${denoMinPatch} 以上)`;
-function denoVersion(): Promise<Pre> {
+function denoVersion(): Promise<Problems> {
   const v = Deno.version.deno;
   const patch = v.startsWith(`${denoMinor}.`)
     ? v.slice(denoMinor.length + 1)
     : undefined;
   const ok = patch !== undefined && /^\d+$/.test(patch) &&
     Number(patch) >= denoMinPatch;
-  return Promise.resolve({
-    files: [],
-    problems: ok ? [] : [
+  return Promise.resolve(
+    ok ? [] : [
       `deno の版が ${v} で、${denoRange} でない。.github/workflows/verify.yml の deno-version の版を入れる: deno upgrade --version <その版>`,
     ],
-  });
+  );
 }
 
 const shellcheckVersion = "0.11.0";
@@ -386,11 +385,10 @@ const shellcheckInstall = [
   `- macOS は、Homebrew の版が ${shellcheckVersion} なら brew install shellcheck でもよい。`,
   `- 置いたら shellcheck --version で確かめる。`,
 ].join("\n");
-async function shellcheckProbe(): Promise<Pre> {
-  const problem = (message: string): Pre => ({
-    files: [],
-    problems: [`${message}\n${shellcheckInstall}`],
-  });
+async function shellcheckProbe(): Promise<Problems> {
+  const problem = (message: string): Problems => [
+    `${message}\n${shellcheckInstall}`,
+  ];
   let probe: Run;
   try {
     probe = await exec("shellcheck", ["--norc", "--version"], shellcheckEnv);
@@ -416,19 +414,21 @@ async function shellcheckProbe(): Promise<Pre> {
       `shellcheck の版が ${actual} で、${shellcheckVersion} でない。`,
     );
   }
-  return { files: [], problems: [] };
+  return [];
 }
 
-const pre = await Promise.all(
-  [gitFiles, deletedFiles, denoVersion, shellcheckProbe].map((check) =>
-    check().catch((e): Pre => ({
-      files: [],
-      problems: [e instanceof Error ? e.stack ?? String(e) : String(e)],
-    }))
+const describe = (e: unknown) =>
+  e instanceof Error ? e.stack ?? String(e) : String(e);
+const [listing, others] = await Promise.all([
+  gitFiles().catch((e): Listing => ({ files: [], problems: [describe(e)] })),
+  Promise.all(
+    [deletedFiles, denoVersion, shellcheckProbe].map((check) =>
+      check().catch((e): Problems => [describe(e)])
+    ),
   ),
-);
+]);
 await unlessInterrupted();
-const preProblems = pre.flatMap((p) => p.problems);
+const preProblems = [...listing.problems, ...others.flat()];
 if (preProblems.length) {
   console.error(
     preProblems.map((p) => `${self}: ${p}`).join("\n") +
@@ -436,7 +436,7 @@ if (preProblems.length) {
   );
   Deno.exit(1);
 }
-const files = pre[0].files;
+const files = listing.files;
 const withExt = (ext: string) => files.filter((f) => f.endsWith(ext));
 const dotSlash = (f: string) => `./${f}`;
 const ts = withExt(".ts");
@@ -453,7 +453,7 @@ const onFiles = (
   env?: EnvChange,
 ) =>
   targets.length
-    ? exec(cmd, [...args, ...targets], env)
+    ? exec(cmd, [...args, ...targets.map(dotSlash)], env)
     : Promise.resolve(pass("対象のファイルが無い"));
 
 /** deno.json の imports の各キーが、.ts の import の指定子から使われていること。 */
@@ -508,17 +508,22 @@ async function importKeys(): Promise<Run> {
 }
 
 async function denoTest(): Promise<Run> {
-  if (testTmp === undefined) return pass("対象のファイルが無い");
+  if (tests.length === 0) return pass("対象のファイルが無い");
+  if (testTmp === undefined) throw new Error("deno test の段の TMPDIR が無い");
   try {
-    return await exec("deno", [
-      "test",
-      frozen,
-      "--allow-read",
-      `--allow-write=${testTmp}`,
-      "--allow-env",
-      "--allow-run",
-      ...tests.map(dotSlash),
-    ], { set: { TMPDIR: testTmp } });
+    return await onFiles(
+      "deno",
+      [
+        "test",
+        frozen,
+        "--allow-read",
+        `--allow-write=${testTmp}`,
+        "--allow-env",
+        "--allow-run",
+      ],
+      tests,
+      { set: { TMPDIR: testTmp } },
+    );
   } finally {
     await removeTestTmp();
   }
@@ -531,11 +536,11 @@ const steps: [string, () => Promise<Run>][] = [
       onFiles(
         "shellcheck",
         ["--norc"],
-        withExt(".sh").map(dotSlash),
+        withExt(".sh"),
         shellcheckEnv,
       ),
   ],
-  ["deno fmt", () => onFiles("deno", ["fmt", "--check"], ts.map(dotSlash))],
+  ["deno fmt", () => onFiles("deno", ["fmt", "--check"], ts)],
   // --rules-tags= で recommended を外し、no-unused-vars だけを走らせる (canon: facts/deno/lint-file-args-and-rules)
   [
     "deno lint",
@@ -544,33 +549,29 @@ const steps: [string, () => Promise<Run>][] = [
         "lint",
         "--rules-tags=",
         "--rules-include=no-unused-vars",
-      ], ts.map(dotSlash)),
+      ], ts),
   ],
-  ["deno check", () => onFiles("deno", ["check", frozen], ts.map(dotSlash))],
+  ["deno check", () => onFiles("deno", ["check", frozen], ts)],
   ["deno test", denoTest],
   ["deno.json の imports", importKeys],
   [
     "JSON と Markdown",
     () =>
-      onFiles(
-        "deno",
-        [
-          "run",
-          frozen,
-          "--allow-read=.",
-          import.meta.resolve("./check-json-md.ts"),
-        ],
-        files,
-      ),
+      exec("deno", [
+        "run",
+        frozen,
+        "--allow-read=.",
+        import.meta.resolve("./check-json-md.ts"),
+        ...files,
+      ]),
   ],
 ];
 
 const results = await Promise.all(
-  steps.map(([, run]) =>
-    run().catch((e): Run =>
-      fail(e instanceof Error ? e.stack ?? String(e) : String(e))
-    )
-  ),
+  steps.map(async ([name, run]) => ({
+    name,
+    ...await run().catch((e): Run => fail(describe(e))),
+  })),
 );
 await unlessInterrupted();
 
@@ -591,18 +592,17 @@ const write = (
 };
 const out = (data: Uint8Array) => write("stdout", Deno.stdout, data);
 const err = (data: Uint8Array) => write("stderr", Deno.stderr, data);
-results.forEach((r, i) => {
-  const name = steps[i][0];
+for (const r of results) {
   if (r.code === 0) {
-    out(enc.encode(`== ${name}: 通った\n`));
+    out(enc.encode(`== ${r.name}: 通った\n`));
     out(r.out);
     err(r.err);
   } else {
-    err(enc.encode(`== ${name}: 落ちた (exit ${r.code})\n`));
+    err(enc.encode(`== ${r.name}: 落ちた (exit ${r.code})\n`));
     err(r.out);
     err(r.err);
   }
-});
+}
 for (const message of writeErrors) err(enc.encode(`${self}: ${message}\n`));
 Deno.exit(
   Deno.args[0] === "1" || writeErrors.size > 0 ||
