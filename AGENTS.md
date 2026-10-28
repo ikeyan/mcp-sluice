@@ -33,7 +33,9 @@
 
 - `.claude/settings.json` は ikeyan-skills と superpowers の plugin を宣言する。入り方は環境で違う:
   - Claude Code on the web: セッションの開始時に自動で入る (canon: facts/claude-code/web-session-auto-installs-declared-plugins)。
-  - 手元の Claude Code: 各利用者が ikeyan の marketplace (`ikeyan/agent-files`) と公式の marketplace から入れ、信頼する (canon: facts/claude-code/external-plugin-requires-per-user-install-trust)。
+  - 手元の Claude Code: 各利用者が shell で次を回して入れる (canon: facts/claude-code/external-plugin-requires-per-user-install-trust)。
+    1. marketplace を足す: `claude plugin marketplace add ikeyan/agent-files` (`ikeyan` の名前で登録される)。公式の marketplace (`claude-plugins-official`) は、対話のセッションを開いたことのない機械でだけ `claude plugin marketplace add anthropics/claude-plugins-official` が要る。
+    2. plugin を入れる: `claude plugin install ikeyan-skills@ikeyan --scope project` と `claude plugin install superpowers@claude-plugins-official --scope project`。
 
 ## このリポの仕様
 
@@ -71,9 +73,14 @@
     - `deno lint`
     - `deno check`
   - `deno test`: git が知る `*_test.ts`。
-  - `deno.json` の `imports`: 各キーが `.ts` の import 指定子から使われていること。このリポの `.ts` が export を持つようになったら、未使用の export・module の検査を足す。
+  - `deno.json` の `imports`: 各キーが `.ts` の import 指定子から使われていること。
   - `scripts/check-json-md.ts`: `.json` の構文と、`.md` のリポ内リンク・anchor。
-- 必要なもの (版の範囲は `verify.sh` の事前条件と `scripts/run-checks.ts` の先頭の「版」。CI が使う版は `.github/workflows/verify.yml`):
+- このリポの `.ts` が export を持つようになったら、未使用の export・module の検査を足す。
+- 版の範囲は次の場所に書く。
+  - `verify.sh` の事前条件。
+  - `scripts/run-checks.ts` の先頭の「版」。
+  - CI が使う版: `.github/workflows/verify.yml`。
+- 必要なもの:
   - `bash`
   - `cmp`
   - `install`
@@ -86,21 +93,23 @@
 ## このリポの言語
 
 - 製品・テスト・開発用のスクリプトは TypeScript (Deno) で書く。
-- shell は次だけ (場所: そこに置く理由):
-  - `verify.sh`: 入口と、pre-push の hook の写し。
-  - `hooks/pre-push`・`.agent-sync/sync.sh`・`.claude/skills/pr-workflow/` の shell: agent-sync が置く。
-  - `.github/workflows/verify.yml` の `run`: CI の shellcheck の入手 (sha256 の確かめを含む) と、`./verify.sh` の起動。
-- deno で hook を写すには、run-checks.ts の許可に common git dir への write が要る。hook の写しを `verify.sh` に置くのは、この許可を足さないため。
+- shell は次だけ (場所: shell にする理由):
+  - `verify.sh`: `scripts/run-checks.ts` に deno の許可を渡して起動する入口で、pre-push の hook も写す。deno で hook を写すと、run-checks.ts の許可に common git dir への write が要る。
+  - `hooks/pre-push`・`.agent-sync/sync.sh`・`.claude/skills/pr-workflow/` の shell: agent-sync が shell のまま置く。
+  - `.github/workflows/verify.yml` の `run`:
+    - shellcheck の入手 (sha256 の確かめを含む): `./verify.sh` より前に PATH に置く CI の準備で、step の `run` は shell で回る。
+    - `./verify.sh` の起動: CI も手元と同じ入口を回す。
 
 ## 外部依存の事実
 
+- 事実の本文は canon と、`docs/design.md` の根拠の記述に置く。コードとコメントは canon を参照で引く。
 - canon を読めない環境では、一次情報 (仕様・ソース・公式 docs) を直接確かめる。
 
 ## 文書の言語
 
-- 利用者向けの文書 (README・`docs/` の利用者向けのもの): 英語。
+- 利用者向けの文書 (`README`・`docs/` の利用者向けのもの): 英語。
 - 開発者向けの文書: 日本語。
-  - AGENTS.md
+  - `AGENTS.md`
   - `docs/design.md`
   - `retrospectives/`
   - `review-perspectives/`
