@@ -6,7 +6,7 @@
  *   - `.json` で終わるもの: 構文を検査する。BOM で始まるものは JSON として読めない違反になる (deno も BOM 付きの deno.json を読めない。canon: facts/deno/config-file-bom-rejected)。
  *   - `.md` で終わるもの: リンクと anchor を検査する。
  *   - 全部: リンク先が在るかの判定に使う。
- *   - 拡張子の判定は大文字小文字を区別する。`.JSON`・`.MD` は検査しない。
+ *   - 拡張子の判定は大文字小文字を区別する。大文字小文字だけ違う名前 (`.JSON`・`.MD` など) は届かない (run-checks.ts が段の前で落とす)。
  * - `.json`・`.md` は UTF-8 として読む。BOM は落とさない (canon: facts/git/path-output-quoting の TextDecoder)。
  * - 次のときは何も検査せず exit 2:
  *   - 引数が無い。

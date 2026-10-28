@@ -360,12 +360,6 @@ const cases: {
     ],
   },
   {
-    name: "拡張子は大文字小文字を区別する (.JSON・.MD は検査しない)",
-    files: { "BAD.JSON": "{", "BAD.MD": "[x](gone.md)\n" },
-    code: 0,
-    stderr: [],
-  },
-  {
     name: "JSON の構文と BOM",
     files: { "ok.json": "{}", "bad.json": "{", "bom.json": "\uFEFF{}" },
     code: 1,

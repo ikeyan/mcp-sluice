@@ -801,48 +801,6 @@ Deno.test("段より前の確かめ: shellcheck の版、git ls-files、項目�
         );
       })
     ),
-    withRepo({ "f.ts": "export {};\n" }, async (dir) => {
-      for (const name of ["tool", "hooks/pre-push", "ok.sh"]) {
-        await Deno.mkdir(`${dir}/${name.slice(0, name.lastIndexOf("/") + 1)}`, {
-          recursive: true,
-        });
-        await Deno.writeTextFile(`${dir}/${name}`, "#!/bin/sh\n", {
-          mode: 0o755,
-        });
-      }
-      await run("git", ["add", "-A"], dir);
-      const r = await runChecks(dir, "0");
-      const listed = (name: string) =>
-        r.stderr.includes(`- ${name}: 検査の段が無い名前`);
-      expect(
-        "検査の段が無い名前の実行ファイル (hooks/pre-push を除く)",
-        unstaged(r) && listed("tool") && !listed("hooks/pre-push") &&
-          !listed("ok.sh") &&
-          !r.stderr.includes("- f.ts"),
-        r.stdout + r.stderr,
-      );
-    }),
-    withRepo({ "f.ts": "export {};\n" }, async (dir) => {
-      // 次元: 追跡 (mode 100644・100755) と未追跡、.sh と .ts
-      const names = ["a.TS", "b.SH", "c.Sh", "d.tS"];
-      for (const [i, name] of names.entries()) {
-        await Deno.writeTextFile(`${dir}/${name}`, "", {
-          mode: i === 1 ? 0o755 : 0o644,
-        });
-        if (i < names.length - 1) await run("git", ["add", name], dir);
-      }
-      const r = await runChecks(dir, "0");
-      expect(
-        "拡張子が大文字小文字だけ違う",
-        unstaged(r) &&
-          names.every((name) =>
-            r.stderr.includes(
-              `- ${name}: 拡張子が .sh・.ts と大文字小文字だけ違う`,
-            )
-          ) && !r.stderr.includes("- f.ts"),
-        r.stdout + r.stderr,
-      );
-    }),
     withRepo({}, async (dir) => {
       const bin = `${dir}/.git/no-git-bin`;
       await Deno.mkdir(bin);
@@ -992,6 +950,141 @@ Deno.test("段より前の確かめ: shellcheck の版、git ls-files、項目�
         );
       },
     ),
+  ]);
+  deepStrictEqual(failures, []);
+});
+
+/** 名前の拡張子の類の表 (run-checks.ts の先頭の「拡張子」) の列: 追跡 (mode) か未追跡か。値は fixture の中の置き場。 */
+const extColumns = { "100644": "t644", "100755": "t755", "未追跡": "u" };
+type ExtColumn = keyof typeof extColumns;
+/** 表のセルの扱い: その段で検査する・段の前で落ちる・検査しない。 */
+type ExtOutcome = "checked" | "listed" | "ignored";
+/** 表の行。名前は列の置き場の下に置く (root なら置き場を付けない)。checked は、段の出力にその名前の検査が出ているか。 */
+const extRows: {
+  kind: string;
+  name: string;
+  content: string;
+  cells: Partial<Record<ExtColumn, ExtOutcome>>;
+  root?: true;
+  checked?: (stderr: string, path: string) => boolean;
+}[] = [
+  {
+    kind: "検査する拡張子 .sh",
+    name: "a.sh",
+    content: bad,
+    cells: { "100644": "checked", "100755": "checked", "未追跡": "checked" },
+    checked: (e, path) => e.includes(`In ./${path} line 2`),
+  },
+  {
+    kind: "検査する拡張子 .ts",
+    name: "a.ts",
+    content: "export const a=1;\n",
+    cells: { "100644": "checked", "100755": "checked", "未追跡": "checked" },
+    checked: (e, path) => sectionOf(e, "deno fmt").includes(path),
+  },
+  {
+    kind: "検査する拡張子 .json",
+    name: "a.json",
+    content: "{",
+    cells: { "100644": "checked", "100755": "listed", "未追跡": "checked" },
+    checked: (e, path) => e.includes(`${path}: JSON として読めない`),
+  },
+  {
+    kind: "検査する拡張子 .md",
+    name: "a.md",
+    content: "[x](gone.md)\n",
+    cells: { "100644": "checked", "100755": "listed", "未追跡": "checked" },
+    checked: (e, path) => e.includes(`${path}: リンク先が無い`),
+  },
+  ...["b.SH", "b.Ts", "b.JSON", "b.Md"].map((name) => ({
+    kind: `大文字小文字だけ違う ${name}`,
+    name,
+    content: "",
+    cells: {
+      "100644": "listed",
+      "100755": "listed",
+      "未追跡": "listed",
+    } as const,
+  })),
+  {
+    kind: "他の拡張子",
+    name: "c.txt",
+    content: "",
+    cells: { "100644": "ignored", "100755": "listed", "未追跡": "ignored" },
+  },
+  {
+    kind: "拡張子なし",
+    name: "c",
+    content: "",
+    cells: { "100644": "ignored", "100755": "listed", "未追跡": "ignored" },
+  },
+  {
+    kind: "拡張子なし (hooks/pre-push)",
+    name: "hooks/pre-push",
+    content: "#!/bin/sh\n",
+    cells: { "100755": "ignored" },
+    root: true,
+  },
+];
+/** 表のセルごとの、fixture の中のパスと扱い。 */
+const extCells = extRows.flatMap((row) =>
+  (Object.entries(row.cells) as [ExtColumn, ExtOutcome][]).map((
+    [column, outcome],
+  ) => ({
+    row,
+    column,
+    outcome,
+    path: row.root ? row.name : `${extColumns[column]}/${row.name}`,
+  }))
+);
+
+Deno.test("名前の拡張子の類ごとに、検査する・段の前で落ちる・検査しない", async () => {
+  const { failures, expect } = collector();
+  /** cells を置く。追跡するものは mode を付けて git add する。 */
+  const place = async (dir: string, cells: typeof extCells) => {
+    for (const { row, column, path } of cells) {
+      await Deno.mkdir(`${dir}/${path.slice(0, path.lastIndexOf("/"))}`, {
+        recursive: true,
+      });
+      await Deno.writeTextFile(`${dir}/${path}`, row.content, {
+        mode: column === "100755" ? 0o755 : 0o644,
+      });
+      if (column !== "未追跡") await run("git", ["add", path], dir);
+    }
+  };
+  const describeCell = (c: (typeof extCells)[number]) =>
+    `${c.row.kind} (${c.column}): ${c.outcome}`;
+  await Promise.all([
+    // 全部のセル: 段の前で落ちるセルだけが、処理できない項目に出る
+    withRepo({}, async (dir) => {
+      await place(dir, extCells);
+      const r = await runChecks(dir, "0");
+      for (const c of extCells) {
+        expect(
+          describeCell(c),
+          r.code === 1 && !r.stdout.includes("==") &&
+            r.stderr.includes("検査の段は回していない") &&
+            r.stderr.includes(`\n- ${c.path}: `) === (c.outcome === "listed"),
+          r.stdout + r.stderr,
+        );
+      }
+    }),
+    // 段の前で落ちないセル: 検査するものは段の出力に出て、検査しないものは出ない
+    withRepo({}, async (dir) => {
+      const cells = extCells.filter((c) => c.outcome !== "listed");
+      await place(dir, cells);
+      const r = await runChecks(dir, "0");
+      for (const c of cells) {
+        expect(
+          describeCell(c),
+          r.code === 1 && r.stderr.includes("== ") &&
+            (c.outcome === "checked"
+              ? c.row.checked?.(r.stderr, c.path) === true
+              : !r.stderr.includes(c.path)),
+          r.stdout + r.stderr,
+        );
+      }
+    }),
   ]);
   deepStrictEqual(failures, []);
 });

@@ -104,11 +104,21 @@
  * - 名前の渡し方:
  *   - shellcheck・git・deno (check-json-md.ts を除く): 名前に `./` を前置する。先頭の `-` (option)・`!` (deno の除外)・`npm:` など (deno の URL) が名前として読まれる。deno check は `--` の後の名前を無視して cwd 全体を検査する (canon: facts/deno/check-double-dash)。
  *   - check-json-md.ts: 名前を全部、そのまま渡す (canon: facts/deno/run-args-passthrough)。
- * - 拡張子: 名前の末尾 (大文字小文字を区別する) で対象を決める。
- *   - shellcheck は `*.sh`、deno は `*.ts` (test は `*_test.ts`)。対象が無い段は通す (shellcheck は引数が無いと落ちる。canon: facts/shellcheck/no-files-argument)。
- *   - 大文字小文字だけが違う拡張子 (`.SH`・`.Ts` など) の名前は、処理できない項目として段の前で落ちる。検査せずに通さないため。
- *   - 追跡された実行ファイル (mode 100755) で、検査の段が無い名前 (`*.sh`・`*.ts` でない) は、処理できない項目として段の前で落ちる。拡張子の無い shell を検査せずに通さないため。
- *   - 例外は hooks/pre-push で、名前は git が決め、agent-sync が置く。検査は配る側 (ikeyan/agent-files の verify) が受け持つ。
+ * - 拡張子: 検査する拡張子は exts (`.sh`・`.ts`・`.json`・`.md`) で、名前の末尾の綴り (大文字小文字を含む) で対象を決める。
+ *   - 段の対象: shellcheck は `*.sh`、deno は `*.ts` (test は `*_test.ts`)、check-json-md.ts は `*.json`・`*.md` (リンク先として在るかの判定には全部の名前を使う)。対象が無い段は通す (shellcheck は引数が無いと落ちる。canon: facts/shellcheck/no-files-argument)。
+ *   - 名前の拡張子の類ごとの扱い (「落ちる」は、処理できない項目として段の前で落ちること):
+ *
+ *     | 名前の拡張子 | 追跡 (mode 100644) | 追跡 (mode 100755、実行可能) | 未追跡 |
+ *     | --- | --- | --- | --- |
+ *     | 検査する拡張子 (綴りが一致) | その段で検査する | `.sh`・`.ts` はその段で検査する。`.json`・`.md` は落ちる | その段で検査する |
+ *     | 大文字小文字だけ違う (`.SH`・`.Md` など) | 落ちる | 落ちる | 落ちる |
+ *     | 他の拡張子 | 検査しない | 落ちる | 検査しない |
+ *     | 拡張子なし | 検査しない | 落ちる (hooks/pre-push を除く) | 検査しない |
+ *
+ *   - 大文字小文字だけ違う名前を落とすのは、どの段も検査せずに通さないため。
+ *   - 実行ファイルを落とすのは、拡張子の無い shell を検査せずに通さないため。実行ファイルを検査する段は shellcheck と deno だけ。
+ *   - hooks/pre-push は、名前を git が決め、agent-sync が置く。検査は配る側 (ikeyan/agent-files の verify) が受け持つ。
+ *   - 未追跡の項目は mode を受けないので、実行可能かを見ない。
  * - deno lint は recommended の規則で回し、cwd の deno.json の lint 設定を読む (canon: facts/deno/lint-file-args-and-rules)。
  * - deno test の許可:
  *   - write: 段の TMPDIR だけ (canon: facts/deno/make-temp-dir-permissions)。
@@ -421,11 +431,13 @@ const splitNul = (b: Uint8Array): Uint8Array[] => {
 /** 段より前の確かめの、外れたものの理由。 */
 type Problems = string[];
 
-/** 検査の段の対象の拡張子 (上の「拡張子」)。 */
-const exts = { sh: ".sh", ts: ".ts" } as const;
-const checkedExts: string[] = Object.values(exts);
-const hasCheckedExt = (f: string) => checkedExts.some((e) => f.endsWith(e));
-const extList = checkedExts.join("・");
+/** 検査する拡張子 (上の「拡張子」)。段の対象はここから取る。 */
+const exts = { sh: ".sh", ts: ".ts", json: ".json", md: ".md" };
+const checkedExts = Object.values(exts);
+/** 実行ファイルを検査する段 (shellcheck・deno) の拡張子。 */
+const executableExts = [exts.sh, exts.ts];
+const endsWithAny = (f: string, list: string[]) =>
+  list.some((e) => f.endsWith(e));
 
 /** git が知る項目のうち処理するものの名前と、処理できない項目の理由。 */
 async function gitFiles(): Promise<{ files: string[]; problems: Problems }> {
@@ -459,10 +471,16 @@ async function gitFiles(): Promise<{ files: string[]; problems: Problems }> {
           ? `名前が、deno が glob として展開する * か ? を含む。${rename}`
           : f.endsWith("/")
           ? "未追跡の入れ子のリポジトリ (/ で終わる)。消すか .gitignore に足す"
-          : !hasCheckedExt(f) && hasCheckedExt(f.toLowerCase())
-          ? `拡張子が ${extList} と大文字小文字だけ違う。検査の段は大文字小文字を区別するので、${extList} にする`
-          : executable && !hasCheckedExt(f) && f !== "hooks/pre-push"
-          ? `検査の段が無い名前 (${extList} でない) の実行ファイル。shell なら .sh と名付け、他は git update-index --chmod=-x する`
+          : !endsWithAny(f, checkedExts) &&
+              endsWithAny(f.toLowerCase(), checkedExts)
+          ? `拡張子が ${
+            checkedExts.join("・")
+          } と大文字小文字だけ違う。検査の段は大文字小文字を区別するので、小文字にする`
+          : executable && !endsWithAny(f, executableExts) &&
+              f !== "hooks/pre-push"
+          ? `実行ファイルで、名前が ${
+            executableExts.join("・")
+          } でない (実行ファイルを検査する段が無い)。shell なら .sh と名付け、他は git update-index --chmod=-x する`
           : undefined;
         if (reason === undefined) files.push(f);
       } catch (e) {
