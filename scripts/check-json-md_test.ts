@@ -1,16 +1,18 @@
 /**
- * check-json-md.ts を子として、一時ディレクトリの fixture に回す。
+ * check-json-md.ts を子として、TMPDIR の下の一時ディレクトリの fixture に回す。
  * - 表の各行: fixture のファイルと引数に対し、終了コードと stderr の違反の行 (順を問わない集合) が一致すること。
- * - 性質: 生成した相対パス (`.`・`..`・空・名前の segment、先頭の `/`) へのリンクが「リポの外を指す」と報告されるのは、`..` で辿ってルートより上へ戻るときだけ。
+ * - 性質: 生成した相対パスへのリンクについて、「リポの外を指す」「リンク先が無い」の報告が、segment ごとに decode して辿るモデルと一致すること。
  */
 import fc from "fast-check";
 import { deepStrictEqual } from "node:assert/strict";
 
 const root = Deno.realPathSync(`${import.meta.dirname}/..`);
 const dec = new TextDecoder();
+const tmpdir = Deno.env.get("TMPDIR");
+if (!tmpdir) throw new Error("TMPDIR が空。./verify.sh から回す");
 
 const withTempDir = async <T>(fn: (dir: string) => Promise<T>): Promise<T> => {
-  const dir = await Deno.makeTempDir();
+  const dir = await Deno.makeTempDir({ dir: tmpdir });
   try {
     return await fn(dir);
   } finally {
@@ -18,10 +20,10 @@ const withTempDir = async <T>(fn: (dir: string) => Promise<T>): Promise<T> => {
   }
 };
 
-/** files を置いた一時ディレクトリを cwd にして check-json-md.ts を回す。値が null のパスはディレクトリにする。 */
+/** files を置いた一時ディレクトリを cwd にして check-json-md.ts を回す。値が null のパスはディレクトリにする。引数の既定は null でないパスの全部。 */
 const check = (
   files: Record<string, string | null>,
-  args = Object.keys(files).filter((f) => /\.(?:json|md)$/.test(f)),
+  args = Object.keys(files).filter((f) => files[f] !== null),
 ): Promise<{ code: number; stderr: string }> =>
   withTempDir(async (dir) => {
     for (const [path, content] of Object.entries(files)) {
@@ -39,7 +41,6 @@ const check = (
       args: [
         "run",
         "--frozen-lockfile",
-        `--config=${root}/deno.json`,
         "--allow-read=.",
         `${root}/scripts/check-json-md.ts`,
         ...args,
@@ -51,6 +52,18 @@ const check = (
   });
 
 const lines = (s: string) => s.split("\n").filter(Boolean).sort();
+
+/** 期待行のそれぞれに、まだ割り当てていない実際の行を 1 つずつ割り当てられるか (prefix なら先頭の一致)。 */
+const assignable = (got: string[], want: string[], prefix: boolean) => {
+  if (got.length !== want.length) return false;
+  const free = [...got];
+  return [...want].sort((a, b) => b.length - a.length).every((w) => {
+    const i = free.findIndex((g) => prefix ? g.startsWith(w) : g === w);
+    if (i < 0) return false;
+    free.splice(i, 1);
+    return true;
+  });
+};
 
 const heading = "# x\n\n## a\n\n## a\n";
 const cases: {
@@ -66,7 +79,8 @@ const cases: {
     name: "ルートからのパス",
     files: {
       LICENSE: "",
-      "docs/a.md": "[l](/LICENSE) [m](/nope) [n](/docs/a.md)\n",
+      "docs/a.md":
+        "[l](/LICENSE) [m](/nope) [n](/docs/a.md) [o](/) [p](/docs/)\n",
     },
     code: 1,
     stderr: ["docs/a.md: リンク先が無い — /nope"],
@@ -86,6 +100,53 @@ const cases: {
     ],
   },
   {
+    name: "綴りは大文字小文字まで git の一覧と比べる",
+    files: {
+      LICENSE: "",
+      "docs/a.md": "",
+      "b.md": "[l](license) [m](Docs/a.md) [n](docs/a.md)\n",
+    },
+    code: 1,
+    stderr: [
+      "b.md: リンク先が無い — license",
+      "b.md: リンク先が無い — Docs/a.md",
+    ],
+  },
+  {
+    name: "git の一覧に無いファイルは、作業ツリーに在っても無い",
+    files: { "untracked.md": "", "a.md": "[l](untracked.md)\n" },
+    args: ["a.md"],
+    code: 1,
+    stderr: ["a.md: リンク先が無い — untracked.md"],
+  },
+  {
+    name: "%-エンコードは segment ごとに戻す",
+    files: {
+      LICENSE: "",
+      "a b.md": "",
+      "docs/a.md":
+        "[l](%2e%2e/LICENSE) [m](..%2FLICENSE) [n](../a%20b.md) [o](%2E%2E/%2e%2e/LICENSE)\n",
+    },
+    code: 1,
+    stderr: [
+      "docs/a.md: リンク先が無い — ..%2FLICENSE",
+      "docs/a.md: リポの外を指す — %2E%2E/%2e%2e/LICENSE",
+    ],
+  },
+  {
+    name: "不正な %-エンコード",
+    files: {
+      "b.md": heading,
+      "100%zz.md": "",
+      "a.md": '<a href="100%zz.md">a</a> <a href="b.md#%E3">b</a>\n',
+    },
+    code: 1,
+    stderr: [
+      "a.md: 不正な %-エンコード — 100%zz.md",
+      "a.md: anchor が見出しに無い — b.md#%E3",
+    ],
+  },
+  {
     name: "2 つ目の # は anchor の一部",
     files: { "b.md": heading, "a.md": "[l](b.md#x#y) [m](b.md#x)\n" },
     code: 1,
@@ -98,7 +159,23 @@ const cases: {
     stderr: ["a.md: リンク先が無い — c.md?x=1"],
   },
   {
-    name: "生の HTML の href・src",
+    name: "参照スタイルのリンク・画像と、外部のもの",
+    files: {
+      "b.md": heading,
+      "a.md": [
+        "[l][ok] ![i][img] [m][gone] [h](//example.com/x.md) [e](mailto:a@b) [s](https://example.com/y.md)",
+        "",
+        "[ok]: b.md#a-1",
+        "[img]: b.md",
+        "[gone]: gone.md",
+        "",
+      ].join("\n"),
+    },
+    code: 1,
+    stderr: ["a.md: リンク先が無い — gone.md"],
+  },
+  {
+    name: "生の HTML の href・src・srcset",
     files: {
       "b.md": heading,
       "img/ok.png": "",
@@ -109,6 +186,8 @@ const cases: {
         "",
         'text <a href="b.md#x">x</a> <a href=missing.md>m</a> <a href="b.md?a=1&amp;b=2#nope">n</a> <img src="https://example.com/x.png">',
         "",
+        '<picture><source srcset="img/ok.png 2x"><img src="img/ok.png"></picture>',
+        "",
       ].join("\n"),
     },
     code: 1,
@@ -116,17 +195,21 @@ const cases: {
       "a.md: リンク先が無い — img/no.png",
       "a.md: リンク先が無い — missing.md",
       "a.md: anchor が見出しに無い — b.md?a=1&b=2#nope",
+      "a.md: srcset のリンク先は検査できない。リポ内のファイルを指すなら src にする — srcset=img/ok.png 2x",
     ],
   },
   {
-    name: ".md でないファイルの anchor",
+    name: ".md でないファイルとディレクトリの anchor",
     files: {
       LICENSE: "",
-      "a.md": "[a](LICENSE#L10) [b](LICENSE#L10-L20) [c](LICENSE#intro)\n",
+      "docs/b.md": "",
+      "a.md":
+        "[a](LICENSE#L10) [b](LICENSE#L10-L20) [c](LICENSE#intro) [d](docs#x)\n",
     },
     code: 1,
     stderr: [
       "a.md: .md でないファイルの anchor は検査できない — LICENSE#intro",
+      "a.md: .md でないファイルの anchor は検査できない — docs#x",
     ],
   },
   {
@@ -142,39 +225,59 @@ const cases: {
     ],
   },
   {
-    name: "YAML として不正な frontmatter",
+    // canon: facts/github/heading-anchor-ids の表の行
+    name: "見出しの id: 画像の alt・HTML の alt・_・日本語",
+    files: {
+      "logo.png": "",
+      "b.md": [
+        "## ![Logo](logo.png) Project Name",
+        "### Text ![alt word](logo.png) tail",
+        '#### <img src="logo.png" alt="html alt"> Html Img',
+        "## `subscribe_pr_activity` only",
+        "## 日本語の見出し",
+        "",
+      ].join("\n"),
+      "a.md": [
+        "[a](b.md#-project-name) [b](b.md#logo-project-name)",
+        "[c](b.md#text--tail) [d](b.md#text-alt-word-tail)",
+        "[e](b.md#-html-img) [f](b.md#html-alt-html-img)",
+        "[g](b.md#subscribe_pr_activity-only)",
+        "[h](b.md#日本語の見出し) [i](b.md#%E6%97%A5%E6%9C%AC%E8%AA%9E%E3%81%AE%E8%A6%8B%E5%87%BA%E3%81%97)",
+        '<a href="b.md#日本語の見出し">j</a>',
+        "",
+      ].join("\n"),
+    },
+    code: 1,
+    stderr: [
+      "a.md: anchor が見出しに無い — b.md#logo-project-name",
+      "a.md: anchor が見出しに無い — b.md#text-alt-word-tail",
+      "a.md: anchor が見出しに無い — b.md#html-alt-html-img",
+    ],
+  },
+  {
+    name: "frontmatter: YAML として不正なものと空のもの",
     files: {
       "b.md": "---\ntitle: x: y\n---\n# Real\n",
-      "a.md": "[l](b.md#real) [m](b.md#title-x-y)\n",
+      "c.md": "---\n---\nEmpty\n",
+      "a.md": "[l](b.md#real) [m](b.md#title-x-y) [n](c.md#empty)\n",
     },
     code: 1,
-    stderr: ["a.md: anchor が見出しに無い — b.md#title-x-y"],
+    stderr: [
+      "a.md: anchor が見出しに無い — b.md#title-x-y",
+      "a.md: anchor が見出しに無い — c.md#empty",
+    ],
   },
   {
-    name: "壊れた %-escape",
-    files: {
-      "b.md": heading,
-      "100%zz.md": "",
-      "a.md": '<a href="100%zz.md">a</a> <a href="b.md#%E3">b</a>\n',
-    },
-    code: 1,
-    stderr: ["a.md: anchor が見出しに無い — b.md#%E3"],
-  },
-  {
-    name: "無いファイルと、他の理由で読めないもの",
-    files: {
-      LICENSE: "",
-      "dir.md": null,
-      "a.md": "[l](LICENSE/x)\n",
-    },
+    name: "読めないファイルは原因の文言のまま",
+    files: { "dir.md": null, "a.md": "[l](gone.md#x)\n" },
     args: ["a.md", "dir.md", "gone.md", "gone.json"],
     code: 1,
     prefix: true,
     stderr: [
-      "a.md: リンク先を読めない — LICENSE/x (Not a directory",
       "dir.md: 読めない — Is a directory",
-      "gone.json: git の一覧にあるがファイルが無い",
-      "gone.md: git の一覧にあるがファイルが無い",
+      "gone.md: 読めない — No such file or directory",
+      "gone.json: 読めない — No such file or directory",
+      "a.md: リンク先を読めない — gone.md (No such file or directory",
     ],
   },
   {
@@ -184,59 +287,85 @@ const cases: {
     prefix: true,
     stderr: ["bad.json: JSON として読めない — "],
   },
-  {
-    name: ".json・.md でない引数",
+  ...[[], ["/a.md"], ["a//b.md"], ["./a.md"], ["a/../b.md"], [""], ["a/"]].map((
+    args,
+  ) => ({
+    name: `引数 ${JSON.stringify(args)}`,
     files: { "a.md": "" },
-    args: ["a.md", "a.txt"],
+    args,
     code: 2,
-    stderr: ["check-json-md.ts: 引数は .json か .md のファイルだけ (a.txt)"],
-  },
+    prefix: true,
+    stderr: ["check-json-md.ts: 引数は git が知るファイルの"],
+  })),
 ];
 
 Deno.test("check-json-md.ts の表", async () => {
   const failures = (await Promise.all(cases.map(async (c) => {
     const r = await check(c.files, c.args);
-    const got = lines(r.stderr);
-    const want = [...c.stderr].sort();
-    const matches = got.length === want.length &&
-      got.every((l, i) => c.prefix ? l.startsWith(want[i]) : l === want[i]);
-    return r.code === c.code && matches
+    return r.code === c.code &&
+        assignable(lines(r.stderr), c.stderr, c.prefix ?? false)
       ? []
       : [`${c.name}: exit ${r.code} (期待 ${c.code})\n${r.stderr}`];
   }))).flat();
   deepStrictEqual(failures, []);
 });
 
-/** dir (リポのルートからの segment の数) から path を辿り、ルートより上へ戻るか。 */
-const escapes = (depth: number, path: string): boolean => {
-  if (path === "" || path.startsWith("//")) return false;
-  let d = path.startsWith("/") ? 0 : depth;
-  for (const s of path.split("/")) {
-    if (s === "..") d--;
-    else if (s !== "" && s !== ".") d++;
-    if (d < 0) return true;
+/** リンクを置くファイル (a/b/x.md) の他に、git の一覧に載せるファイル。 */
+const known = ["a/b/x.md", "a/n.md", "a b/n.md"];
+
+/** a/b から path を辿った結果のモデル。辿った先が known のファイルかその親ディレクトリ、外部、自分自身なら undefined。 */
+const model = (path: string): "outside" | "missing" | undefined => {
+  if (path === "" || path.startsWith("//")) return undefined;
+  const out = path.startsWith("/") ? [] : ["a", "b"];
+  for (const raw of path.split("/")) {
+    const s = decodeURIComponent(raw);
+    if (s === "" || s === ".") continue;
+    if (s !== "..") out.push(s);
+    else if (out.pop() === undefined) return "outside";
   }
-  return false;
+  const exists = known.some((f) => {
+    const segments = f.split("/");
+    return segments.length >= out.length &&
+      out.every((s, i) => s === segments[i]);
+  });
+  return exists ? undefined : "missing";
 };
 
-Deno.test("リポの外を指すと報告するのは、.. でルートより上へ戻るときだけ", async () => {
-  const path = fc.array(fc.constantFrom(".", "..", "", "a", "n.md"), {
-    minLength: 1,
-    maxLength: 6,
-  }).map((s) => s.join("/"));
+Deno.test("リポの外を指す・リンク先が無いの報告は、segment ごとに decode して辿るモデルと一致する", async () => {
+  const path = fc.array(
+    fc.constantFrom(
+      ".",
+      "..",
+      "",
+      "a",
+      "A",
+      "b",
+      "n.md",
+      "N.md",
+      "x.md",
+      "%2e%2e",
+      "%2E",
+      "%2F",
+      "a%20b",
+    ),
+    { minLength: 1, maxLength: 6 },
+  ).map((s) => s.join("/"));
   await fc.assert(
     fc.asyncProperty(
       fc.uniqueArray(path, { minLength: 1, maxLength: 20 }),
       async (paths) => {
         const r = await check({
+          "a/n.md": "",
+          "a b/n.md": "",
           "a/b/x.md": paths.map((p) => `- [l](<${p}>)\n`).join(""),
         });
-        const prefix = "a/b/x.md: リポの外を指す — ";
+        const labels = { outside: "リポの外を指す", missing: "リンク先が無い" };
         deepStrictEqual(
-          lines(r.stderr).filter((l) => l.startsWith(prefix)).map((l) =>
-            l.slice(prefix.length)
-          ),
-          paths.filter((p) => escapes(2, p)).sort(),
+          lines(r.stderr),
+          paths.flatMap((p) => {
+            const m = model(p);
+            return m === undefined ? [] : [`a/b/x.md: ${labels[m]} — ${p}`];
+          }).sort(),
         );
       },
     ),

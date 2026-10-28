@@ -28,8 +28,8 @@
  *     - 改行を含まない。
  *     - `*`・`?` を含まない。deno check・deno lint は引数の `*`・`?` を glob として展開し、git が知らないファイルまで検査する。エスケープの手段は無い (canon: facts/deno/check-file-args-glob、facts/deno/lint-file-args-and-rules)。deno 2.9.8 の deno fmt・deno test も同じく展開する (実測)。deno がファイルの引数を文字どおりに受ける手段を持てば、この述語は外せる。
  *   - shellcheck・git・deno (check-json-md.ts を除く) へは名前に `./` を前置して渡し、先頭の `-` (option)・`!` (deno の除外)・`npm:` など (deno の URL) が名前として読まれるようにする。deno check は `--` の後の名前を無視して cwd 全体を検査する (canon: facts/deno/check-double-dash)。
- *   - check-json-md.ts へは名前をそのまま渡す。deno run はスクリプトの後の引数を `-` で始まるものも含めて変えずに渡す (deno 2.9.8 で実測)。
- * - 拡張子で対象を決める: shellcheck は `*.sh`、deno は `*.ts` (test は `*_test.ts`)、check-json-md.ts は `*.json`・`*.md`。拡張子の無い shell は検査しないので、このリポの shell は `*.sh` と名付ける。
+ *   - check-json-md.ts へは名前を全部、そのまま渡す (canon: facts/deno/run-args-passthrough)。check-json-md.ts はこのファイルの隣のものを起動する。
+ * - 拡張子で対象を決める: shellcheck は `*.sh`、deno は `*.ts` (test は `*_test.ts`)。拡張子の無い shell は検査しないので、このリポの shell は `*.sh` と名付ける。
  * - shellcheck から除くもの: `.agent-sync/generated` の行 `<path>\t<id>` のうち、そのファイルの今の `git hash-object --no-filters` が id と等しいもの (agent-sync が置いたままのもので、上流が検査する)。手を入れた写しと、hash を取れないもの (作業ツリーに無い) は検査する。
  * - deno lint は cwd の deno.json の lint 設定を読む (canon: facts/deno/lint-file-args-and-rules)。この段は lint が空であることを前提にし、規則を no-unused-vars 1 つに絞る。recommended は deno の版で規則が増え、コードを変えていない CI が落ちうるため。足すときは `--rules-include` を足す。
  * - deno test には read・write・env・run を絞らずに許す。test は TMPDIR の下に fixture を作り、verify.sh・run-checks.ts・check-json-md.ts と、PATH を差し替えた fake を子として回す。`--allow-run=deno` は、差し替えた PATH の dir に置いた deno への symlink の起動を NotCapable にする (deno 2.9.8 で実測)。
@@ -363,8 +363,13 @@ const steps: [string, () => Promise<Run>][] = [
     () =>
       onFiles(
         "deno",
-        ["run", frozen, "--allow-read=.", "scripts/check-json-md.ts"],
-        files.filter((f) => /\.(?:json|md)$/.test(f)),
+        [
+          "run",
+          frozen,
+          "--allow-read=.",
+          import.meta.resolve("./check-json-md.ts"),
+        ],
+        files,
       ),
   ],
 ];

@@ -1,6 +1,6 @@
 /**
  * run-checks.ts を子として、一時ディレクトリの fixture のリポで回す。
- * - fixture は git のリポ。deno.json は run-checks.ts が読むので置き、.git/info/exclude で git の一覧から外す (一覧に入ると、JSON と Markdown の段が fixture に無い scripts/check-json-md.ts を回して落ちる)。
+ * - fixture は git のリポ。run-checks.ts が読む deno.json を必ず置く。
  * - shellcheck を fake に替える test は、PATH を git・deno・sleep と fake だけを置いた dir にする。
  * - 子の環境は、このプロセスの環境から git の場所を決める変数 (canon: facts/git/local-env-vars-and-hook-env) を消し、利用者の git の設定を読まないもの。
  */
@@ -76,8 +76,6 @@ const withRepo = <T>(
       clearEnv: true,
     }).output();
     if (!init.success) throw new Error(dec.decode(init.stderr));
-    await Deno.mkdir(`${dir}/.git/info`, { recursive: true });
-    await Deno.writeTextFile(`${dir}/.git/info/exclude`, "deno.json\n");
     for (
       const [path, content] of Object.entries({ "deno.json": "{}", ...files })
     ) {
