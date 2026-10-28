@@ -1,42 +1,72 @@
 /**
- * run-checks.ts — verify.sh の検査の段を並行に回す。verify.sh が状態を揃えた後に exec で起動する。
+ * run-checks.ts — verify.sh の検査の段を並行に回す。verify.sh が hook を揃えた後に exec で起動する。
  *
- * 性質:
- * - 段は互いに独立なので、全部を同時に始める。段が共有して書くのは deno の cache (DENO_DIR) だけ。deno.lock は `--frozen-lockfile` で読むだけ。
- * - 段ごとに標準出力と標準エラーを分けて残し、全部を待ってから、下の steps に並べた順で出す。段の出力を混ぜず、毎回同じ順にするため。
- *   - 通った段: 見出しと標準出力を stdout へ、標準エラーを stderr へ。
- *   - 落ちた段: 見出しと両方を stderr へ。落ちた段は全部出す。
- *   - 書き込みは 1 つずつ独立で、出力先が閉じても (`./verify.sh | head` の BrokenPipe) 残りを出す。
- * - どれかの段が落ちるか、引数が 1 なら exit 1。
- * - 段の子は、それぞれ自分のプロセスグループの先頭として起動する (Deno.Command の detached。canon: facts/deno/command-spawn)。
- * - SIGHUP・SIGINT・SIGTERM: 最初の 1 回で、動いている段の子のグループに SIGTERM を送り、子が終わるまで (上限 graceMs) 待ち、deno test の段の TMPDIR を消して、128 + シグナルの番号で終わる。段の出力は出さない。
- *   - 2 回目以降は何もしない。
- *   - 中断の後は段の子を起動しない (その段は落ちた扱いになるが、出力は出さない)。
- * - deno test の段は、TMPDIR の下にこのプロセスが作ったディレクトリを TMPDIR にして回し、段の後と中断でそれを消す。deno test は SIGTERM で finally を回さずに終わり、SIGINT は自分で受けて終わる (deno 2.9.8 で実測) ので、test が作った一時ディレクトリはこれで消える。
+ * 流れ:
+ * 1. 段より前の確かめ。並行に回し、外れたものを全部出して、段を回さずに exit 1。
+ *    - git が知るファイルの一覧と、その名前 (下の「名前」)。
+ *    - 作業ツリーに無い追跡ファイル (`git ls-files --deleted`)。deno lint はその名前を黙って飛ばす (canon: facts/deno/missing-file-args)。
+ *    - deno と shellcheck の版 (下の「版」)。
+ * 2. 段 (下の steps) を全部同時に始め、全部を待つ。段が共有して書くのは deno の cache (DENO_DIR) だけ。deno.lock は `--frozen-lockfile` で読むだけ。
+ * 3. 段の出力を steps の順に出す。
+ *    - 通った段: 見出しと標準出力を stdout へ、標準エラーを stderr へ。
+ *    - 落ちた段: 見出しと両方を stderr へ。
+ *    - 書き込みは 1 つずつ行い、失敗しても残りを出す。
+ *      - BrokenPipe (`./verify.sh | head`。canon: facts/deno/stdout-broken-pipe): 終了コードを変えない。
+ *      - 他の失敗 (`> /dev/full` など): 理由を stderr に出し、exit 1。
+ * 4. どれかの段が落ちたか、引数が 1 なら exit 1。
+ *
+ * 段の子のプロセスグループ:
+ * - exec が起動する子は、それぞれ自分のプロセスグループの先頭になる (Deno.Command の detached。canon: facts/deno/command-spawn)。
+ * - グループを空にする操作 (emptyGroup): グループに SIGTERM を送り、先頭が終わって出力の pipe が閉じるまで (上限 graceMs) 待ち、残るものに SIGKILL を送って先頭を回収する。SIGTERM の送信が投げても SIGKILL を送る。
+ * - exec は、起動の直後から結果を返すまでを try/finally で包み、どの経路でも emptyGroup を 1 回だけ行ってから記録を外す。先頭が終わった後に残る孫も、段が終わる前に止まる。
+ * - 状態: 起動から emptyGroup の終わりまで、子を記録する。鍵は子 (pgid は子の pid)。
+ * - 自分で setsid してグループを抜けた子孫は止めない。
+ *
+ * 中断 (SIGHUP・SIGINT・SIGTERM。終了コードは 128 + シグナルの番号で、下の signals):
+ * - 最初の 1 回で、記録している全部のグループを同時に空にし、deno test の段の TMPDIR を消し、そのシグナルの終了コードで終わる。TMPDIR を消せなければ、理由を stderr に出してから同じ終了コードで終わる。
+ * - 終了を決めるのはこの経路だけ。中断の後の本流は何も出さず、この経路の exit を待つ。
+ * - 2 回目以降のシグナルは何もしない。
+ * - 中断の後は子を起動しない (exec が投げる)。
+ * - 中断の時点ごとの扱い (run-checks_test.ts が固定する):
+ *   - 段より前 (git ls-files などの最中): その子のグループを空にして終わる。
+ *   - 段の最中: 全部の段のグループを空にし、TMPDIR を消して終わる。
+ *   - 先頭は SIGTERM で終わったが、孫が残っている: 孫は猶予の後の SIGKILL で止まる。
+ *   - SIGTERM を無視するもの: 猶予の後の SIGKILL で止まる。
+ *
+ * deno test の段の TMPDIR:
+ * - TMPDIR の下にこのプロセスが作ったディレクトリを段の TMPDIR にし、段の後と中断で消す。
+ * - test が中断で消さずに終わる一時ディレクトリ (canon: facts/deno/test-signal-listeners) を、これで消す。
+ * - 外せる条件: deno test が SIGTERM で finally を回し、SIGINT でも test の後始末を終えてから終わるようになったとき。
  *
  * 入力と環境の定義域:
- * - 引数は 1 つで、verify.sh が先に回した状態を揃える段の結果 (0 か 1)。外れていれば理由を出して落ちる。
- * - cwd はリポのルート。読むファイルは deno.json と .agent-sync/generated だけ。書くのは TMPDIR (未設定か空なら /tmp) の下だけ。許可は verify.sh が渡す。
- * - 環境はそのまま段の子に渡す。git の場所を決める環境変数 (canon: facts/git/local-env-vars-and-hook-env) は verify.sh が消してから起動するので、git は cwd のリポを見る。
+ * - 引数は 1 つで、verify.sh が hook を揃えた結果 (0 か 1)。外れていれば理由を出して exit 1。
+ * - 環境変数 TMPDIR: verify.sh が symlink を解決した絶対パスを渡す。空なら理由を出して exit 1。
+ * - cwd はリポのルート。読むファイルは deno.json と .agent-sync/generated だけ。書くのは TMPDIR の下だけ。許可は verify.sh が渡す。
+ * - 環境はそのまま段の子に渡す (deno test の段は TMPDIR を差し替える)。git の場所を決める環境変数 (canon: facts/git/local-env-vars-and-hook-env) は verify.sh が消してから起動するので、git は cwd のリポを見る。
  * - 版:
- *   - deno: 2.9.x で x が 7 以上 (2.9.7・2.9.8 で確かめた)。このプロセスを動かす deno (段の子も同じ PATH で引く) の版を見て、外れればその段が落ちる。
- *   - shellcheck: 0.11.0 だけ。版で出す指摘が違う (canon: facts/shellcheck/sc2015-version-difference)。外れればその段が落ちる。
+ *   - deno: denoRange (下の定数)。このプロセスを動かす deno を見る (段の子も同じ PATH で引く)。
+ *   - shellcheck: shellcheckVersion だけ。版で出す指摘が違う (canon: facts/shellcheck/sc2015-version-difference)。入力の目録は canon: facts/shellcheck/environment-and-config-inputs。
  *   - git: 2.31 以降 (verify.sh の --path-format)。
- * - 検査するのは git が知っているファイル (追跡と、無視されない未追跡) で、作業ツリーに無い追跡ファイルも一覧に出る。その名前は各コマンドが無いことを知らせて落ちる。
- *   - git は -z で quote せずに出す (canon: facts/git/path-output-quoting)。名前は次の述語を全部満たすものだけを処理する。外れる名前が 1 つでもあれば、理由と名前 (バイトを escape したもの) を出して、何も検査せずに落ちる。
- *     - UTF-8 として正しい。不正な名前はコマンドへ渡す引数 (文字列) で表せない。
- *     - 改行を含まない。
- *     - `*`・`?` を含まない。deno check・deno lint は引数の `*`・`?` を glob として展開し、git が知らないファイルまで検査する。エスケープの手段は無い (canon: facts/deno/check-file-args-glob、facts/deno/lint-file-args-and-rules)。deno 2.9.8 の deno fmt・deno test も同じく展開する (実測)。deno がファイルの引数を文字どおりに受ける手段を持てば、この述語は外せる。
- *   - shellcheck・git・deno (check-json-md.ts を除く) へは名前に `./` を前置して渡し、先頭の `-` (option)・`!` (deno の除外)・`npm:` など (deno の URL) が名前として読まれるようにする。deno check は `--` の後の名前を無視して cwd 全体を検査する (canon: facts/deno/check-double-dash)。
- *   - check-json-md.ts へは名前を全部、そのまま渡す (canon: facts/deno/run-args-passthrough)。check-json-md.ts はこのファイルの隣のものを起動する。
- * - 拡張子で対象を決める: shellcheck は `*.sh`、deno は `*.ts` (test は `*_test.ts`)。拡張子の無い shell は検査しないので、このリポの shell は `*.sh` と名付ける。
- * - shellcheck から除くもの: `.agent-sync/generated` の行 `<path>\t<id>` のうち、そのファイルの今の `git hash-object --no-filters` が id と等しいもの (agent-sync が置いたままのもので、上流が検査する)。手を入れた写しと、hash を取れないもの (作業ツリーに無い) は検査する。
+ *   - 範囲を広げる・版を上げるとき: このファイルが引く canon の事実を新しい版で測り直し、同じ commit で .github/workflows/verify.yml・AGENTS.md・この定数を揃える。
+ * - 名前: git が知るファイル (追跡と、無視されない未追跡) を -z で受ける (canon: facts/git/path-output-quoting)。次の述語を全部満たす名前だけを処理する。外れる名前が 1 つでもあれば、理由と名前 (バイトを escape したもの) を出して、段を回さずに落ちる。
+ *   - UTF-8 として正しい。不正な名前はコマンドへ渡す引数 (文字列) で表せない。
+ *   - 改行を含まない。
+ *   - `*`・`?` を含まない。deno check・fmt・lint・test は引数の `*`・`?` を glob として展開し、git が知らないファイルまで検査する。エスケープの手段は無い (canon: facts/deno/check-file-args-glob、facts/deno/lint-file-args-and-rules)。deno がファイルの引数を文字どおりに受ける手段を持てば、この述語は外せる。
+ *   - `/` で終わらない。未追跡の入れ子のリポジトリは `nested/` の形で出る (canon: facts/git/untracked-entry-kinds)。
+ * - 名前の渡し方:
+ *   - shellcheck・git・deno (check-json-md.ts を除く): 名前に `./` を前置する。先頭の `-` (option)・`!` (deno の除外)・`npm:` など (deno の URL) が名前として読まれる。deno check は `--` の後の名前を無視して cwd 全体を検査する (canon: facts/deno/check-double-dash)。
+ *   - check-json-md.ts: 名前を全部、そのまま渡す (canon: facts/deno/run-args-passthrough)。check-json-md.ts はこのファイルの隣のものを起動する。
+ * - 拡張子で対象を決める: shellcheck は `*.sh`、deno は `*.ts` (test は `*_test.ts`)。拡張子の無い shell は検査しないので、このリポの shell は `*.sh` と名付ける。対象が無い段は回さずに通す (shellcheck は引数が無いと落ちる。canon: facts/shellcheck/no-files-argument)。
+ * - shellcheck から除くもの: `.agent-sync/generated` の行 `<path>\t<id>` のうち、そのファイルの今の `git hash-object --no-filters` が id と等しいもの (agent-sync が置いたままのもので、上流が検査する)。手を入れた写しと、hash を取れないもの (canon: facts/git/hash-object-missing-file) は検査する。
  * - deno lint は cwd の deno.json の lint 設定を読む (canon: facts/deno/lint-file-args-and-rules)。この段は lint が空であることを前提にし、規則を no-unused-vars 1 つに絞る。recommended は deno の版で規則が増え、コードを変えていない CI が落ちうるため。足すときは `--rules-include` を足す。
- * - deno test には read・write・env・run を絞らずに許す。test は TMPDIR の下に fixture を作り、verify.sh・run-checks.ts・check-json-md.ts と、PATH を差し替えた fake を子として回す。`--allow-run=deno` は、差し替えた PATH の dir に置いた deno への symlink の起動を NotCapable にする (deno 2.9.8 で実測)。
+ * - deno test の許可:
+ *   - write: 段の TMPDIR だけ (canon: facts/deno/make-temp-dir-permissions)。Deno.symlink は絞らない write を要る (canon: facts/deno/symlink-requires-unscoped-permissions) ので、test は symlink を ln -s で作る。
+ *   - read・env・run: 絞らない。test は fixture から verify.sh・run-checks.ts・check-json-md.ts と、PATH を差し替えた fake を子として回す。run を許すと、test は子を通して net の既定の拒否も迂回できる。
+ *   - 外せる条件: `--allow-run=deno` で、差し替えた PATH の dir の deno を起動できるようになったら (canon: facts/deno/allow-run-name-with-child-path)、run を起動するものに絞る。
  * - deno.json の imports の各キー (importKeys 段): git が知る .ts のそれぞれに `deno info --json` を回し (canon: facts/deno/info-json-dependencies)、graph の esm の module (相対 import で辿った先を含む) の dependencies[].specifier のどれかと一致するとき使われているとみなす。末尾が / のキーは、指定子がその接頭辞のときも使われているとみなす。
- *   - deno info には `--no-config --no-lock --no-npm --no-remote` を付け、deno.json・deno.lock を読み書きせず、ネットワークにも出ない。指定子は書かれた文字列のまま出るので解決は要らない。
- *   - deno info が落ちるか、graph の file: の module に error (ファイルが無い、構文が壊れている、相対 import 先が無い。deno info は exit 0) があれば、それを報告して落ち、指定子の一覧が欠けるので未使用の判定はしない。
- *   - deno.json の他の設定 (tasks など) からの参照は見ない。
+ *   - deno info には `--no-config --no-lock --no-npm --no-remote` を付け、deno.json・deno.lock・ネットワークを使わずに回す。指定子は書かれた文字列のまま出る。
+ *   - deno info が落ちるか、graph の file: の module に error (ファイルが無い、構文が壊れている、相対 import 先が無い。deno info は exit 0) があれば、それを報告し、未使用の判定をせずに落ちる。
+ *   - 数える参照は .ts の import の指定子だけ (deno.json の tasks などは数えない)。
  */
 
 const self = "run-checks.ts";
@@ -45,10 +75,15 @@ const enc = new TextEncoder();
 
 if (Deno.args.length !== 1 || !["0", "1"].includes(Deno.args[0])) {
   console.error(
-    `${self}: 引数は状態を揃える段の結果 (0 か 1) 1 つ (${
+    `${self}: 引数は hook を揃えた結果 (0 か 1) の 1 つだけ。./verify.sh から起動する (${
       Deno.args.join(" ")
     })`,
   );
+  Deno.exit(1);
+}
+const tmpdir = Deno.env.get("TMPDIR");
+if (!tmpdir) {
+  console.error(`${self}: TMPDIR が空。./verify.sh から起動する`);
   Deno.exit(1);
 }
 
@@ -69,7 +104,7 @@ const pass = (message: string): Run => ({
   err: new Uint8Array(),
 });
 
-/** deno test の段の TMPDIR。中断の handler が作りかけを見落とさないように、同期で作る。 */
+/** deno test の段の TMPDIR。中断の経路が作りかけを見落とさないように、同期で作る。 */
 let testTmp: string | undefined;
 let testTmpRemoval: Promise<void> | undefined;
 /** 並行に 2 回消さないように、2 回目以降の呼び出しには同じ Promise を返す。 */
@@ -84,43 +119,72 @@ const signals: [Deno.Signal, number][] = [
   ["SIGINT", 130],
   ["SIGTERM", 143],
 ];
-/** 動いている段の子 (それぞれ自分のプロセスグループの先頭)。 */
-const children = new Set<Deno.ChildProcess>();
-/** 中断で段のグループに SIGTERM を送ってから、先頭が終わるのを待つ上限。 */
+/** 動いている子ごとの、そのグループを空にする操作 (emptyGroup を 1 回だけ行い、2 回目以降の呼び出しには同じ Promise を返す)。 */
+const groups = new Set<() => Promise<void>>();
+const killGroup = (child: Deno.ChildProcess, signal: Deno.Signal) => {
+  try {
+    Deno.kill(-child.pid, signal);
+  } catch (e) {
+    // ESRCH: グループに誰も残っていない。EPERM: 終わりかけのものだけ (macOS。canon: facts/deno/command-spawn の「Deno.kill」。macOS が EPERM を返さなくなったら PermissionDenied を外せる)
+    if (
+      !(e instanceof Deno.errors.NotFound ||
+        e instanceof Deno.errors.PermissionDenied)
+    ) throw e;
+  }
+};
+/** SIGTERM を送ってから SIGKILL を送るまで、先頭の終わりと出力の pipe が閉じるのを待つ上限。 */
 const graceMs = 2000;
-let interrupted = false;
-for (const [signal, code] of signals) {
-  Deno.addSignalListener(signal, async () => {
-    if (interrupted) return;
-    interrupted = true;
-    for (const child of children) {
-      try {
-        Deno.kill(-child.pid, "SIGTERM");
-      } catch (e) {
-        // ESRCH: グループに誰も残っていない。EPERM: 終わりかけのものだけ (macOS。canon: facts/deno/command-spawn の「Deno.kill」。macOS が EPERM を返さなくなったら PermissionDenied を外せる)
-        if (
-          !(e instanceof Deno.errors.NotFound ||
-            e instanceof Deno.errors.PermissionDenied)
-        ) throw e;
-      }
-    }
-    let timer: ReturnType<typeof setTimeout> | undefined;
+async function emptyGroup(
+  child: Deno.ChildProcess,
+  outputs: Promise<unknown>,
+) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    killGroup(child, "SIGTERM");
     await Promise.race([
-      Promise.allSettled([...children].map((c) => c.status)),
+      Promise.allSettled([child.status, outputs]),
       new Promise((r) => timer = setTimeout(r, graceMs)),
     ]);
+  } finally {
     clearTimeout(timer);
-    await removeTestTmp();
-    Deno.exit(code);
+    try {
+      killGroup(child, "SIGKILL");
+    } finally {
+      await child.status;
+    }
+  }
+}
+/** 中断が始まっていれば、その経路 (解決しない)。 */
+let interruption: Promise<never> | undefined;
+for (const [signal, code] of signals) {
+  Deno.addSignalListener(signal, () => {
+    interruption ??= (async () => {
+      await Promise.allSettled([...groups].map((empty) => empty()));
+      try {
+        await removeTestTmp();
+      } catch (e) {
+        console.error(
+          `${self}: deno test の段の TMPDIR (${testTmp}) を消せない。手で消す — ${
+            e instanceof Error ? e.message : e
+          }`,
+        );
+      }
+      Deno.exit(code);
+    })();
   });
 }
+/** 中断が始まっていれば、その経路の exit を待つ (戻らない)。 */
+const unlessInterrupted = async () => {
+  if (interruption) await interruption;
+};
 
+/** 子を自分のプロセスグループで起動し、終わってグループを空にするまで待つ。 */
 async function exec(
   cmd: string,
   args: string[],
   env?: Record<string, string>,
 ): Promise<Run> {
-  if (interrupted) return fail("中断した");
+  if (interruption) throw new Error("中断した");
   const child = new Deno.Command(cmd, {
     args,
     env,
@@ -129,12 +193,26 @@ async function exec(
     stderr: "piped",
     detached: true,
   }).spawn();
-  children.add(child);
+  const outputs = Promise.all([
+    new Response(child.stdout).bytes(),
+    new Response(child.stderr).bytes(),
+  ]);
+  // 待つまでに reject すると unhandled rejection でこのプロセスが落ち、グループが残る
+  outputs.catch(() => {});
+  let emptied: Promise<void> | undefined;
+  const empty = () => emptied ??= emptyGroup(child, outputs);
+  groups.add(empty);
   try {
-    const { code, stdout, stderr } = await child.output();
-    return { code, out: stdout, err: stderr };
+    const { code } = await child.status;
+    await empty();
+    const [out, err] = await outputs;
+    return { code, out, err };
   } finally {
-    children.delete(child);
+    try {
+      await empty();
+    } finally {
+      groups.delete(empty);
+    }
   }
 }
 
@@ -148,7 +226,24 @@ const escapeBytes = (b: Uint8Array) =>
         : `\\x${c.toString(16).padStart(2, "0")}`,
   ).join("");
 
-async function gitFiles(): Promise<string[]> {
+const splitNul = (b: Uint8Array): Uint8Array[] => {
+  const names: Uint8Array[] = [];
+  for (let i = 0; i < b.length;) {
+    const end = b.indexOf(0, i);
+    const name = b.subarray(i, end < 0 ? b.length : end);
+    names.push(name);
+    i += name.length + 1;
+  }
+  return names;
+};
+
+/** 段より前の確かめの結果。files は名前が全部述語を満たすときだけ使う。 */
+interface Pre {
+  files: string[];
+  problems: string[];
+}
+
+async function gitFiles(): Promise<Pre> {
   const r = await exec("git", [
     "ls-files",
     "-z",
@@ -157,67 +252,75 @@ async function gitFiles(): Promise<string[]> {
     "--exclude-standard",
   ]);
   if (r.code !== 0) {
-    console.error(
-      `${self}: git ls-files が exit ${r.code}\n${dec.decode(r.err)}`,
-    );
-    Deno.exit(1);
+    return {
+      files: [],
+      problems: [`git ls-files が exit ${r.code}\n${dec.decode(r.err)}`],
+    };
   }
   const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   const files: string[] = [];
   const rejected: Uint8Array[] = [];
-  for (let i = 0; i < r.out.length;) {
-    const end = r.out.indexOf(0, i);
-    const name = r.out.subarray(i, end < 0 ? r.out.length : end);
-    i += name.length + 1;
+  for (const name of splitNul(r.out)) {
     try {
       const f = utf8.decode(name);
-      if (/[\n*?]/.test(f)) rejected.push(name);
+      if (/[\n*?]|\/$/.test(f)) rejected.push(name);
       else files.push(f);
     } catch (e) {
       if (!(e instanceof TypeError)) throw e;
       rejected.push(name);
     }
   }
-  if (rejected.length) {
-    console.error(
-      `${self}: 処理できない名前のファイルがある (UTF-8 として不正、改行を含む、deno が glob として展開する * か ? を含む)。名前を変えるか消す: ${
-        rejected.map(escapeBytes).join(" ")
-      }`,
-    );
-    Deno.exit(1);
+  return {
+    files,
+    problems: rejected.length
+      ? [
+        `処理できない名前のファイルがある (UTF-8 として不正、改行を含む、deno が glob として展開する * か ? を含む、/ で終わる入れ子のリポジトリ)。名前を変えるか、消すか、.gitignore に足す: ${
+          rejected.map(escapeBytes).join(" ")
+        }`,
+      ]
+      : [],
+  };
+}
+
+async function deletedFiles(): Promise<Pre> {
+  const r = await exec("git", ["ls-files", "-z", "--deleted"]);
+  if (r.code !== 0) {
+    return {
+      files: [],
+      problems: [
+        `git ls-files --deleted が exit ${r.code}\n${dec.decode(r.err)}`,
+      ],
+    };
   }
-  return files;
+  const names = splitNul(r.out);
+  return {
+    files: [],
+    problems: names.length
+      ? [
+        `作業ツリーに無い追跡ファイルがある。戻すか git rm する: ${
+          names.map(escapeBytes).join(" ")
+        }`,
+      ]
+      : [],
+  };
 }
 
-const files = await gitFiles();
-const withExt = (ext: string) => files.filter((f) => f.endsWith(ext));
-const dotSlash = (f: string) => `./${f}`;
-const ts = withExt(".ts");
-const tests = ts.filter((f) => f.endsWith("_test.ts"));
-const frozen = "--frozen-lockfile";
-if (tests.length) {
-  testTmp = Deno.makeTempDirSync({
-    dir: Deno.env.get("TMPDIR") || "/tmp",
-    prefix: "run-checks-",
+const denoMinor = "2.9";
+const denoMinPatch = 7;
+const denoRange = `${denoMinor}.x (x は ${denoMinPatch} 以上)`;
+function denoVersion(): Promise<Pre> {
+  const v = Deno.version.deno;
+  const patch = v.startsWith(`${denoMinor}.`)
+    ? v.slice(denoMinor.length + 1)
+    : undefined;
+  const ok = patch !== undefined && /^\d+$/.test(patch) &&
+    Number(patch) >= denoMinPatch;
+  return Promise.resolve({
+    files: [],
+    problems: ok ? [] : [
+      `deno の版が ${v} で、${denoRange} でない。.github/workflows/verify.yml の deno-version の版を入れる: deno upgrade --version <その版>`,
+    ],
   });
-}
-
-/** 引数が無いと deno は cwd 全体を対象にし、shellcheck は使い方の誤りで落ちるので、対象が無ければ回さずに通す。 */
-const onFiles = (cmd: string, args: string[], targets: string[]) =>
-  targets.length
-    ? exec(cmd, [...args, ...targets])
-    : Promise.resolve(pass("対象のファイルが無い"));
-
-const denoVersionRange = "2.9.x (x は 7 以上)";
-function denoVersion(): Promise<Run> {
-  const patch = Deno.version.deno.match(/^2\.9\.(\d+)$/)?.[1];
-  return Promise.resolve(
-    patch !== undefined && Number(patch) >= 7
-      ? pass(`deno ${Deno.version.deno}`)
-      : fail(
-        `deno の版が ${Deno.version.deno} で、${denoVersionRange} でない。.github/workflows/verify.yml の CI と同じ版にするなら Execute: deno upgrade --version 2.9.8`,
-      ),
-  );
 }
 
 const shellcheckVersion = "0.11.0";
@@ -227,34 +330,72 @@ const shellcheckInstall = [
   `- macOS は、Homebrew の版が ${shellcheckVersion} なら brew install shellcheck でもよい。`,
   `- 置いたら shellcheck --version で確かめる。`,
 ].join("\n");
-async function shellcheck(): Promise<Run> {
+async function shellcheckProbe(): Promise<Pre> {
+  const problem = (message: string): Pre => ({
+    files: [],
+    problems: [`${message}\n${shellcheckInstall}`],
+  });
   let probe: Run;
   try {
     probe = await exec("shellcheck", ["--version"]);
   } catch (e) {
     if (!(e instanceof Deno.errors.NotFound)) throw e;
-    return fail(`shellcheck が PATH に無い。\n${shellcheckInstall}`);
+    return problem("shellcheck が PATH に無い。");
   }
   if (probe.code !== 0) {
-    return fail(
-      `shellcheck --version が exit ${probe.code}\n${
-        dec.decode(probe.err)
-      }\n${shellcheckInstall}`,
+    return problem(
+      `shellcheck --version が exit ${probe.code}\n${dec.decode(probe.err)}`,
     );
   }
   const actual = dec.decode(probe.out).match(/^version: (.*)$/m)?.[1];
   if (actual === undefined) {
-    return fail(
+    return problem(
       `shellcheck --version の出力に version: の行が無い\n${
         dec.decode(probe.out)
-      }\n${shellcheckInstall}`,
+      }`,
     );
   }
   if (actual !== shellcheckVersion) {
-    return fail(
-      `shellcheck の版が ${actual} で、${shellcheckVersion} でない。\n${shellcheckInstall}`,
+    return problem(
+      `shellcheck の版が ${actual} で、${shellcheckVersion} でない。`,
     );
   }
+  return { files: [], problems: [] };
+}
+
+const pre = await Promise.all(
+  [gitFiles, deletedFiles, denoVersion, shellcheckProbe].map((check) =>
+    check().catch((e): Pre => ({
+      files: [],
+      problems: [e instanceof Error ? e.stack ?? String(e) : String(e)],
+    }))
+  ),
+);
+await unlessInterrupted();
+const preProblems = pre.flatMap((p) => p.problems);
+if (preProblems.length) {
+  console.error(
+    preProblems.map((p) => `${self}: ${p}`).join("\n") +
+      "\n検査の段は回していない",
+  );
+  Deno.exit(1);
+}
+const files = pre[0].files;
+const withExt = (ext: string) => files.filter((f) => f.endsWith(ext));
+const dotSlash = (f: string) => `./${f}`;
+const ts = withExt(".ts");
+const tests = ts.filter((f) => f.endsWith("_test.ts"));
+const frozen = "--frozen-lockfile";
+if (tests.length) {
+  testTmp = Deno.makeTempDirSync({ dir: tmpdir, prefix: "run-checks-" });
+}
+
+const onFiles = (cmd: string, args: string[], targets: string[]) =>
+  targets.length
+    ? exec(cmd, [...args, ...targets])
+    : Promise.resolve(pass("対象のファイルが無い"));
+
+async function shellcheck(): Promise<Run> {
   const recorded = new Map(
     (await Deno.readTextFile(".agent-sync/generated")).split("\n").filter(
       Boolean,
@@ -306,7 +447,7 @@ async function importKeys(): Promise<Run> {
   }
   if (problems.length) {
     problems.push(
-      "deno.json: 指定子の一覧が欠けるので、imports の未使用の判定はしていない",
+      "deno.json: 指定子の一覧が欠けるので、imports の未使用の判定はしていない。上を直してから回す",
     );
     return fail(problems.join("\n"));
   }
@@ -318,7 +459,7 @@ async function importKeys(): Promise<Run> {
   return unused.length
     ? fail(
       unused.map((key) =>
-        `deno.json: imports の "${key}" がどの .ts からも使われていない`
+        `deno.json: imports の "${key}" がどの .ts からも使われていない。使うか deno.json から消す`
       ).join("\n"),
     )
     : pass(`ok: imports ${keys.length} 件、.ts ${ts.length} 件`);
@@ -331,7 +472,7 @@ async function denoTest(): Promise<Run> {
       "test",
       frozen,
       "--allow-read",
-      "--allow-write",
+      `--allow-write=${testTmp}`,
       "--allow-env",
       "--allow-run",
       ...tests.map(dotSlash),
@@ -342,7 +483,6 @@ async function denoTest(): Promise<Run> {
 }
 
 const steps: [string, () => Promise<Run>][] = [
-  ["deno の版", denoVersion],
   ["shellcheck", shellcheck],
   ["deno fmt", () => onFiles("deno", ["fmt", "--check"], ts.map(dotSlash))],
   // --rules-tags= で recommended を外し、no-unused-vars だけを走らせる (canon: facts/deno/lint-file-args-and-rules)
@@ -381,24 +521,41 @@ const results = await Promise.all(
     )
   ),
 );
+await unlessInterrupted();
 
-const write = (w: { writeSync(p: Uint8Array): number }, data: Uint8Array) => {
+const writeErrors = new Set<string>();
+const write = (
+  name: string,
+  w: { writeSync(p: Uint8Array): number },
+  data: Uint8Array,
+) => {
   try {
     for (let i = 0; i < data.length;) i += w.writeSync(data.subarray(i));
   } catch (e) {
-    if (!(e instanceof Deno.errors.BrokenPipe)) throw e;
+    if (e instanceof Deno.errors.BrokenPipe) return;
+    writeErrors.add(
+      `${name} に書けない — ${e instanceof Error ? e.message : e}`,
+    );
   }
 };
+const out = (data: Uint8Array) => write("stdout", Deno.stdout, data);
+const err = (data: Uint8Array) => write("stderr", Deno.stderr, data);
 results.forEach((r, i) => {
   const name = steps[i][0];
   if (r.code === 0) {
-    write(Deno.stdout, enc.encode(`== ${name}: 通った\n`));
-    write(Deno.stdout, r.out);
-    write(Deno.stderr, r.err);
+    out(enc.encode(`== ${name}: 通った\n`));
+    out(r.out);
+    err(r.err);
   } else {
-    write(Deno.stderr, enc.encode(`== ${name}: 落ちた (exit ${r.code})\n`));
-    write(Deno.stderr, r.out);
-    write(Deno.stderr, r.err);
+    err(enc.encode(`== ${name}: 落ちた (exit ${r.code})\n`));
+    err(r.out);
+    err(r.err);
   }
 });
-Deno.exit(Deno.args[0] === "1" || results.some((r) => r.code !== 0) ? 1 : 0);
+for (const message of writeErrors) err(enc.encode(`${self}: ${message}\n`));
+Deno.exit(
+  Deno.args[0] === "1" || writeErrors.size > 0 ||
+    results.some((r) => r.code !== 0)
+    ? 1
+    : 0,
+);

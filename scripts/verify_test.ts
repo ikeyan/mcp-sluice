@@ -11,6 +11,7 @@
  *   - 別のリポ (環境変数を向ける先) に hook を置かなかったか。
  *   - deno.lock を書き換えなかったか。
  * - linked worktree の test: worktree で回すと、hook は common git dir の hooks にだけ写る。
+ * - symlink は ln -s で作る。deno test の段の --allow-write は TMPDIR に絞ってあり、Deno.symlink は絞らない read・write を要る (canon: facts/deno/symlink-requires-unscoped-permissions)。
  * - 子の環境は、このプロセスの環境から git の場所を決める変数 (canon: facts/git/local-env-vars-and-hook-env) を消し、利用者の git の設定を読まないもの。
  */
 import { deepStrictEqual } from "node:assert/strict";
@@ -89,6 +90,11 @@ async function git(dir: string, ...args: string[]) {
   if (!r.success) throw new Error(dec.decode(r.stderr));
 }
 
+const ln = async (target: string, path: string) => {
+  const r = await spawn("ln", { args: ["-s", target, path] }).output();
+  if (!r.success) throw new Error(dec.decode(r.stderr));
+};
+
 /** fixture のリポを作る。hooks の置き場は作らない (git init --template=)。 */
 async function makeRepo(dir: string) {
   await git(dir, "init", "-q", "--template=");
@@ -116,7 +122,7 @@ async function setHook(dir: string, state: HookState) {
   await Deno.mkdir(hooks);
   const hook = `${hooks}/pre-push`;
   if (state === "壊れた symlink") {
-    await Deno.symlink(`${dir}/nowhere`, hook);
+    await ln(`${dir}/nowhere`, hook);
   } else if (state === "ディレクトリ") {
     await Deno.mkdir(hook);
   } else {
@@ -312,7 +318,7 @@ cases.push(
   },
   {
     name: "TMPDIR が symlink",
-    prepare: (dir) => Deno.symlink(realTmpdir, `${dir}/.git/tmp-link`),
+    prepare: (dir) => ln(realTmpdir, `${dir}/.git/tmp-link`),
     env: (_, dir) => ({ TMPDIR: `${dir}/.git/tmp-link` }),
     code: 0,
     hooks: { "pre-push": copiedHook },
