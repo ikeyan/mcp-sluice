@@ -12,7 +12,7 @@ const dec = new TextDecoder();
 const tmpdir = Deno.env.get("TMPDIR");
 if (!tmpdir) throw new Error("TMPDIR が空。./verify.sh から回す");
 
-/** dir を作って fn に渡し、終われば消す。fn が投げたら、消せなくても fn の例外を投げる (消せないことは stderr に出す)。 */
+/** dir を作って fn に渡し、終われば消す。fn が投げたら、その例外を投げる。そのときに消せなければ、そのことを stderr に出す。 */
 const withTempDir = async <T>(fn: (dir: string) => Promise<T>): Promise<T> => {
   const dir = await Deno.makeTempDir({ dir: tmpdir });
   let result: T;
@@ -195,6 +195,7 @@ const textElements: (
   { open: "<style\t>", close: "</style\n>", filtered: true },
   // CR は parse の前の normalize が LF にする (canon: facts/markdown-it/render-html)
   { open: "<title\r>", close: "</title\r>", filtered: true },
+  // 名前の後の空白も tagfilter の区切り (canon: facts/github/gfm-tagfilter)
   { open: "<xmp >", close: "</xmp >", filtered: true },
   // 閉じのタグは tagfilter が文字にするので、文書の終わりまで textarea の中
   {
@@ -261,10 +262,10 @@ const foreignCases = ([
   // tagfilter に無い noscript は、svg・math の直下では外来の要素で、中の a も要素
   ["svg", "noscript", true],
   ["math", "noscript", true],
-  // 統合点 (svg の desc・math の mi) の中は HTML の規則に戻り、noscript の中身は文字
+  // 統合点 (svg の desc・math の mi) の中は HTML の規則に戻り、noscript の中身は文字 (canon: facts/parse5/parse-tree-attributes)
   ["svg", "desc><noscript", false],
   ["math", "mi><noscript", false],
-  // 統合点の中の style は tagfilter が文字にするので、中の a は要素
+  // 統合点の中の style は tagfilter が文字にするので、中の a は要素 (canon: facts/github/gfm-tagfilter)
   ["svg", "desc><style", true],
   ["math", "mi><style", true],
 ] as const).flatMap(([outer, inner, seen]) => {

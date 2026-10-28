@@ -60,7 +60,8 @@
  * - 辿った先が、引数のどれかと segment ごとに綴り (大文字小文字を含む) まで一致するか、どれかの親ディレクトリ (ルートを含む) でなければ「リンク先が無い」違反。
  * - anchor (空なら見ない。%-decode できなければ「不正な %-エンコード」違反):
  *   - 辿った先が `.md` の引数: その見出しの id のどれかと一致すること。id は github-slugger の規則で作る (canon: facts/github/heading-anchor-ids)。
- *   - 辿った先が `.md` でないファイル: 行の anchor `L<行番号>` だけを受ける。他の形 (範囲の `L10-L20` を含む) は検査できないので違反 (canon: facts/github/blob-line-anchors)。
+ *   - 辿った先が `.md` でないファイル: 行の anchor `L<行番号>` の形だけを受ける。他の形 (範囲の `L10-L20` を含む) は検査できないので違反 (canon: facts/github/blob-line-anchors)。
+ *     - 行番号がファイルの行数の範囲内かは見ない。範囲の外の行の anchor を GitHub がどう描画するかは確かめていない。
  *   - 辿った先がディレクトリ: どの形も検査できないので違反 (canon: facts/github/blob-line-anchors の「docs に無いもの」)。直し方は anchor を外すこと。
  *   - 範囲とディレクトリを外せる条件: canon の facts/github/blob-line-anchors の「確かめ方」で GitHub の描画を確かめたとき。効く形を受ける形に足す。
  * - ファイルを読めない (無い、を含む) か UTF-8 として不正なら、そのファイル自身の違反にする。そういう .md への anchor は見ない。
@@ -78,7 +79,6 @@ if (Deno.args.length === 0) {
   console.error(`${self}: 引数が無い。${passPaths}`);
   Deno.exit(2);
 }
-/** 不正な引数の違反の行の、引数までの部分。 */
 const argHead = (f: string) => `${self}: 引数 ${JSON.stringify(f)}`;
 const badArgs = Deno.args.flatMap((f) =>
   f.split("/").some((s) => s === "" || s === "." || s === "..")
@@ -106,15 +106,6 @@ const markdownFiles = Deno.args.filter((f) => f.endsWith(".md"));
 const key = (segments: string[]) => JSON.stringify(segments);
 /** リポのルートからの相対パスの鍵。 */
 const pathKey = (path: string) => key(path.split("/"));
-const fileKeys = new Set(Deno.args.map(pathKey));
-/** リンク先として在るもの: 引数のファイルと、その親ディレクトリ (ルートを含む) の鍵。 */
-const linkTargets = new Set(
-  Deno.args.flatMap((f) => {
-    const segments = f.split("/");
-    return segments.map((_, i) => key(segments.slice(0, i + 1)))
-      .concat(key([]));
-  }),
-);
 
 const violations = new Set<string>();
 const report = (file: string, message: string) =>
@@ -308,21 +299,40 @@ const resolve = (dir: string[], path: string): Resolved => {
   return { segments: out };
 };
 
-/** .md の引数ごとの、名前と、parse したトークンと見出しの anchor (読めなければ undefined)。鍵は key。 */
-const markdown = new Map<
-  string,
-  { file: string; parsed?: { tokens: Token[]; anchors: Set<string> } }
->();
+/** parse したトークンと見出しの anchor。 */
+type Parsed = { tokens: Token[]; anchors: Set<string> };
+/** .md の引数ごとの、名前と Parsed (読めなければ undefined)。 */
+const documents: { file: string; parsed?: Parsed }[] = [];
 for (const file of markdownFiles) {
   const text = await readOrReport(file);
   const tokens = text === undefined ? undefined : parse(text);
-  markdown.set(pathKey(file), {
+  documents.push({
     file,
     parsed: tokens && { tokens, anchors: anchorsOf(tokens) },
   });
 }
 
-for (const { file, parsed } of markdown.values()) {
+/** 辿った先の種類 (上の「リンク」)。.md は、その Parsed を持つ。 */
+type Destination =
+  | { kind: "dir" }
+  | { kind: "file" }
+  | { kind: "md"; parsed?: Parsed };
+/** リンク先として在るもの (引数のファイルと、その親ディレクトリ (ルートを含む)) の鍵 → 種類。 */
+const destinations = new Map<string, Destination>();
+for (const f of Deno.args) {
+  const segments = f.split("/");
+  for (let i = 0; i < segments.length; i++) {
+    destinations.set(key(segments.slice(0, i)), { kind: "dir" });
+  }
+}
+for (const f of Deno.args) {
+  destinations.set(pathKey(f), { kind: "file" });
+}
+for (const { file, parsed } of documents) {
+  destinations.set(pathKey(file), { kind: "md", parsed });
+}
+
+for (const { file, parsed } of documents) {
   if (parsed === undefined) continue;
   const dir = file.split("/").slice(0, -1);
   for (const target of targetsOf(parsed.tokens)) {
@@ -346,8 +356,8 @@ for (const { file, parsed } of markdown.values()) {
       report(file, `${resolved.problem} — ${url}`);
       continue;
     }
-    const at = key(resolved.segments);
-    if (!linkTargets.has(at)) {
+    const destination = destinations.get(key(resolved.segments));
+    if (destination === undefined) {
       report(
         file,
         `リンク先が無い。git が知るファイルかディレクトリを指す — ${url}`,
@@ -360,29 +370,29 @@ for (const { file, parsed } of markdown.values()) {
       report(file, `${malformed} — ${url}`);
       continue;
     }
-    const linked = markdown.get(at);
-    if (!fileKeys.has(at)) {
-      report(
-        file,
-        `ディレクトリへのリンクの anchor は検査できない。anchor を外す — ${url}`,
-      );
-      continue;
-    }
-    if (linked === undefined) {
-      // GitHub の docs が示す行の anchor は L<行番号> だけ (canon: facts/github/blob-line-anchors)
-      if (!/^L\d+$/.test(anchor)) {
+    switch (destination.kind) {
+      case "dir":
         report(
           file,
-          `.md でないファイルの行の anchor (L10 の形) の他は、検査できない。L<行番号> にするか、anchor を外す — ${url}`,
+          `ディレクトリへのリンクの anchor は検査できない。anchor を外す — ${url}`,
         );
-      }
-      continue;
-    }
-    if (linked.parsed && !linked.parsed.anchors.has(anchor)) {
-      report(
-        file,
-        `anchor が見出しに無い。リンク先の見出しの id に合わせる — ${url}`,
-      );
+        break;
+      // GitHub の docs が示す行の anchor は L<行番号> だけ (canon: facts/github/blob-line-anchors)
+      case "file":
+        if (!/^L\d+$/.test(anchor)) {
+          report(
+            file,
+            `.md でないファイルの行の anchor (L10 の形) の他は、検査できない。L<行番号> にするか、anchor を外す — ${url}`,
+          );
+        }
+        break;
+      case "md":
+        if (destination.parsed && !destination.parsed.anchors.has(anchor)) {
+          report(
+            file,
+            `anchor が見出しに無い。リンク先の見出しの id に合わせる — ${url}`,
+          );
+        }
     }
   }
 }
