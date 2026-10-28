@@ -15,7 +15,7 @@
  * - linked worktree の test: worktree で回すと、hook は common git dir の hooks にだけ写る。
  * - 中断の test: 写している最中に SIGTERM を受けると、一時ファイルを残さない。
  * - TMPDIR の値は、canon: facts/shell/string-input-categories の分類から生成して回す。
- * - git rev-parse --local-env-vars の各行の形は、fake の git が出す行を生成して回す。
+ * - git rev-parse --local-env-vars の各行の形は、fake の git が出す行を生成して、[A-Z] が ASCII の外の大文字を含む locale (LC_ALL=en_US.UTF-8。入っていない環境では C に戻り、その次元は確かめられない) で回す。
  * - 子の環境と symlink の作り方、test が起動したものの寿命と fixture の消し方は、run-checks_test.ts の先頭と同じ。
  */
 import fc from "fast-check";
@@ -335,6 +335,8 @@ const which = async (name: string) => {
   if (!r.success) throw new Error(`${name} が PATH に無い`);
   return dec.decode(r.stdout).trim();
 };
+/** verify.sh が OS の判定より前に、PATH にあることを確かめる道具 (verify.sh の先頭の「PATH にあるもの」)。 */
+const pathTools = ["uname", "dirname", "git", "rm", "mkdir", "ln"];
 const failing = (name: string) =>
   `#!/bin/sh\necho "${name}: fake の失敗" >&2\nexit 1\n`;
 const permissions = {
@@ -819,25 +821,27 @@ cases.push(
     hooks: copiedHooks,
     stderr: "が , を含む",
   },
+  ...pathTools.map((missing): Case => ({
+    name: `${missing} が PATH に無い`,
+    prepare: async (dir) => {
+      const bin = `${dir}/.git/partial-bin`;
+      await Deno.mkdir(bin);
+      for (const name of ["bash", "cmp", "install", "deno", ...pathTools]) {
+        if (name !== missing) await ln(await which(name), `${bin}/${name}`);
+      }
+    },
+    env: (_, dir) => ({ PATH: `${dir}/.git/partial-bin` }),
+    code: 127,
+    hooks: null,
+    stderr: `verify.sh: ${missing} が PATH に無い`,
+  })),
   {
     // hook は deno の exec より前に揃える
     name: "deno が PATH に無い",
     prepare: async (dir) => {
       const bin = `${dir}/.git/no-deno-bin`;
       await Deno.mkdir(bin);
-      for (
-        const name of [
-          "bash",
-          "uname",
-          "dirname",
-          "git",
-          "cmp",
-          "install",
-          "mkdir",
-          "ln",
-          "rm",
-        ]
-      ) {
+      for (const name of ["bash", "cmp", "install", ...pathTools]) {
         await ln(await which(name), `${bin}/${name}`);
       }
     },
@@ -859,10 +863,10 @@ cases.push(
   },
 );
 
-/** stderr の Execute: の後のコマンドを bash で実行してから verify.sh を回し直した結果。 */
+/** stderr の Execute: の後のコマンドを、fixture のリポ dir を cwd にして bash で実行してから verify.sh を回し直した結果。 */
 async function fixAndRerun(
   invocation: Invocation,
-  gitDir: string,
+  dir: string,
   env: EnvChange,
   stderr: string,
 ) {
@@ -871,12 +875,13 @@ async function fixAndRerun(
   if (command === undefined) return { command: null };
   const r = await spawn("bash", {
     args: ["-c", command],
+    cwd: dir,
     env: baseEnv,
     clearEnv: true,
   }).output();
   if (!r.success) return { command, stderr: dec.decode(r.stderr) };
   const again = await verify(invocation, env);
-  return { code: again.code, hooks: await readHooks(gitDir) };
+  return { code: again.code, hooks: await readHooks(`${dir}/.git`) };
 }
 
 /** c を回し、期待と違えば違いの説明を返す。 */
@@ -911,7 +916,7 @@ const runCase = (c: Case): Promise<string[]> =>
         stderrLacks: c.stderrLacks === undefined ||
           !r.stderr.includes(c.stderrLacks),
         fixed: c.fix &&
-          await fixAndRerun(invocation, `${dir}/.git`, env, r.stderr),
+          await fixAndRerun(invocation, dir, env, r.stderr),
       };
       const want = {
         code: c.code,
@@ -956,7 +961,7 @@ Deno.test("verify.sh の hook の状態と環境", async () => {
 });
 
 Deno.test("git rev-parse --local-env-vars の各行が ^GIT_[A-Z_]+$ に合うときだけ受ける", async () => {
-  // 次元: 大文字・小文字・数字・-・空白・\r・ASCII の外 (canon: facts/shell/string-input-categories)、空の行、GIT_ だけの行
+  // 次元: 大文字・小文字・数字・-・空白・\r・ASCII の外 (canon: facts/shell/string-input-categories)、空の行、GIT_ だけの行。ASCII の外の大文字は、[A-Z] が受ける locale の文字 (canon: facts/shell/bash-regex-range-locale)
   const fake =
     `#!/bin/sh\n[ "$*" = "rev-parse --local-env-vars" ] && { cat "\${FAKE_LINES?FAKE_LINES が無い}"; exit 0; }\nexec '${realGit}' "$@"\n`;
   /** fake の git が lines を出したときの、期待との違い。 */
@@ -969,7 +974,10 @@ Deno.test("git rev-parse --local-env-vars の各行が ^GIT_[A-Z_]+$ に合う�
       prepare: (dir) =>
         Deno.writeTextFile(`${dir}/.git/lines`, lines.join("\n")),
       fakes: { git: fake },
-      env: (_, dir) => ({ FAKE_LINES: `${dir}/.git/lines` }),
+      env: (_, dir) => ({
+        FAKE_LINES: `${dir}/.git/lines`,
+        LC_ALL: "en_US.UTF-8",
+      }),
       ...(read.every((l) => /^GIT_[A-Z_]+$/.test(l)) ? copied : {
         code: 1,
         hooks: null,
@@ -994,6 +1002,8 @@ Deno.test("git rev-parse --local-env-vars の各行が ^GIT_[A-Z_]+$ に合う�
     [" GIT_DIR"],
     ["GIT_é"],
     ["GIT_ｚ"],
+    ["GIT_É"],
+    ["GIT_Ｇ"],
   ];
   deepStrictEqual((await Promise.all(rows.map(runLines))).flat(), []);
   const line = fc.oneof(
@@ -1012,6 +1022,8 @@ Deno.test("git rev-parse --local-env-vars の各行が ^GIT_[A-Z_]+$ に合う�
         "\r",
         "é",
         "ｚ",
+        "É",
+        "Ｇ",
       ),
       { minLength: 1, maxLength: 4 },
     ).map((cs) => `GIT_${cs.join("")}`),

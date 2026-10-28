@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # このリポの単一検証コマンド。hook を揃えてから scripts/run-checks.ts を exec し、hook を揃えた結果 (0: 揃えた、1: 揃えられなかった) を引数で渡す。検査の規則の本文は scripts/run-checks.ts の先頭にある。
-# 事前条件 (外れれば exit 1。PATH に deno が無いときだけ 127):
+# 事前条件 (外れれば exit 1。PATH の道具が無いときと git の失敗は、下の「PATH にあるもの」):
 # - OS は Linux か macOS (uname -s が Linux か Darwin)。
 # - bash 3.2 以降。
 # - git 2.32 以降。
 #   - rev-parse --path-format は 2.31 から (canon: facts/git/rev-parse-path-format-since-2-31)、テストが使う GIT_CONFIG_GLOBAL・GIT_CONFIG_SYSTEM は 2.32 から (canon: facts/git/config-sources-and-scopes)。
-#   - 次は git 2.43.0 で測った。2.32〜2.42 は測っていない。
+#   - 次は git 2.43.0 で測った (git 2.32〜2.42: 測っていない)。
 #     - hook の判定が読む config -z --show-origin の並び (canon: facts/git/config-sources-and-scopes)。
 #     - run-checks.ts が読む ls-files -s -t の形 (canon: facts/git/repository-shapes)。
-#   - verify.sh と run-checks.ts が読む rev-parse --local-env-vars の一覧 (canon: facts/git/local-env-vars-and-hook-env)。測った版での出方 (2.32〜2.42 は測っていない):
+#   - verify.sh と run-checks.ts が読む rev-parse --local-env-vars の一覧 (canon: facts/git/local-env-vars-and-hook-env)。測った版での出方:
 #     - git 2.43.0: GIT_DIR に存在しないパスを入れても、同じ 15 個を同じ順で出した。測ったのは GIT_DIR だけ。
 #     - git 2.55.0 (macOS): 値を変えずに一覧を出した。
-#   - 一覧の各行が ^GIT_[A-Z_]+$ (A-Z は ASCII の大文字だけ) に合わなければ、変数の名前として使わずに落ちる。リポの中の git は、知らない option を名前のまま出して exit 0 で終わる (同じ canon の「知らない option」)。
+#     - git 2.32〜2.42: 測っていない。
+#   - 一覧の各行が ^GIT_[A-Z_]+$ (C の locale で照合する) に合わなければ、変数の名前として使わずに落ちる。リポの中の git は、知らない option を名前のまま出して exit 0 で終わる (同じ canon の「知らない option」)。
 # - このファイルの dir の状態ごとの扱い (canon: facts/git/repository-shapes の「スクリプトを置いた dir の位置」):
 #   - 本体の作業ツリーのルート: 回す。
 #   - linked worktree のルート: 回す。hook は common git dir に写す (下の「hook」)。
@@ -22,6 +23,8 @@
 #     - bare のリポ。
 #     - safe.directory が要る持ち主の違い。
 # - PATH にあるもの:
+#   - uname・dirname・git・rm・mkdir・ln: どれかが無ければ、OS の判定より前に名前を出して exit 127。
+#     - git が非 0 で終われば、git の終了コードで止まる。除くのは、作業ツリーの判定 (上の「このファイルの dir の状態」) と core.hooksPath の読み (下の「hook」)。
 #   - cmp・install: 無ければ hook を揃えられないとする。
 #   - shellcheck: run-checks.ts が確かめる。
 #   - deno: 無ければ、最後の exec が exit 127 で終わる (canon: facts/shell/bash-exec-missing-command-exit-status)。
@@ -85,6 +88,9 @@ fi
 if [ -L "$0" ]; then
   die "$0 は symlink で、その dir はリポでない。リポの verify.sh を直に起動する" 2
 fi
+for tool in uname dirname git rm mkdir ln; do
+  command -v "$tool" >/dev/null || die "$tool が PATH に無い。$tool を PATH に置く" 127
+done
 os=$(uname -s)
 case $os in
 Linux | Darwin) ;;
@@ -103,10 +109,13 @@ if ! [[ $git_version =~ $version_re ]] || [ "${BASH_REMATCH[1]}" -lt 2 ] ||
   die "git が 2.32 以降でない ($git_version)。git 2.32 以降を PATH の先に置く"
 fi
 local_env=$(git rev-parse --local-env-vars)
-# 範囲 (A-Z) は locale で ASCII の外の文字を含みうる (glob の範囲の実測は canon: facts/shell/locale-dependent-ranges) ので、文字を並べる
-name_re='^GIT_[ABCDEFGHIJKLMNOPQRSTUVWXYZ_]+$'
+# [[ =~ ]] の範囲 (A-Z) は UTF-8 の locale で ASCII の外の大文字を含む (canon: facts/shell/bash-regex-range-locale) ので、C の locale で照合する
+is_var_name() {
+  local LC_ALL=C re='^GIT_[A-Z_]+$'
+  [[ $1 =~ $re ]]
+}
 while IFS= read -r v; do
-  [[ $v =~ $name_re ]] ||
+  is_var_name "$v" ||
     die "git rev-parse --local-env-vars の出力に、変数の名前でない行がある ($v)。git の版を確かめる"
   unset "$v"
 done <<<"$local_env"
@@ -253,7 +262,7 @@ case $TMPDIR in
 *,*) die "TMPDIR ($TMPDIR) が , を含む。, を含まないディレクトリを TMPDIR に設定する" ;;
 esac
 export TMPDIR
-# 段の子の deno は別のプロセスで、下の許可を受けない (run-checks.ts の先頭の規則)
+# 段の子の deno は別のプロセスで、下の 4 つの flags を受けない (run-checks.ts の先頭の規則)
 # Deno.kill で段のプロセスグループに送るには、パスを付けない --allow-run が要る (canon: facts/deno/command-spawn の「Deno.kill」)。パスで絞った --allow-run で通るようになったら、段が起動するもの (git・shellcheck・deno) に絞る。
 flags=(--allow-run)
 # 段の子の環境から変数を消すには、Deno.env.toObject で環境を丸ごと写す。それには変数を絞らない --allow-env が要る (canon: facts/deno/env-to-object-requires-unscoped-allow-env)。
