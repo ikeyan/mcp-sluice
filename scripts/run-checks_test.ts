@@ -691,6 +691,28 @@ Deno.test("deno.json の imports の未使用の判定", async () => {
         r.stderr,
       );
     }),
+    withRepo({
+      "deno.json": importsX,
+      "x.ts": emptyModule,
+      "main.ts": 'import "x";\n',
+    }, async (dir) => {
+      // 段より前の shellcheck --version で deno を PATH から消し、並べて待つ deno info の起動を投げさせる
+      const r = await runChecks(dir, "0", {
+        PATH: await fakePath(dir, {
+          shellcheck: `#!/bin/sh\n"${
+            which("rm")
+          }" -f "\${0%/*}/deno"\necho 'version: 0.11.0'\n`,
+        }),
+      });
+      const section = sectionOf(r.stderr, "deno.json の imports");
+      expect(
+        "並べて待つ deno info の起動が投げたものを全部出す",
+        section.includes("main.ts: NotFound") &&
+          section.includes("x.ts: NotFound") &&
+          section.includes("未使用の判定をしていない"),
+        r.stdout + r.stderr,
+      );
+    }),
     ...[
       ["構文が壊れている", "import x from 'x';\nconst = ;\n", "SyntaxError"],
       [
@@ -892,6 +914,20 @@ Deno.test("段より前の確かめ: shellcheck の版、git ls-files、項目�
         "git を起動できない (NotFound 以外)",
         unstaged(r) && r.stderr.includes("PermissionDenied") &&
           !r.stderr.includes("git を PATH に置く"),
+        r.stdout + r.stderr,
+      );
+    }),
+    withRepo({}, async (dir) => {
+      // rev-parse の後に git を PATH から消し、並べて待つ ls-files の 2 つと --deleted の起動を投げさせる
+      const bin = await fakePath(dir, {
+        git: gitScript([
+          `[ "$*" = "rev-parse --local-env-vars" ] && "${which("rm")}" -f "$0"`,
+        ]),
+      });
+      const r = await runChecks(dir, "0", { PATH: bin });
+      expect(
+        "並べて待つ git ls-files の起動が投げたものを全部出す",
+        unstaged(r) && r.stderr.split("NotFound").length - 1 === 3,
         r.stdout + r.stderr,
       );
     }),

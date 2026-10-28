@@ -21,13 +21,13 @@
  * 4. どれかの段が落ちたか、引数が 1 (下の「入力と環境の定義域」) なら exit 1。exit はどれも下の「終了」の経路を通る。
  *
  * 段の子のプロセスグループ:
- * - 子は各自のプロセスグループで起動し (Deno.Command の detached。canon: facts/deno/command-spawn)、exec は戻る前にグループに SIGTERM と SIGKILL を送る (emptyGroup)。exec の戻りを誰も待たなくても、下の「終了」の経路が exit の前に空にする。
+ * - 子は各自のプロセスグループで起動し (Deno.Command の detached。canon: facts/deno/command-spawn)、exec は戻る前にグループに SIGTERM と SIGKILL を送る (emptyGroup)。中断では、下の「終了」の経路が exit の前に空にする。
  *   - 先頭が終わった後に残る孫も、段が終わる前に止まる。
  *   - 自分で setsid してグループを抜けた子孫は止めない。
  *   - Linux では、この uid で送れない子孫 (別の uid のもの) は止まらない。グループの中に送れたものが 1 つでもあれば kill は通るので、残ったことも検出しない (canon: facts/deno/command-spawn の「別の uid のグループへの kill」)。
  * - グループを空にできない (kill が投げる。別の uid のものだけが残ったグループなど) とき: emptyGroup が pgid と止め方 (`kill -KILL -- -<pgid>`) を含むエラーを投げ、exec はそれを呼び出し元へ投げる。
  *   - 本流では、その段 (段より前なら段より前の失敗) がその文言で落ちる (deno test の段は、TMPDIR を消せないことも足す)。
- *   - そのグループの記録は消さない。終了の経路は空にし直し、中断のときは同じ文言を出す (下の「終了」)。
+ *   - そのグループの記録は、失敗を出した側が消す (下の「終了」)。
  * - exec が待つものと、その上限:
  *   - 先頭の終わり: 段の実行そのものを待つ。中断では終了の経路の emptyGroup の SIGKILL で終わる。
  *   - emptyGroup: SIGTERM の後、先頭の終わりと出力の pipe が閉じるのを graceMs まで待つ。SIGKILL の後の先頭の回収は、SIGKILL を捕まえられないので返る。
@@ -37,7 +37,7 @@
  *   - グループの中の子孫: emptyGroup が止める。
  *   - グループを抜けた子孫: 止めない。
  * - 状態 (groups):
- *   - 対象: exec が起動した子のプロセスグループ。起動から、emptyGroup が成功するまで記録する。
+ *   - 対象: exec が起動した子のプロセスグループ。起動から、emptyGroup が成功するか、空にできない失敗を出すまで記録する。
  *   - 鍵: pgid (子の pid)。
  *   - 等しいとみなす条件: 同じ exec の呼び出し。
  *
@@ -48,10 +48,20 @@
  *     - 段より前の失敗。
  *     - 段の後。
  *   - 中断 (SIGHUP・SIGINT・SIGTERM)。
- * - finish は次の後始末をしてから exit する。
- *   1. 記録している全部のグループ (上の「状態 (groups)」) を同時に空にする。
- *   2. 中断のときだけ、deno test の段の TMPDIR が残っていれば消す。失敗するのは、消せないものがあるとき (グループを抜けた子孫が書き続けているなど)。
- * - 後始末の失敗 (グループは emptyGroup の文言) は、中断のときだけ、理由と手で直す方法を stderr に出して次へ進む。本流の exit では出さない: 記録に残るグループは exec が呼び出し元へ投げた失敗で、本流がその文言を出した。TMPDIR は、段の後なら deno test の段が消して結果に出し、段より前なら作っていない。
+ * - 後始末の記録は groups と testTmp (上と下の「状態」)。失敗を出した側が、出すのと同じ同期の区間で記録を消す:
+ *   - 本流: 段より前の失敗か段の結果を出した直後に、groups と testTmp を消す。そのときには、どの exec も戻っている。
+ *   - finish: 残る記録を全部後始末して、その失敗を理由と手で直す方法つきで stderr に出してから exit する。
+ *     1. 記録しているグループを同時に空にする。
+ *     2. deno test の段の TMPDIR が残っていれば消す。失敗するのは、消せないものがあるとき (グループを抜けた子孫が書き続けているなど)。
+ * - 中断が来る時点ごとの、失敗 (グループを空にできない、deno test の段の TMPDIR を消せない) の報告:
+ *
+ *   | 中断が来る時点 | 出す側 | 回数 |
+ *   | --- | --- | --- |
+ *   | exec が投げる前・denoTest が消し終える前 | finish (同じ emptyGroup・同じ消去の結果を待つ) | 1 |
+ *   | exec が投げた後・denoTest が結果に足した後で、本流が出す前 | finish (記録が残る) | 1 |
+ *   | 本流が出した後 | 本流 (finish の前に記録は消えている) | 1 |
+ *   | 中断なし | 本流 | 1 |
+ *
  * - 終了コードは最初の finish の呼び出しのもの。中断なら 128 + シグナルの番号 (下の signals)。
  * - 後の呼び出し (2 回目以降のシグナル、中断の後の本流) は何もせず、最初の経路の exit を待つ。
  * - finish が始まった後は、本流は何も出さず、exec は子を起動せずに待つ。
@@ -65,10 +75,18 @@
  * - TMPDIR の下にこのプロセスが作ったディレクトリを段の TMPDIR にし、段の後に消す。中断で終わるときは、終了の経路が消す。
  *   - 作るのは test (`*_test.ts`) があるときだけ。作れなければ、理由を出して段の前で exit 1。
  *   - 段の後に消せなければ、段の結果 (exec の例外ならその文言) に、消せないことと手で消すことを足して段を落とす。文言は終了の経路と同じ。
+ * - 状態 (testTmp):
+ *   - 対象: このプロセスが作った段の TMPDIR。作ってから、本流か finish がその消去の結果を出すまで記録する。
+ *   - 鍵: 無し (1 つだけ)。
+ *   - 等しいとみなす条件: 同じ run-checks.ts の起動。
  * - test が中断で消さずに終わる一時ディレクトリ (canon: facts/deno/test-signal-listeners) を、これで消す。
  * - 外せる条件: deno test が SIGTERM で finally を回し、SIGINT でも test の後始末を終えてから終わるようになったとき。
  *   - 確かめ方: canon の facts/deno/test-signal-listeners の観測を、その版で回す。
- *   - 外すときに消すもの: 段の TMPDIR の作成、denoTest の消去、finish の消去、それを確かめるテスト (run-checks_test.ts の、中断の「deno test の段」の行と、段が普通に終わる test の TMPDIR の確かめ)。
+ *   - 外すときに消すもの:
+ *     - 段の TMPDIR の作成と testTmp。
+ *     - denoTest の消去。
+ *     - finish の消去。
+ *     - それを確かめるテスト (run-checks_test.ts の、中断の「deno test の段」の行と、段が普通に終わる test の TMPDIR の確かめ)。
  *
  * 入力と環境の定義域:
  * - 引数は 1 つで、verify.sh が hook を揃えた結果。外れていれば理由を出して exit 2。
@@ -81,11 +99,8 @@
  * - cwd はリポのルート。読むファイルは deno.json だけ。書くのは TMPDIR の下だけ。許可は verify.sh が渡す。
  * - 環境はそのまま段の子に渡す。差し替えるのは次だけ:
  *   - git (git()): git の場所を決める変数 (git rev-parse --local-env-vars の一覧。canon: facts/git/local-env-vars-and-hook-env) を消す。git は cwd のリポを見る。
- *     - 一覧は、このプロセスの環境のまま聞く。測った版での出方 (canon の同じページ):
- *       - git 2.43.0: GIT_DIR に存在しないパスを入れても、同じ 15 個を同じ順で出した。測ったのは GIT_DIR だけ。
- *       - git 2.55.0 (macOS): 値を変えずに一覧を出した。
- *       - 2.32〜2.42 は測っていない。
- *     - 一覧の各行の形 (`^GIT_[A-Z_]+$`) は、verify.sh が同じ git の一覧で先に確かめて落ちるので、ここでは確かめない。
+ *     - 一覧は、このプロセスの環境のまま聞く。測った版での出方は verify.sh の先頭。
+ *     - 一覧の各行の形は verify.sh が確かめる。
  *     - git を起動できないか、git が非 0 で終わるときは、理由を出して段の前で exit 1。
  *   - deno (deno()):
  *     - 消すもの: 検査の結果を変える変数 (canon: facts/deno/environment-and-config-inputs の「結果を変える」)。
@@ -177,7 +192,7 @@
  *     - JSDoc の `@import`。
  *     - リテラルでない動的 import。
  *   - deno info --json の形 (modules[].dependencies[].specifier・modules[].error) は canon の実測。この段の試験が固定し、deno の版を上げたら測り直す。
- *   - deno info は、ネットワークに出ず、deno.json と deno.lock を読み書きしないフラグで回す。指定子は書かれた文字列のまま出る。
+ *   - deno info は、ネットワークに出ず、deno.json と deno.lock を読み書きしないフラグで回す。指定子は書かれた文字列のまま出る (canon: facts/deno/info-json-dependencies)。
  *   - 落ちる (未使用の判定をしない) とき:
  *     - deno.json の最上位か imports がオブジェクトでない。
  *     - deno info が非 0 で終わる。
@@ -291,31 +306,34 @@ const testTmpLeft = (path: string, e: unknown) =>
 
 /** 終了の経路が始まっていれば、その経路 (解決しない)。 */
 let finishing: Promise<never> | undefined;
-/** 終了の経路 (上の「終了」)。interrupted は中断か。後の呼び出しは最初の経路を返す。 */
-const finish = (code: number, interrupted: boolean): Promise<never> =>
+/** 終了の経路 (上の「終了」)。後の呼び出しは最初の経路を返す。 */
+const finish = (code: number): Promise<never> =>
   finishing ??= (async () => {
     const emptied = await Promise.allSettled(
       [...groups.values()].map((empty) => empty()),
     );
-    if (interrupted) {
-      for (const r of emptied) {
-        if (r.status === "rejected") {
-          console.error(`${self}: ${messageOf(r.reason)}`);
-        }
+    for (const r of emptied) {
+      if (r.status === "rejected") {
+        console.error(`${self}: ${messageOf(r.reason)}`);
       }
-      if (testTmp) {
-        try {
-          await testTmp.remove();
-        } catch (e) {
-          console.error(testTmpLeft(testTmp.path, e));
-        }
+    }
+    if (testTmp) {
+      try {
+        await testTmp.remove();
+      } catch (e) {
+        console.error(testTmpLeft(testTmp.path, e));
       }
     }
     Deno.exit(code);
   })();
 for (const [signal, code] of signals) {
-  Deno.addSignalListener(signal, () => void finish(code, true));
+  Deno.addSignalListener(signal, () => void finish(code));
 }
+/** 本流が段より前の失敗か段の結果を出した直後に、同期のまま呼ぶ。出した失敗の記録を消す (上の「終了」)。 */
+const reported = () => {
+  groups.clear();
+  testTmp = undefined;
+};
 /** 段より前の失敗を出して終わる。終了の経路が始まっていれば、何も出さずにそれを待つ。 */
 const failBeforeSteps = async (problems: string[]): Promise<never> => {
   await finishing;
@@ -323,7 +341,8 @@ const failBeforeSteps = async (problems: string[]): Promise<never> => {
     problems.map((p) => `${self}: ${p}`).join("\n") +
       "\n検査の段は回していない",
   );
-  return finish(1, false);
+  reported();
+  return finish(1);
 };
 
 const [state] = Deno.args;
@@ -333,7 +352,7 @@ if (Deno.args.length !== 1 || (state !== "0" && state !== "1")) {
       Deno.args.join(" ")
     })`,
   );
-  await finish(2, false);
+  await finish(2);
 }
 
 /** 子の環境の、このプロセスの環境からの差分。 */
@@ -385,10 +404,9 @@ async function exec(
   // 待つまでに reject すると unhandled rejection でこのプロセスが落ち、グループが残る (canon: facts/deno/unhandled-rejection-exits)
   outputs.catch(() => {});
   let emptied: Promise<void> | undefined;
-  // 終了の経路と exec の finally の両方が呼ぶ
+  // 終了の経路と exec の finally の両方が呼ぶ。グループに kill を 2 度送らないよう、1 つの emptyGroup を共有する
   const empty = () =>
     emptied ??= emptyGroup(child, outputs).then(() => {
-      // 空にできなければ、中断の終了の経路がその失敗を報告できるよう記録を残す
       groups.delete(child.pid);
     });
   groups.set(child.pid, empty);
@@ -439,10 +457,10 @@ const denoResultVars = [
   "DENO_TSC_BIN",
   "DENO_V8_FLAGS",
 ];
-/** deno を args で、上の「入力と環境の定義域」の deno の環境で起動する。tmp を渡すと、子の TMPDIR をそれにする。 */
-const deno = (args: string[], tmp?: string) =>
+/** deno を args で、上の「入力と環境の定義域」の deno の環境に set を足して起動する。 */
+const deno = (args: string[], set: Record<string, string> = {}) =>
   exec("deno", args, {
-    set: { DENO_NO_PACKAGE_JSON: "1", ...(tmp ? { TMPDIR: tmp } : {}) },
+    set: { DENO_NO_PACKAGE_JSON: "1", ...set },
     unset: denoResultVars,
   });
 
@@ -470,19 +488,15 @@ const splitNul = (b: Uint8Array): Uint8Array[] => {
 /** 段より前の確かめの、外れたものの理由。 */
 type Problems = string[];
 
-/** p の値か、投げたものの describe。並べて待つ exec の失敗を、最初の 1 つでなく全部出すために使う (本流の exit の finish はグループの失敗を出さない)。 */
-const settle = <T>(p: Promise<T>) =>
-  p.then((value) => ({ value }), (e) => ({ thrown: describe(e) }));
-
-/**
- * 検査する拡張子 (上の「拡張子」) と、その名前の実行ファイルを検査する段があるか。
- * - .sh・.ts: 段の対象もここから取る。
- * - .json・.md: 段より前の規則だけが使う。JSON と Markdown の段の対象は check-json-md.ts が自分で選ぶ。
- */
+/** 検査する拡張子 (上の「拡張子」) と、その名前の実行ファイルを検査する段があるか。 */
 const exts = {
+  // shellcheck の段の対象もここから取る
   sh: { ext: ".sh", executable: true },
+  // deno の段の対象もここから取る
   ts: { ext: ".ts", executable: true },
+  // 段より前の規則だけが使う
   json: { ext: ".json", executable: false },
+  // 段より前の規則だけが使う
   md: { ext: ".md", executable: false },
 };
 const checkedExts = Object.values(exts).map((e) => e.ext);
@@ -494,15 +508,16 @@ const endsWithAny = (f: string, list: string[]) =>
 
 /** git が知る項目のうち処理するものの名前と、処理できない項目の理由。 */
 async function gitFiles(): Promise<{ files: string[]; problems: Problems }> {
-  const [cachedRun, othersRun] = await Promise.all([
-    settle(git(["ls-files", "-z", "-s", "-t", "--cached"])),
-    settle(git(["ls-files", "-z", "--others", "--exclude-standard"])),
+  // 本流は失敗を出した後に記録を全部消すので、並べた exec の全部を待ち、投げたものを全部出す
+  const [cachedRun, othersRun] = await Promise.allSettled([
+    git(["ls-files", "-z", "-s", "-t", "--cached"]),
+    git(["ls-files", "-z", "--others", "--exclude-standard"]),
   ]);
-  if ("thrown" in cachedRun || "thrown" in othersRun) {
+  if (cachedRun.status === "rejected" || othersRun.status === "rejected") {
     return {
       files: [],
       problems: [cachedRun, othersRun].flatMap((r) =>
-        "thrown" in r ? [r.thrown] : []
+        r.status === "rejected" ? [describe(r.reason)] : []
       ),
     };
   }
@@ -722,8 +737,19 @@ const onFiles = (
     ? run(targets.map(dotSlash))
     : Promise.resolve(pass(noTargets));
 /** 名前を取る deno の subcommand の入口。args の後に targets を置く。 */
-const denoFiles = (args: string[], targets: string[], tmp?: string) =>
-  onFiles(targets, (names) => deno([...args, ...names], tmp));
+const denoFiles = (args: string[], targets: string[]) =>
+  onFiles(targets, (names) => deno([...args, ...names]));
+/** deno test を、write の許可と子の TMPDIR を dir にして回す。 */
+const denoTestIn = (dir: string) =>
+  onFiles(tests, (names) =>
+    deno([
+      "test",
+      "--allow-read",
+      `--allow-write=${dir}`,
+      "--allow-env",
+      "--allow-run",
+      ...names,
+    ], { TMPDIR: dir }));
 
 /** deno.json の imports の各キーが、.ts の import の指定子から使われていること。 */
 async function importKeys(): Promise<Run> {
@@ -748,22 +774,23 @@ async function importKeys(): Promise<Run> {
     );
   }
   const keys = Object.keys(imports);
-  const infos = await Promise.all(ts.map(async (f) => ({
-    f,
-    run: await settle(denoFiles([
+  // gitFiles と同じく、並べた exec の全部を待ち、投げたものを全部出す
+  const infos = await Promise.allSettled(ts.map((f) =>
+    denoFiles([
       "info",
       "--json",
       "--no-config",
       "--no-lock",
       "--no-npm",
       "--no-remote",
-    ], [f])),
-  })));
+    ], [f])
+  ));
   const problems: string[] = [];
   const specifiers = new Set<string>();
-  for (const { f, run } of infos) {
-    if ("thrown" in run) {
-      problems.push(`${f}: ${run.thrown}`);
+  for (const [i, run] of infos.entries()) {
+    const f = ts[i];
+    if (run.status === "rejected") {
+      problems.push(`${f}: ${describe(run.reason)}`);
       continue;
     }
     const r = run.value;
@@ -803,17 +830,7 @@ async function denoTest(): Promise<Run> {
   if (testTmp === undefined) throw new Error("deno test の段の TMPDIR が無い");
   const { path, remove } = testTmp;
   // 段の結果を先に決め、TMPDIR を消せなければそれに足す
-  const r = await denoFiles(
-    [
-      "test",
-      "--allow-read",
-      `--allow-write=${path}`,
-      "--allow-env",
-      "--allow-run",
-    ],
-    tests,
-    path,
-  ).catch((e) => fail(describe(e)));
+  const r = await denoTestIn(path).catch((e) => fail(describe(e)));
   try {
     await remove();
     return r;
@@ -884,7 +901,7 @@ for (const r of results) {
   }
 }
 for (const message of writeErrors) err(enc.encode(`${self}: ${message}\n`));
+reported();
 await finish(
   state === "1" || writeErrors.size > 0 || !results.every(passed) ? 1 : 0,
-  false,
 );
