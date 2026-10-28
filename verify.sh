@@ -30,8 +30,7 @@
 #   - mkdir・install・ln: hook を写すときだけ使う。無ければ写せないので、hook を揃えられないとする (下の「写せない」)。
 #   - rm: 写す途中の一時ファイルを rm -f で消す。写せたときも、写す前に落ちたときも消す。rm -f が落ちたとき (rm が無いときを含む):
 #     - 一時ファイルが残りうることと、消すコマンドを出す。
-#     - hook の段の結果を 1 にする。
-#     - 写せていれば、hook はそのまま。
+#     - hook の段の結果を 1 にする (写せていれば、hook はそのまま)。
 #   - cmp: 写す先に通常ファイルの pre-push が在るときだけ使う。無ければ hook を揃えられないとする (下の写す先の表)。
 #   - chmod: 写す先の pre-push が同じ中身で実行可能でないときだけ使う。無ければ hook を揃えられないとする (同じ表)。
 #   - deno: 無ければ、hook を揃えた後の最後の exec が exit 127 で終わる (canon: facts/shell/bash-exec-missing-command-exit-status)。
@@ -40,7 +39,7 @@
 #     - sh・env・printenv・sleep・mkfifo・find。
 #     - Linux では次のもの。Ubuntu 以外の distribution の package は確かめていない。
 #       - localedef と、それが読む locale の定義 en_US と charmap UTF-8 (canon: facts/glibc/localedef-and-locpath-inputs)。Ubuntu では package locales が置く (同じ canon の「観測」)。
-#       - 系の locale C.UTF-8。Ubuntu では package libc-bin が置く (同じ canon の「観測」)。
+#       - C.UTF-8 の locale。Ubuntu では package libc-bin が置く (同じ canon の「観測」)。
 # - git の失敗: git が非 0 で終われば、その行で git の終了コードで止まる (set -e)。除くのは、作業ツリーの判定 (上の「このファイルの dir の状態」) と core.hooksPath の読み (下の「hook」)。
 # - ネットワークは、deno が依存 (npm) を未取得のときだけ要る。
 # 入力:

@@ -19,8 +19,10 @@
  *   - 回す前に、その locale の bash で次を確かめる (probeRange):
  *     1. locale が効いている: `${#É}` が 1。locale が無ければ bash は C のまま動き、バイトを数えて 2 になる (canon: facts/shell/bash-missing-locale-stays-c)。
  *     2. `[[ É =~ ^[A-Z]$ ]]` が真。
- *     - 確かめの bash が、1 の偽 (exit 2)・2 の偽 (exit 1)・両方の真 (exit 0) の他で終わる (信号など) と落ちる。
- *     - Linux では、無い locale で 1 が偽、C.UTF-8 で 1 が真で 2 が偽になることを test で固定する (同じ canon)。
+ *     - 確かめの bash の終わり方を、probeRange が wide・narrow・noLocale に分ける。どれでもない終わり方 (信号など) では落ちる。
+ *     - Linux では次を test で固定する (同じ canon):
+ *       - 無い locale: noLocale。
+ *       - C.UTF-8: narrow。C.UTF-8 の locale が無ければ、そのことを出して落ちる。
  *   - OS ごとの違い:
  *     - Linux: en_US.UTF-8 を localedef で一時の dir に作り、LOCPATH で指す (canon: facts/glibc/localedef-and-locpath-inputs)。1 か 2 が偽なら、次元を確かめられないので落ちる。
  *     - 他の OS: OS に入っている en_US.UTF-8。
@@ -1108,32 +1110,33 @@ Deno.test("verify.sh の hook の状態と環境", async () => {
 /** [A-Z] が ASCII の外の大文字を含む locale の名前 (このファイルの先頭の「OS ごとの違い」)。 */
 const wideLocale = "en_US.UTF-8";
 /**
- * env を足した環境の bash で、このファイルの先頭の 1・2 を確かめた結果と stderr。
- * - wide: 1 と 2 が真。
- * - narrow: 1 が真で、2 が偽。
- * - noLocale: 1 が偽。
+ * env を足した環境の bash で、このファイルの先頭の 1・2 を確かめた結果と stderr。bash の終了コードごとの結果:
+ * - 0: wide (1 と 2 が真)。
+ * - 1: narrow (1 が真で、2 が偽)。
+ * - 3: noLocale (1 が偽)。
+ * - 他: 投げる。bash の構文・正規表現の誤りの 2 (canon: facts/shell/bash-regex-match-exit-status) と、信号で終わったときの 128 + 信号の番号 (canon: facts/deno/command-spawn) を含む。
  */
 async function probeRange(env: Record<string, string>) {
   const probe = await spawn("bash", {
-    args: ["-c", '[ "${#1}" = 1 ] || exit 2; [[ $1 =~ ^[A-Z]$ ]]', "bash", "É"],
+    args: ["-c", '[ "${#1}" = 1 ] || exit 3; [[ $1 =~ ^[A-Z]$ ]]', "bash", "É"],
     env: { ...baseEnv, ...env },
     clearEnv: true,
   }).output();
   const stderr = dec.decode(probe.stderr);
   switch (probe.code) {
     case 0:
-      return { kind: "wide", stderr } as const;
+      return { kind: "wide", stderr };
     case 1:
-      return { kind: "narrow", stderr } as const;
-    case 2:
-      return { kind: "noLocale", stderr } as const;
+      return { kind: "narrow", stderr };
+    case 3:
+      return { kind: "noLocale", stderr };
   }
   throw new Error(
     `locale の確かめの bash が exit ${probe.code}${
       probe.signal === null ? "" : ` (${probe.signal})`
-    } で終わった。0・1・2 の他は、locale の次元を確かめられない (${
+    } で終わった (${
       JSON.stringify(env)
-    })\n${stderr}`,
+    })。下の stderr と、同じ環境変数で回した locale -a の出力を見る\n${stderr}`,
   );
 }
 
@@ -1142,14 +1145,37 @@ Deno.test({
     "locale の確かめ: Linux の bash は、無い locale で locale が効かず、C.UTF-8 で [A-Z] が É を含まない",
   ignore: Deno.build.os !== "linux",
   fn: async () => {
+    const c = await probeRange({ LC_ALL: "C.UTF-8" });
+    if (c.kind === "noLocale") {
+      throw new Error(
+        `C.UTF-8 が bash に効かない (\${#É} が 1 でない)。C.UTF-8 の locale を OS に入れる (Ubuntu では package libc-bin。他の distribution は確かめていない)\n${c.stderr}`,
+      );
+    }
     deepStrictEqual(
-      [
-        (await probeRange({ LC_ALL: "xx_XX.UTF-8" })).kind,
-        (await probeRange({ LC_ALL: "C.UTF-8" })).kind,
-      ],
-      ["noLocale", "narrow"],
+      [c.kind, (await probeRange({ LC_ALL: "xx_XX.UTF-8" })).kind],
+      ["narrow", "noLocale"],
     );
   },
+});
+
+Deno.test("locale の確かめ: bash が 0・1・3 の他で終われば、終了コードと信号を出して投げる", async () => {
+  // 非対話の bash は -c の文字列より先に BASH_ENV のファイルを回す (canon: facts/shell/bash-env-read-by-noninteractive-bash)
+  await withTempDir(async (dir) => {
+    const ends: [string, string][] = [
+      ["exit 2", "exit 2 で終わった"],
+      ["kill -TERM $$", "exit 143 (SIGTERM) で終わった"],
+    ];
+    const unmet = await Promise.all(ends.map(async ([script, want], i) => {
+      const path = `${dir}/${i}.sh`;
+      await Deno.writeTextFile(path, `${script}\n`);
+      const got = await probeRange({ BASH_ENV: path }).then(
+        (r) => `投げなかった (${r.kind})`,
+        (e: Error) => e.message,
+      );
+      return got.includes(want) ? [] : [`${script}: ${got}`];
+    }));
+    deepStrictEqual(unmet.flat(), []);
+  });
 });
 
 /** wideLocale を使う子の環境の差分。Linux では dir に locale を作る。 */
