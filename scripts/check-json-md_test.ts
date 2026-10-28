@@ -67,12 +67,15 @@ const assignable = (got: string[], want: string[], prefix: boolean) => {
 };
 
 const heading = "# x\n\n## a\n\n## a\n";
-/** uncheckableAttributes の違反の、属性の名前の後から値の前まで。 */
+/** 検査できない属性の違反の、属性の名前の後から値の前まで。 */
 const uncheckable =
-  "の参照先は検査できない (値が URL の列か、値の形を確かめていない属性)。リポ内のファイルを指すなら Markdown のリンク・画像で書き、この属性を外す";
+  "の参照先は検査できない。リポ内のファイルを指すなら Markdown のリンク・画像で書き、この属性を外す";
 
-/** 属性の類 (canon: facts/html/url-valued-attributes の一覧と「値の形」)。大文字の綴りを各類に 1 つ。他の類は代表の 1 つ。 */
-const attributeClasses: [string[], "url" | "uncheckable" | "other"][] = [
+/** 属性の類 (check-json-md.ts の先頭の「属性の類」と attributeClasses。canon: facts/html/url-valued-attributes の一覧と「値の形」)。大文字の綴りを各類に 1 つ。other (attributeClasses に無いもの) は代表の 1 つ。 */
+const attributeClasses: [
+  string[],
+  "url" | "urlList" | "unconfirmed" | "ignored" | "other",
+][] = [
   [
     [
       "href",
@@ -88,34 +91,27 @@ const attributeClasses: [string[], "url" | "uncheckable" | "other"][] = [
       "lowsrc",
       "manifest",
       "poster",
-      "usemap",
       "CITE",
     ],
     "url",
   ],
+  [["imagesrcset", "itemtype", "ping", "srcset", "SRCSET"], "urlList"],
   [
-    [
-      "archive",
-      "classid",
-      "imagesrcset",
-      "itemtype",
-      "ping",
-      "profile",
-      "srcset",
-      "xlink:href",
-      "SRCSET",
-    ],
-    "uncheckable",
+    ["archive", "classid", "profile", "xlink:href", "XLINK:HREF"],
+    "unconfirmed",
   ],
+  [["usemap", "UseMap"], "ignored"],
   [["title"], "other"],
 ];
-/** 値の類。a.md は見出し a を持ち、b.md は在り、gone.md は無い。 */
+/** 値の類。a.md は見出し a を持ち、b.md は在って見出しを持たず、gone.md は無い。 */
 const attributeValues = [
   "https://example.com/x.md",
   "//example.com/x.md",
   "",
   "#a",
+  "#nope",
   "b.md",
+  "b.md#nope",
   "gone.md",
 ];
 /** 属性ごとの行: 値の類の全部を属性の値に置き、類ごとの違反の行と比べる。 */
@@ -131,14 +127,16 @@ const attributeCases = attributeClasses.flatMap(([names, kind]) =>
         "",
       ].join("\n"),
     },
-    code: kind === "other" ? 0 : 1,
+    code: kind === "ignored" || kind === "other" ? 0 : 1,
     stderr: kind === "url"
       ? [
+        "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — #nope",
+        "a.md: anchor が見出しに無い。リンク先の見出しの id に合わせる — b.md#nope",
         "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — gone.md",
       ]
-      : kind === "uncheckable"
+      : kind === "urlList" || kind === "unconfirmed"
       ? attributeValues.filter((v) => v !== "").map((v) =>
-        `a.md: ${name} ${uncheckable} — ${name}=${v}`
+        `a.md: ${name.toLowerCase()} ${uncheckable} — ${name.toLowerCase()}=${v}`
       )
       : [],
   }))
@@ -299,6 +297,57 @@ const cases: {
     ],
   },
   {
+    // canon: facts/url/parser-strips-c0-space-and-tab-newline
+    name: "生の HTML の属性の値: 前後の C0 制御文字と空白、中の tab と改行",
+    files: {
+      "b.md": "",
+      "a.md": [
+        "<p>",
+        '<a href=" b.md ">s</a> <a href="\t\n b.md\r\n">t</a> <a href="b\t.m\nd">u</a>',
+        '<a href="&#x1;b.md&#x1f;">v</a> <a href="&#9;b.md&#10;">w</a>',
+        '<a href=" gone.md ">x</a> <a href="&nbsp;b.md">y</a> <a href="  ">z</a>',
+        "</p>",
+        "",
+      ].join("\n"),
+    },
+    code: 1,
+    stderr: [
+      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — gone.md",
+      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — \u00a0b.md",
+    ],
+  },
+  {
+    name: "生の HTML: 閉じないコメントの後と、中身をタグとして読まない要素の中",
+    files: {
+      "a.md": [
+        '<textarea><a href="in-textarea.md"></textarea>',
+        "",
+        "<script>document.write('<a href=\"in-script.md\">')</script>",
+        "",
+        '<a href="after.md">a</a>',
+        "",
+        "<!-- memo",
+        "",
+        '<a href="gone.md">g</a>',
+        "",
+      ].join("\n"),
+    },
+    code: 1,
+    stderr: [
+      "a.md: リンク先が無い。git が知るファイルかディレクトリを指す — after.md",
+    ],
+  },
+  {
+    name: "大文字小文字だけ違う拡張子の名前は検査せず、リンク先としてだけ使う",
+    files: {
+      "A.JSON": "{",
+      "B.MD": "[x](gone.md)\n",
+      "c.md": "[y](B.MD) [z](A.JSON)\n",
+    },
+    code: 0,
+    stderr: [],
+  },
+  {
     name: ".md でないファイルとディレクトリの anchor",
     files: {
       LICENSE: "",
@@ -308,8 +357,8 @@ const cases: {
     },
     code: 1,
     stderr: [
-      "a.md: .md でないファイルの anchor は検査できない。行の anchor (L10・L10-L20) にするか、anchor を外す — LICENSE#intro",
-      "a.md: .md でないファイルの anchor は検査できない。行の anchor (L10・L10-L20) にするか、anchor を外す — docs#x",
+      "a.md: .md でないもの (ディレクトリを含む) の anchor は検査できない。行の anchor (L10・L10-L20) にするか、anchor を外す — LICENSE#intro",
+      "a.md: .md でないもの (ディレクトリを含む) の anchor は検査できない。行の anchor (L10・L10-L20) にするか、anchor を外す — docs#x",
     ],
   },
   {
@@ -471,7 +520,7 @@ const labels = {
   missing: "リンク先が無い。git が知るファイルかディレクトリを指す",
   anchor: "anchor が見出しに無い。リンク先の見出しの id に合わせる",
   notMd:
-    ".md でないファイルの anchor は検査できない。行の anchor (L10・L10-L20) にするか、anchor を外す",
+    ".md でないもの (ディレクトリを含む) の anchor は検査できない。行の anchor (L10・L10-L20) にするか、anchor を外す",
 };
 
 /** a/b/x.md の url のリンクの報告のモデル。known の .md はどれも見出しを持たない。報告が無ければ undefined。 */
