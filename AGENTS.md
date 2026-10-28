@@ -42,7 +42,10 @@
       1. marketplace を足す: `claude plugin marketplace add ikeyan/agent-files` (`ikeyan` の名前で登録される)。
       2. plugin を入れる: `claude plugin install ikeyan-skills@ikeyan --scope project` と `claude plugin install superpowers@claude-plugins-official --scope project`。
     - cwd がリポのルートでなくても、`--scope project` はエラーにならずに cwd の `.claude/settings.json` に書く (リポのルートの `.claude/settings.json` には書かない。canon: facts/claude-code/external-plugin-requires-per-user-install-trust)。
-      - 測った範囲: claude 2.1.312・Linux、cwd がリポの subdirectory。
+      - 測った範囲:
+        - claude 2.1.312
+        - Linux
+        - cwd がリポの subdirectory
       - 確かめていないもの: macOS と、cwd の祖先に既存の `.claude/settings.json` があるとき。
 
 ## このリポの仕様
@@ -71,8 +74,9 @@
     - imports の判定。
     - 出力の順と終了コード。
     - 終了 (中断を含む)。
-    - 版の範囲とその上げ方。CI が使う版は `.github/workflows/verify.yml` にある。
+    - 版の範囲とその上げ方。
   - `scripts/check-json-md.ts`: リンクと anchor の解決。
+- CI が使う deno と shellcheck の版は `.github/workflows/verify.yml` にある。
 - 各検査が見るもの:
   - 段より前:
     - git が知る項目の種類と名前。
@@ -88,14 +92,7 @@
   - `deno.json` の `imports`: 各キーが `.ts` の import 指定子から使われていること。
   - `scripts/check-json-md.ts`: `.json` の構文と、`.md` のリポ内リンク・anchor。
 - このリポの `.ts` が export を持つようになったら、未使用の export・module の検査を足す。
-- 必要なもの:
-  - `bash`
-  - `cmp`
-  - `install`
-  - `shellcheck`
-  - `deno`
-  - `git`
-  - `uname`・`dirname`・`rm`・`mkdir`・`ln`
+- 必要なもの (OS と道具) は、`verify.sh` の先頭の事前条件にある。
 - 依存は `deno.json` に完全な版で書き、`deno.lock` で固定する。新しすぎる版を避ける `minimumDependencyAge` の意味は canon: facts/deno/minimum-dependency-age。
 - `deno.lock` が `deno.json` と食い違えば `./verify.sh` が落ちる。直すのは `deno install --frozen=false`。
 
