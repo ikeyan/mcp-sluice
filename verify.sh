@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# このリポの単一検証コマンド。hook を揃えてから scripts/run-checks.ts を exec する。検査の規則の本文は scripts/run-checks.ts の先頭にある。
-# 流れ:
-# 1. 引数・$0・事前条件を確かめる。外れれば理由を出して終わる。
-# 2. git の場所を決める環境変数を消す (下の「入力」)。
-# 3. hook を揃える (下の「hook」)。揃えられなくても次へ進む。
-# 4. TMPDIR を確かめて揃える (下の「TMPDIR」)。外れれば exit 1。
-# 5. run-checks.ts を exec し、hook を揃えた結果 (0: 揃えた、1: 揃えられなかった) を渡す。1 なら run-checks.ts は段を回し、最後に exit 1 する。
+# このリポの単一検証コマンド。hook を揃えてから scripts/run-checks.ts を exec し、hook を揃えた結果 (0: 揃えた、1: 揃えられなかった) を引数で渡す。検査の規則の本文は scripts/run-checks.ts の先頭にある。
 # 事前条件 (外れれば exit 1):
 # - OS は Linux か macOS (uname -s が Linux か Darwin)。
 # - bash 3.2 以降。
-# - git 2.32 以降。rev-parse --path-format は 2.31 から (canon: facts/git/rev-parse-path-format-since-2-31)、テストが使う GIT_CONFIG_GLOBAL・GIT_CONFIG_SYSTEM は 2.32 から (canon: facts/git/config-sources-and-scopes)。
-# - cmp・shellcheck・deno が PATH にあること。cmp が無ければ hook を揃えられないとし、shellcheck と deno は run-checks.ts と exec が確かめる。
+# - git 2.32 以降。
+#   - rev-parse --path-format は 2.31 から (canon: facts/git/rev-parse-path-format-since-2-31)、テストが使う GIT_CONFIG_GLOBAL・GIT_CONFIG_SYSTEM は 2.32 から (canon: facts/git/config-sources-and-scopes)。
+#   - hook の判定が読む config -z --show-origin の並び (canon: facts/git/config-sources-and-scopes) と、run-checks.ts が読む ls-files -s -t の形 (canon: facts/git/repository-shapes) は git 2.43.0 で測った。2.32〜2.42 は測っていない。
+# - このファイルの dir を git が作業ツリーとして読める (safe.directory が要る持ち主の違いを含む)。読めなければ git rev-parse が理由を出す。
+# - PATH にあるもの:
+#   - cmp・install: 無ければ hook を揃えられないとする。
+#   - shellcheck: run-checks.ts が確かめる。
+#   - deno: exec が確かめる。
 # - ネットワークは、deno が依存 (npm) を未取得のときだけ要る。
 # 入力:
 # - 引数: 受けない。渡されたら exit 2。
@@ -27,19 +27,24 @@
 # - 揃えられないとき: 理由と、その状態で実行すれば直るコマンド (絶対パス) を stderr に出す。消すコマンドには、消すものの中身を確かめるよう添える。
 # - core.hooksPath が (どの scope でも) 設定されていれば、揃えられないとする。写す先は既定の置き場のままで、下の表どおりに写す。
 #   - 既定の置き場を指していても同じ。git rev-parse --git-path は hooks の symlink を解決したパスを出し、既定の置き場と比べられない (canon: facts/git/rev-parse-absolute-path-resolves-symlinks)。
-#   - 示すコマンドは出どころ (canon: facts/git/config-sources-and-scopes の「--show-origin の出力の形」) ごとに決める:
-#     - file: git config --file <絶対パス> --unset-all core.hooksPath。
-#     - file でない (command line など): 示すコマンドは無く、出どころを示す。
+#   - git config --get-all の終了コード (canon: facts/git/config-sources-and-scopes の「--get・--get-all の終了コード」): 0 は設定あり、1 は設定なし、他は読めないので揃えられないとする。
+#   - 出どころは file だけ (command scope の変数は上で消した。canon の同じページの「--show-origin の出力の形」)。file でなければ想定外として exit 1。
+#   - 示すコマンドは、出どころのファイルごとの git config --file <絶対パス> --unset-all core.hooksPath。
 # - 置き方: 一時ファイルに写し、ln -n で写す先に置く。
 #   - ln は写す先に何か在れば置かずに失敗する。ディレクトリだけはその中に作るので、置く前の分類で拒否する (canon: facts/shell/ln-hard-link-existing-destination)。
-#   - 置けなければ、もう一度下の表で分類する。分類の後に置かれたものも、上書きせずにその行の扱いになる。
+#   - 置けなければ、もう一度下の写す先の表で分類する。分類の後に置かれたものも、その行の扱いになる。
 #   - 同じ common dir で並行に走る verify.sh にも、書きかけは見えない。
-# - 写す元 (hooks/pre-push) と写す先 ($GIT_COMMON_DIR/hooks/pre-push) の状態ごとの扱いと、示すコマンド:
+# - 写す元 (作業ツリーの hooks/pre-push) の状態ごとの扱いと、示すコマンド。写す先を扱う前に分類し、写す先へ進まないものは写す先に触れない:
+#   - 通常ファイル (それへの symlink を含む) で、読める: 下の写す先の表へ進む。
+#   - 通常ファイル (それへの symlink を含む) で、読めない: 落ちる。chmod u+r。
+#   - 無い: 落ちる。git -C <リポ> checkout -- hooks/pre-push。
+#   - 他 (壊れた symlink・ディレクトリ・FIFO など): 落ちる。git -C <リポ> checkout -- hooks/pre-push。ディレクトリなら中のものごと置き換える (canon: facts/git/checkout-path-restores-any-worktree-kind)。
+# - 写す先 ($GIT_COMMON_DIR/hooks/pre-push) の状態ごとの扱いと、示すコマンド:
 #   - hooks が無い: 作って写す。
 #   - hooks がディレクトリでない (通常ファイル・壊れた symlink・FIFO など): 落ちる。rm -f・mkdir・install。
 #   - hooks がディレクトリ (それへの symlink を含む) で、pre-push が:
 #     - 無い: 写す。
-#     - 同じ中身の通常ファイル (それへの symlink を含む): 実行可能でなければ chmod +x。chmod が落ちれば落ちる。chmod +x。
+#     - 写す元と同じ中身の通常ファイル (それへの symlink を含む): 実行可能でなければ chmod +x する。chmod が落ちれば落ちる。chmod +x。
 #     - 違う中身 (旧版、利用者の別の hook、手を入れた写し): このリポのものかを中身から決められないので落ちる。rm -f・install。
 #     - 比べられない (読めないなど。cmp が 0・1・127 以外で終わる): 落ちる。rm -f・install。
 #     - 比べられない (cmp が PATH に無い): 落ちる。示すのは cmp を入れること。
@@ -51,21 +56,20 @@
 # - 未設定・空: /tmp として下の行で扱う。
 # - 相対パス: 落ちる。
 # - 無い・ディレクトリでない・入れない: 落ちる。理由は cd が出す。
-# - 書けない ([ -w ] が偽): 落ちる。
-# - 在る、入れる、書けるディレクトリ (symlink を含む): symlink を解決した絶対パスにする。
+# - 在る、入れるディレクトリ (symlink を含む): symlink を解決した絶対パスにする。
 #   - それが `,` を含む: --allow-write の区切りと読まれる (canon: facts/deno/allow-flag-comma-separates-values) ので落ちる。deno が --allow-write の値の `,` を escape できるようになったら外せる。
+#   - 書けるかは確かめない。deno test の段の TMPDIR を作れなければ、run-checks.ts が落ちる。
 set -euo pipefail
+# $2 は終了コード (既定は 1)
 die() {
   echo "verify.sh: $1" >&2
-  exit 1
+  exit "${2:-1}"
 }
 if [ $# -ne 0 ]; then
-  echo "verify.sh: 引数は受けない ($*)。./verify.sh だけで回す" >&2
-  exit 2
+  die "引数は受けない ($*)。./verify.sh だけで回す" 2
 fi
 if [ -L "$0" ]; then
-  echo "verify.sh: $0 は symlink で、その dir はリポでない。リポの verify.sh を直に起動する" >&2
-  exit 2
+  die "$0 は symlink で、その dir はリポでない。リポの verify.sh を直に起動する" 2
 fi
 os=$(uname -s)
 case $os in
@@ -86,62 +90,81 @@ if ! [[ $git_version =~ $version_re ]] || [ "${BASH_REMATCH[1]}" -lt 2 ] ||
 fi
 local_env=$(git rev-parse --local-env-vars)
 while IFS= read -r v; do unset "$v"; done <<<"$local_env"
+common=$(git rev-parse --path-format=absolute --git-common-dir) ||
+  die "$PWD を git の作業ツリーとして読めない (理由は上の git)。リポの verify.sh を、git が読めるようにしてから回す"
 
 hook_failed=0
 fail() {
   echo "$1" >&2
   hook_failed=1
 }
-# 理由と、その状態で実行すれば直るコマンドを出す。$3 はコマンドの前に添える文
+# 理由と、その状態で実行すれば直るコマンドを出す
 fix_by() {
-  fail "$1。${3:-}Execute: $2"
+  fail "$1。Execute: $2"
 }
 # 利用者のものを消しうるコマンドで直すとき
 refuse() {
-  fix_by "$1" "$2" "消すものの中身を確かめ、よければ "
+  fail "$1。消すものの中身を確かめ、よければ Execute: $2"
 }
 
-common=$(git rev-parse --path-format=absolute --git-common-dir)
 hooks=$common/hooks
 hook=$hooks/pre-push
-# -z でないと、origin のパスの特殊な文字が C の quote で出る (canon: facts/git/config-sources-and-scopes の「--show-origin の出力の形」)
 hooks_path_shown=
 unset_cmd=
-not_file=
-while IFS= read -r -d '' scope && IFS= read -r -d '' origin && IFS= read -r -d '' value; do
+config_exit=
+# -z でないと、origin のパスの特殊な文字が C の quote で出る (canon: facts/git/config-sources-and-scopes の「--show-origin の出力の形」)。git config の終了コードは、最後の項目 (exit <コード>) として受ける
+while IFS= read -r -d '' scope; do
+  case $scope in
+  exit\ *)
+    config_exit=${scope#exit }
+    break
+    ;;
+  esac
+  IFS= read -r -d '' origin
+  IFS= read -r -d '' value
   hooks_path_shown="${hooks_path_shown:+$hooks_path_shown; }$scope $origin $value"
   case $origin in
   file:/*) file=${origin#file:} ;;
   file:*) file=$PWD/${origin#file:} ;;
-  *)
-    not_file="${not_file:+$not_file、}$scope の $origin"
-    continue
-    ;;
+  *) die "core.hooksPath の出どころ ($scope $origin) が file でない。git の場所と設定の差し替えの変数を消した後には来ない想定" ;;
   esac
   one="git config --file $(printf %q "$file") --unset-all core.hooksPath"
   case $unset_cmd in
   *"$one"*) ;;
   *) unset_cmd=${unset_cmd:+$unset_cmd && }$one ;;
   esac
-done < <(git config -z --show-origin --show-scope --get-all core.hooksPath)
-if [ -n "$hooks_path_shown" ]; then
-  reason="core.hooksPath が設定されている ($hooks_path_shown)。hook は $hooks に置くので消す"
-  if [ -n "$not_file" ]; then
-    reason="$reason。file でない出どころ ($not_file) からは、その出どころで外す"
-  fi
-  if [ -n "$unset_cmd" ]; then
-    refuse "$reason" "$unset_cmd"
-  else
-    fail "$reason"
-  fi
-fi
+done < <(
+  # 置換の中にも set -e が効くので、終了コードは || で受ける (canon: facts/shell/bash-process-substitution-inherits-errexit)
+  status=0
+  git config -z --show-origin --show-scope --get-all core.hooksPath || status=$?
+  printf 'exit %s\0' "$status"
+)
+case $config_exit in
+0) refuse "core.hooksPath が設定されている ($hooks_path_shown)。hook は $hooks に置くので消す" "$unset_cmd" ;;
+1) ;;
+*) fail "core.hooksPath が設定されているかを読めない (git config が exit $config_exit。理由は上の git)。直してから回し直す" ;;
+esac
 
 src=$PWD/hooks/pre-push
 q_hooks=$(printf %q "$hooks")
 q_hook=$(printf %q "$hook")
 install_cmd="install -m 755 $(printf %q "$src") $q_hook"
 replace_cmd="rm -f $q_hook && $install_cmd"
-# 写す先に在るものを分類して扱う。何も無ければ 1 を返す
+# 写す元を分類する。写す先へ進めるなら 0
+check_source() {
+  local restore
+  restore="git -C $(printf %q "$PWD") checkout -- hooks/pre-push"
+  if [ -f "$src" ]; then
+    [ -r "$src" ] && return 0
+    fix_by "$src: 読めない。写す先には触れていない" "chmod u+r $(printf %q "$src")"
+  elif [ -e "$src" ] || [ -L "$src" ]; then
+    refuse "$src: 通常のファイルでない。写す先には触れていない" "$restore"
+  else
+    fix_by "$src: 無い。写す先には触れていない" "$restore"
+  fi
+  return 1
+}
+# 写す先に在るものを分類して扱う。在れば 0、何も無ければ 1
 handle_existing() {
   if [ ! -d "$hooks" ] && { [ -e "$hooks" ] || [ -L "$hooks" ]; }; then
     refuse "$hooks: ディレクトリでない" "rm -f $q_hooks && mkdir $q_hooks && $install_cmd"
@@ -169,6 +192,7 @@ handle_existing() {
   else
     return 1
   fi
+  return 0
 }
 # 写す先に何も無いときだけ置く。在れば ln が失敗する
 place() {
@@ -181,7 +205,7 @@ place() {
   trap - EXIT
   return "$placed"
 }
-if ! handle_existing; then
+if check_source && ! handle_existing; then
   if place; then
     echo "$hook: hooks/pre-push を写した"
   elif ! handle_existing; then
@@ -197,9 +221,6 @@ esac
 # deno の --allow-write はパスの綴りで照合する (canon: facts/deno/permission-paths-not-resolved) ので、exec の環境の TMPDIR と同じ綴りで渡す。
 TMPDIR=$(cd "$TMPDIR" && pwd -P) ||
   die "TMPDIR に cd できない (値と理由は上の cd)。在る、入れるディレクトリを TMPDIR に設定する"
-if [ ! -w "$TMPDIR" ]; then
-  die "TMPDIR ($TMPDIR) に書けない。書けるディレクトリを TMPDIR に設定する"
-fi
 case $TMPDIR in
 *,*) die "TMPDIR ($TMPDIR) が , を含む。, を含まないディレクトリを TMPDIR に設定する" ;;
 esac

@@ -76,6 +76,7 @@
 - 必要なもの (版の範囲は `verify.sh` の事前条件と `scripts/run-checks.ts` の先頭の「版」。CI が使う版は `.github/workflows/verify.yml`):
   - `bash`
   - `cmp`
+  - `install`
   - `shellcheck`
   - `deno`
   - `git`
