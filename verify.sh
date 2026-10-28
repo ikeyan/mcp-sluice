@@ -8,7 +8,8 @@
 #   - 次は git 2.43.0 で測った。2.32〜2.42 は測っていない。
 #     - hook の判定が読む config -z --show-origin の並び (canon: facts/git/config-sources-and-scopes)。
 #     - run-checks.ts が読む ls-files -s -t の形 (canon: facts/git/repository-shapes)。
-#     - verify.sh と run-checks.ts が読む rev-parse --local-env-vars の一覧 (canon: facts/git/local-env-vars-and-hook-env)。各行が ^GIT_[A-Z_]+$ に合わなければ (知らない option を、リポの中の git は名前のまま出して exit 0 で終わる。同じ canon の「知らない option」)、変数の名前として使わずに落ちる。
+#     - verify.sh と run-checks.ts が読む rev-parse --local-env-vars の一覧 (canon: facts/git/local-env-vars-and-hook-env)。
+#       - 各行が ^GIT_[A-Z_]+$ に合わなければ、変数の名前として使わずに落ちる。リポの中の git は、知らない option を名前のまま出して exit 0 で終わる (同じ canon の「知らない option」)。
 # - このファイルの dir の状態ごとの扱い (canon: facts/git/repository-shapes の「スクリプトを置いた dir の位置」):
 #   - 本体の作業ツリーのルート: 回す。
 #   - linked worktree のルート: 回す。hook は common git dir に写す (下の「hook」)。
