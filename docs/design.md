@@ -316,7 +316,7 @@ gateway:                            # ゲートウェイ自身のツールにも
     - 無いか空。
     - HTTP の子の値 (`bearer_env`・`headers_env`) が、ヘッダの値として `Headers` に入らない。入れ方は、`append` してから `get` で読み戻す。`bearer_env` は、`Authorization` の値 `Bearer <値>` として入れる。次のどちらかなら当たる:
       - `append` が `TypeError` を投げる。途中の CR・LF と、位置によらず NUL を含む値と、U+00FF を超える文字を含む値は、これで止まる (canon: facts/deno/headers-validation)。
-      - 読み戻した値が、入れた値から前後の HTTP whitespace (tab・空白・CR・LF) を落としたものと違う。deno 2.9.8 の `Headers` は、前後に空白があり途中に CR か LF がある値 (例: ` a\nb`) を、投げずに空文字として受ける (2026-10-28 に測った。canon にまだ無い)。
+      - 読み戻した値が、入れた値から前後の HTTP whitespace (tab・空白・CR・LF) を落としたものと違う。deno 2.9.8 の `Headers` は、前後に空白があり途中に CR か LF がある値 (例: ` a\nb`) を、投げずに空文字として受ける (canon: facts/deno/headers-validation)。
 
       前後の HTTP whitespace は、`Headers` が落として受ける (canon: facts/deno/headers-validation)。そのまま受け、別の検査を足さない。例えば、末尾に改行のある秘密は、その改行を除いて送る。
   - server の項目が、transport の `type` に合わない。JSON Schema で `type` ごとに書ける項目を分ける:
