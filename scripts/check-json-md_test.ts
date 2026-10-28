@@ -86,11 +86,13 @@ const labels = {
   missing: "リンク先が無い。git が知るファイルかディレクトリを指す",
   anchor: "anchor が見出しに無い。リンク先の見出しの id に合わせる",
   notMd:
-    ".md でないファイルの行の anchor (L10 の形。先頭に 0 を置かない) の他は、検査できない。L<行番号> にするか、anchor を外す",
-  crAnchor: "CR を含むファイルへの行の anchor は検査できない。anchor を外す",
+    ".md でないファイルへの anchor は、L<行番号> の形 (先頭に 0 を置かない) だけ検査できる。L<行番号> にするか、anchor を外す",
+  emptyAnchor: "空のファイルへの anchor は検査できない。anchor を外す",
   nonUtf8Anchor:
-    "UTF-8 として不正なファイルへの行の anchor は検査できない。anchor を外す",
-  dirAnchor: "ディレクトリへのリンクの anchor は検査できない。anchor を外す",
+    "UTF-8 として不正なファイルへの anchor は検査できない。anchor を外す",
+  nulAnchor: "NUL を含むファイルへの anchor は検査できない。anchor を外す",
+  crAnchor: "CR を含むファイルへの anchor は検査できない。anchor を外す",
+  dirAnchor: "ディレクトリへの anchor は検査できない。anchor を外す",
   noLine:
     "行の anchor の行がファイルに無い。1 から行数までの番号にするか、anchor を外す",
 };
@@ -566,44 +568,77 @@ const cases: {
     ],
   },
   {
-    name:
-      "行の anchor の行数: 末尾の LF の有無で行数ちょうどは通り、1 つ超えるか 0 は違反。空のファイルは 0 行。CR を含むファイルと UTF-8 として不正なファイルは検査できない",
+    name: "行の anchor の行数: 行数ちょうどは通り、超える番号と 0 は違反",
     files: {
       "lf.txt": "a\nb\n",
-      "crlf.txt": "a\r\nb\r\n",
       "nolf.txt": "a\nb",
       "onlylf.txt": "\n",
-      "cr.txt": "a\rb\r",
-      "empty.txt": "",
-      "bin.dat": new Uint8Array([0x61, 0xff, 0x0a]),
+      "ja.txt": "日本語\n",
       "a.md": [
         "lf.txt#L2",
         "lf.txt#L3",
         "lf.txt#L0",
-        "crlf.txt#L2",
-        "crlf.txt#L3",
         "nolf.txt#L2",
         "nolf.txt#L3",
         "onlylf.txt#L1",
         "onlylf.txt#L2",
-        "cr.txt#L1",
-        "cr.txt#L2",
-        "empty.txt#L1",
-        "bin.dat#L1",
+        "ja.txt#L1",
+        "ja.txt#L2",
       ].map((l) => `[l](${l})\n`).join(""),
     },
     code: 1,
     stderr: [
       `a.md: ${labels.noLine} — lf.txt#L3`,
       `a.md: ${labels.noLine} — lf.txt#L0`,
-      `a.md: ${labels.crAnchor} — crlf.txt#L2`,
-      `a.md: ${labels.crAnchor} — crlf.txt#L3`,
       `a.md: ${labels.noLine} — nolf.txt#L3`,
       `a.md: ${labels.noLine} — onlylf.txt#L2`,
+      `a.md: ${labels.noLine} — ja.txt#L2`,
+    ],
+  },
+  {
+    name:
+      "行の anchor: 空のファイル、UTF-8 として不正なファイル、NUL を含むファイル、CR を含むファイルは検査できない",
+    files: {
+      "empty.txt": "",
+      // UTF-8 として不正なものの類: 単独の継続バイト、EOF で切れた列、過長形、サロゲート、U+10FFFF を超えるもの
+      "ff.dat": new Uint8Array([0x61, 0xff, 0x0a]),
+      "cont.dat": new Uint8Array([0x61, 0x80, 0x0a]),
+      "cut.dat": new Uint8Array([0x61, 0x0a, 0xe3, 0x81]),
+      "overlong.dat": new Uint8Array([0xc0, 0xaf, 0x0a]),
+      "surrogate.dat": new Uint8Array([0xed, 0xa0, 0x80, 0x0a]),
+      "beyond.dat": new Uint8Array([0xf4, 0x90, 0x80, 0x80, 0x0a]),
+      "nul.txt": "a\0b\n",
+      "crlf.txt": "a\r\nb\r\n",
+      "cr.txt": "a\rb\r",
+      "a.md": [
+        "empty.txt#L1",
+        "ff.dat#L1",
+        "cont.dat#L1",
+        "cut.dat#L1",
+        "overlong.dat#L1",
+        "surrogate.dat#L1",
+        "beyond.dat#L1",
+        "nul.txt#L1",
+        "crlf.txt#L2",
+        "crlf.txt#L3",
+        "cr.txt#L1",
+        "cr.txt#L2",
+      ].map((l) => `[l](${l})\n`).join(""),
+    },
+    code: 1,
+    stderr: [
+      `a.md: ${labels.emptyAnchor} — empty.txt#L1`,
+      `a.md: ${labels.nonUtf8Anchor} — ff.dat#L1`,
+      `a.md: ${labels.nonUtf8Anchor} — cont.dat#L1`,
+      `a.md: ${labels.nonUtf8Anchor} — cut.dat#L1`,
+      `a.md: ${labels.nonUtf8Anchor} — overlong.dat#L1`,
+      `a.md: ${labels.nonUtf8Anchor} — surrogate.dat#L1`,
+      `a.md: ${labels.nonUtf8Anchor} — beyond.dat#L1`,
+      `a.md: ${labels.nulAnchor} — nul.txt#L1`,
+      `a.md: ${labels.crAnchor} — crlf.txt#L2`,
+      `a.md: ${labels.crAnchor} — crlf.txt#L3`,
       `a.md: ${labels.crAnchor} — cr.txt#L1`,
       `a.md: ${labels.crAnchor} — cr.txt#L2`,
-      `a.md: ${labels.noLine} — empty.txt#L1`,
-      `a.md: ${labels.nonUtf8Anchor} — bin.dat#L1`,
     ],
   },
   {
@@ -769,7 +804,7 @@ Deno.test("check-json-md.ts の表", async () => {
  * a/c.json の中身の形 (canon: facts/github/blob-line-anchors の「行の anchor の入力の次元」。空のファイルは JSON でないので上の表で見る)。
  * - rows: 区切りで割った行の数。
  * - terminated: 最後の行の後にも区切りを置くか。
- * - eol: 区切り。CR を含むファイルへの行の anchor は、検査できない違反 (同じ canon の「測っていないもの」)。
+ * - eol: 区切り。
  */
 const jsonShape = fc.record({
   rows: fc.integer({ min: 1, max: 3 }),
@@ -782,7 +817,7 @@ const jsonText = ({ rows, terminated, eol }: JsonShape) =>
   (rows === 1 ? ["[]"] : ["[", ...Array(rows - 2).fill(""), "]"]).join(eol) +
   (terminated ? eol : "");
 
-/** 性質のテストの fixture のファイルと、中身を作る関数。a/b/x.md は links へのリンクを置き、a/c.json は shape の中身。 */
+/** 性質のテストの fixture のファイルと、中身を作る関数。 */
 const propertyFiles: Record<
   string,
   (shape: JsonShape, links: string[]) => string
@@ -814,7 +849,8 @@ const model = (
       let s: string;
       try {
         s = decodeURIComponent(segment);
-      } catch {
+      } catch (e) {
+        if (!(e instanceof URIError)) throw e;
         return "malformed";
       }
       if (s === "" || s === ".") continue;
@@ -836,7 +872,8 @@ const model = (
   let anchor: string;
   try {
     anchor = decodeURIComponent(raw);
-  } catch {
+  } catch (e) {
+    if (!(e instanceof URIError)) throw e;
     return "malformed";
   }
   if (file === undefined) return "dirAnchor";
@@ -845,6 +882,7 @@ const model = (
     if (line === null || (line[1].length > 1 && line[1].startsWith("0"))) {
       return "notMd";
     }
+    // CR を含むファイルへの行の anchor は、GitHub で測っていないので検査できない違反 (canon: facts/github/blob-line-anchors の「測っていないもの」)
     if (jsonText(shape).includes("\r")) return "crAnchor";
     return Number(line[1]) >= 1 && Number(line[1]) <= shape.rows
       ? undefined
@@ -853,7 +891,7 @@ const model = (
   return "anchor";
 };
 
-Deno.test("リンクの報告は、# と ? で割り、segment ごとに decode して辿り、anchor を decode し、行の anchor を判定するモデルと一致する", async () => {
+Deno.test("リンクの報告は、ファイル先頭の性質のモデルと一致する", async () => {
   const path = fc.array(
     fc.constantFrom(
       ".",
@@ -885,15 +923,16 @@ Deno.test("リンクの報告は、# と ? で割り、segment ごとに decode 
     ),
     { minLength: 1, maxLength: 6 },
   ).map((s) => s.join("/"));
-  // 生成したパスが a/c.json に届くのは稀なので、行番号はこの列で毎回見る
-  const lineLinks = ["L0", "L1", "L01", "L2", "L3", "L4"].map((l) =>
-    `../c.json#${l}`
-  );
+  // 生成したパスが a/c.json に届くのは稀なので、行の anchor は別に毎回生成する。行番号は 0〜4 に先頭の 0 を 0〜2 個つけたもの
+  const lineLink = fc.tuple(fc.nat({ max: 4 }), fc.nat({ max: 2 })).map((
+    [n, zeros],
+  ) => `../c.json#L${"0".repeat(zeros)}${n}`);
   await fc.assert(
     fc.asyncProperty(
+      fc.uniqueArray(lineLink, { minLength: 1, maxLength: 15 }),
       fc.uniqueArray(path, { minLength: 1, maxLength: 20 }),
       jsonShape,
-      async (paths, shape) => {
+      async (lineLinks, paths, shape) => {
         const links = [...new Set([...lineLinks, ...paths])];
         const r = await check(
           Object.fromEntries(

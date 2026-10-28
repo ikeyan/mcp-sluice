@@ -61,20 +61,21 @@
  * - anchor (空なら見ない。%-decode できなければ「不正な %-エンコード」違反):
  *   - 辿った先が `.md` の引数: その見出しの id のどれかと一致すること。id は github-slugger の規則で作る (canon: facts/github/heading-anchor-ids)。
  *   - 辿った先が `.md` でないファイル: 下の「行の anchor」で検査する。
- *   - 辿った先がディレクトリ: どの形も検査できないので違反 (canon: facts/github/blob-line-anchors の「docs に無いもの」。この canon を以下「blob の canon」と呼ぶ)。直し方は anchor を外すこと。
+ *   - 辿った先がディレクトリ: どの形も検査できないので違反 (canon: facts/github/blob-line-anchors の「docs に無いもの」。この canon を以下「blob の canon」と呼ぶ)。
  * - 行の anchor:
  *   - 受ける形は `L<行番号>` で、行番号は `0` か、先頭が 0 でない 10 進の数。1 ≤ 行番号 ≤ 行数 でなければ、存在しない行へのリンクとして違反 (blob の canon の「実測」)。
- *   - 行数は、ファイルのバイトの LF の数。最後のバイトが LF でなければ 1 を足す。空のファイルは 0 (blob の canon の「実測」)。
+ *   - 行数は、ファイルのバイトの LF の数。最後のバイトが LF でなければ 1 を足す (blob の canon の「実測」)。
  *     - 行数を数えるのは、行の anchor の先になった .md でないファイルだけ。
  *     - 読めなければ、リンクを置いた .md の違反。
  *   - 次は GitHub の描画を測っていない (blob の canon の「測っていないもの」) ので、検査できない形として違反にする:
- *     - 他の形の anchor (範囲の `L10-L20`、先頭に 0 のある行番号 `L01` を含む)。直し方は L<行番号> にするか、anchor を外すこと。
- *     - CR を含むファイルへの行の anchor。直し方は anchor を外すこと。測っていない次の区切りを含む:
- *       - CRLF
- *       - CR だけ
- *     - UTF-8 として不正なファイル (テキストでない blob) への行の anchor。直し方は anchor を外すこと。
- *   - 空のファイルも測っていないが、行数 0 で、どの行の anchor も範囲の外の違反になる。
- *   - 検査できない形 (上の箇条とディレクトリ) は、blob の canon の「確かめ方」で GitHub の描画を確かめ、行が在ると分かれば、受ける形に足す。
+ *     - 他の形の anchor (範囲の `L10-L20`、先頭に 0 のある行番号 `L01` を含む)。
+ *     - 次のファイルへの行の anchor:
+ *       - 空のファイル。
+ *       - テキストでない blob: UTF-8 として不正なファイルと、NUL を含むファイル。
+ *       - CR を含むファイル (CRLF と CR だけの区切りを含む)。
+ *   - 検査できない形 (上の箇条とディレクトリ):
+ *     - 直し方は anchor を外すこと。他の形の anchor は L<行番号> にしてもよい。
+ *     - blob の canon の「確かめ方」で GitHub の描画を確かめ、行が在ると分かれば、受ける形に足す。
  * - `.json`・`.md` を読めない (無い、を含む) か UTF-8 として不正なら、そのファイル自身の違反にする。そういう .md への anchor は見ない。
  * - 違反の行は `<file>: <何が>。<どう直すか> — <リンクか原因の文言>`。
  */
@@ -304,7 +305,8 @@ const malformed =
 const percentDecode = (s: string): string | undefined => {
   try {
     return decodeURIComponent(s);
-  } catch {
+  } catch (e) {
+    if (!(e instanceof URIError)) throw e;
     return undefined;
   }
 };
@@ -355,6 +357,10 @@ for (const file of markdownFiles) {
   markdownParsed.push([file, parsed]);
 }
 
+/** 検査できない形 (上の「行の anchor」) の違反の、— の前まで。 */
+const uncheckableAnchor = (target: string) =>
+  `${target}への anchor は検査できない。anchor を外す`;
+
 /** 行の anchor の先の file の行数 (上の「行の anchor」)。読めなければ原因の文言、検査できないファイルなら違反の文言。 */
 const countLines = async (
   file: string,
@@ -364,20 +370,20 @@ const countLines = async (
   const read = await readBytes(file);
   if ("unreadable" in read) return read;
   const { bytes } = read;
-  if ("invalid" in decodeUtf8(bytes)) {
-    return {
-      uncheckable:
-        "UTF-8 として不正なファイルへの行の anchor は検査できない。anchor を外す",
-    };
-  }
-  if (bytes.includes(0x0d)) {
-    return {
-      uncheckable:
-        "CR を含むファイルへの行の anchor は検査できない。anchor を外す",
-    };
+  const uncheckable = bytes.length === 0
+    ? "空のファイル"
+    : "invalid" in decodeUtf8(bytes)
+    ? "UTF-8 として不正なファイル"
+    : bytes.includes(0x00)
+    ? "NUL を含むファイル"
+    : bytes.includes(0x0d)
+    ? "CR を含むファイル"
+    : undefined;
+  if (uncheckable !== undefined) {
+    return { uncheckable: uncheckableAnchor(uncheckable) };
   }
   const lfs = bytes.filter((b) => b === 0x0a).length;
-  return { count: bytes.length > 0 && bytes.at(-1) !== 0x0a ? lfs + 1 : lfs };
+  return { count: bytes.at(-1) === 0x0a ? lfs : lfs + 1 };
 };
 
 for (const [file, parsed] of markdownParsed) {
@@ -422,15 +428,16 @@ for (const [file, parsed] of markdownParsed) {
       case "dir":
         report(
           file,
-          `ディレクトリへのリンクの anchor は検査できない。anchor を外す — ${url}`,
+          `${uncheckableAnchor("ディレクトリ")} — ${url}`,
         );
         break;
       case "file": {
+        // GitHub の docs が示すのは L<行番号> だけ。先頭に 0 のある番号は測っていない (canon: facts/github/blob-line-anchors)
         const line = /^L(0|[1-9][0-9]*)$/.exec(anchor);
         if (line === null) {
           report(
             file,
-            `.md でないファイルの行の anchor (L10 の形。先頭に 0 を置かない) の他は、検査できない。L<行番号> にするか、anchor を外す — ${url}`,
+            `.md でないファイルへの anchor は、L<行番号> の形 (先頭に 0 を置かない) だけ検査できる。L<行番号> にするか、anchor を外す — ${url}`,
           );
           break;
         }

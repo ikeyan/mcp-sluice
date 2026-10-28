@@ -183,13 +183,14 @@
  *     - 比べるもの: git が知る .ts のそれぞれを根にした `deno info --json` (canon: facts/deno/info-json-dependencies) の、graph の各 module (相対 import で辿った先を含む) の error と dependencies (解決先と、解決の error)。.ts のパスごとに比べる。
  *     - 写し: deno.json の imports と scopes だけを書いたもの (下の「定義域」)。段の一時ディレクトリに置き、--config で渡す。
  *       - 写しを deno.json と別の場所に置くのは、deno info に imports だけを差し替える flag が無いことへの回避策。
- *       - 外せる条件: deno info が、deno.json の imports を差し替える flag を持ったとき。
+ *       - 外せる条件: deno info が、deno.json の imports を差し替える flag を持ったとき。上流への報告は未。
  *       - 外すと消すもの: uncopiedKeys・unhandled の判定・relativeKey・pathValue・placeBound と、下の「定義域」の最上位のキーと imports・scopes の形の 2 項。
  *     - 選び方:
  *       1. 全部のキーを持つ写しの解決を基準にする。
  *       2. キーを名前 (UTF-16 の符号単位) の順に 1 つずつ試す。試す写しは、それまでに除いたキーと、試すキーを除いたもの。
  *       3. 試した写しの解決が基準と同じなら、試したキーを除いたままにする。
  *       - 互いに代わりになるキー (`a/` と `a/b/` など) は、先に試したほうだけを報告する。
+ *     - deno を起動する数は (キーの数 + 1) × .ts の数。キーの試しは前の結果に依るので直列。同じ試しの .ts は infoLimit まで並べる。
  *   - 定義域。外れれば、理由を出して落ちる:
  *     - deno.json の最上位のキーは、imports・scopes と uncopiedKeys だけ。
  *       - uncopiedKeys: 写さなくても deno info の解決が変わらないと測ったキー (canon: facts/deno/info-config-other-location の「写さないキー」)。値を問わず処理する。

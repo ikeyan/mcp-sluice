@@ -11,6 +11,7 @@
 #   - 次は git 2.43.0 で測った (git 2.32〜2.42: 測っていない)。
 #     - hook の判定が読む config -z --show-origin の並び (canon: facts/git/config-sources-and-scopes)。
 #     - run-checks.ts が読む ls-files -s -t の形 (canon: facts/git/repository-shapes)。
+#     - git が、写す途中の一時ファイル (下の「置き方」) を hook として呼ばないこと (canon: facts/git/hook-found-by-exact-name)。
 #   - verify.sh と run-checks.ts が読む rev-parse --local-env-vars の一覧 (canon: facts/git/local-env-vars-and-hook-env)。測った版での出方:
 #     - git 2.43.0: GIT_DIR に存在しないパスを入れても、同じ 15 個を同じ順で出した。測ったのは GIT_DIR だけ。
 #     - git 2.55.0 (macOS): 値を変えずに一覧を出した。
@@ -64,7 +65,7 @@
 #   - ln は写す先に何か在れば置かずに失敗する。ディレクトリだけはその中に作るので、置く前の分類で拒否する (canon: facts/shell/ln-hard-link-existing-destination)。
 #   - 置けなければ、もう一度下の写す先の表で分類する。分類の後に置かれたものも、その行の扱いになる。
 #   - 同じ common dir で並行に走る verify.sh にも、書きかけは見えない。
-#   - SIGKILL では EXIT trap が回らず、一時ファイル $GIT_COMMON_DIR/hooks/pre-push.verify-<pid> が残りうる (canon: facts/shell/bash-exit-trap-skipped-on-sigkill)。git はこれを hook として呼ばない (canon: facts/git/hook-found-by-exact-name)。
+#   - SIGKILL では EXIT trap が回らず、一時ファイル $hook.verify-$$ (写す先の pre-push の名前に .verify-<pid> を足したもの) が残りうる (canon: facts/shell/bash-exit-trap-skipped-on-sigkill)。git はこれを hook として呼ばない (canon: facts/git/hook-found-by-exact-name)。
 # - 写す元 (作業ツリーの hooks/pre-push) の状態ごとの扱いと、示すコマンド。写す先を扱う前に分類し、写す先へ進まないものは写す先に触れない:
 #   - 通常ファイル (それへの symlink を含む) で、読める: 下の写す先の表へ進む。
 #   - 通常ファイル (それへの symlink を含む) で、読めない: 落ちる。chmod u+r。
@@ -157,6 +158,7 @@ hook=$hooks/pre-push
 hooks_path_shown=
 unset_cmd=
 config_exit=
+# git config -z の出力は (scope, origin, value) の 3 つ組の列 (canon: facts/git/config-sources-and-scopes の「--show-origin の出力の形」)。その後に下の printf が exit <コード> の項目を 1 つ足す。exit の項目が無いまま EOF なら、config_exit は空のままで、下の case が読めないとして落とす
 while IFS= read -r -d '' scope; do
   case $scope in
   exit\ *)
