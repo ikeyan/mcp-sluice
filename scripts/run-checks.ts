@@ -116,11 +116,11 @@
  *     - リポの .shellcheckrc も読まないので、directive は各 script に書く。
  * - 版:
  *   - deno: denoVersions (下の定数) のどれか。このプロセスを動かす deno を見る (段の子も同じ PATH で引く)。
- *     - denoVersions は、recommended の lint を通し、このファイルが引く canon の事実を Linux で測った版だけを持つ。
+ *     - denoVersions は、recommended の lint を通し、このファイルが引く canon の事実 (macOS だけの事実の killGroup の EPERM を除く。その測り直しは killGroup の「外す判定」) を Linux で測った版だけを持つ。
  *   - shellcheck: shellcheckVersion だけ。版で出す指摘が違う (canon: facts/shellcheck/sc2015-version-difference)。
  *   - git: verify.sh の事前条件 (verify.sh が確かめる)。
  *   - 版を足す・上げるときは、次を済ませてから、その道具の版の定数 (deno は denoVersions、shellcheck は shellcheckVersion) を変える:
- *     1. 次を新しい版で測り直す。このファイルが引く canon の事実と、deno info --json の形 (下の「deno.json の imports」)。
+ *     1. 次を新しい版で、Linux で測り直す (macOS の事実は killGroup の「外す判定」)。このファイルが引く canon の事実と、deno info --json の形 (下の「deno.json の imports」)。
  *     2. deno: deno lint の recommended に増えた規則の指摘を直す。
  *     3. 同じ commit で .github/workflows/verify.yml を合わせる:
  *        - deno: deno-version を denoVersions に入る版にする。
@@ -289,7 +289,6 @@ const killGroup = (child: Deno.ChildProcess, signal: Deno.Signal) => {
     /*
      * EPERM: macOS の、終わりかけのものだけのグループで観測した (canon: facts/deno/command-spawn の「Deno.kill」)。機構は未確認。
      * - 前提が崩れて、生きたものが残るグループでも EPERM が出るなら、残ったものを検出しない。pipe を持つものは exec の pipe の待ちが検出し、pipe を持たないものは止まらずに残る。
-     * - 同じ canon の節は、この事実を macOS でだけ測った。denoVersions の版を足すときの Linux での測り直しには入らず、macOS の版ごとに次の外す判定で測る。
      * - 外す判定:
      *   1. canon の表の測定 (先頭に SIGKILL を送った直後に、この関数と同じ Deno.kill(-pid) でグループへ送る) を、macOS の新しい版ごとに 1000 回回す。
      *   2. EPERM が 0 回の版から外す。
@@ -883,7 +882,12 @@ const pathValue = (v: unknown) =>
 /**
  * deno info を同時に起動する数の上限 (上の「deno.json の imports の各キー」)。
  * - 8 は、このリポの .ts (2026-10-28 に 5 件) を 1 回で全部並べられる数。
- * - 同時に動く子 1 つにつき、このプロセスは fd を 3 つ持つ。測った子の形は exec の子と同じ (stdin を null、stdout・stderr を piped、detached)。Linux で測り、macOS は測っていない (canon: facts/deno/spawn-piped-child-fds)。8 なら 24 個。
+ * - 同時に動く子 1 つにつき、このプロセスは fd を 3 つ持つ。8 なら 24 個。
+ *   - 測った子の形は exec の子と同じ:
+ *     - stdin は null
+ *     - stdout と stderr は piped
+ *     - detached
+ *   - Linux で測り、macOS は測っていない (canon: facts/deno/spawn-piped-child-fds)。
  * - 上げる条件: .ts が増えて、この段の待ちが目立つとき。開ける fd の数の上限 (ulimit -n) の中で上げる。
  */
 const infoLimit = 8;

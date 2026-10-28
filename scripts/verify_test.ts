@@ -39,6 +39,7 @@ const root = Deno.realPathSync(`${import.meta.dirname}/..`);
 const dec = new TextDecoder();
 const tmpdir = Deno.env.get("TMPDIR");
 if (!tmpdir) throw new Error("TMPDIR が空。./verify.sh から回す");
+const linux = Deno.build.os === "linux";
 
 const localEnv = dec.decode(
   (await new Deno.Command("git", { args: ["rev-parse", "--local-env-vars"] })
@@ -1145,7 +1146,7 @@ async function probeRange(
 Deno.test({
   name:
     "locale の確かめ: Linux の bash は、無い locale で locale が効かず、C.UTF-8 で [A-Z] が É を含まない",
-  ignore: Deno.build.os !== "linux",
+  ignore: !linux,
   fn: async () => {
     const c = await probeRange({ LC_ALL: "C.UTF-8" });
     if (c.kind === "noLocale") {
@@ -1163,8 +1164,9 @@ Deno.test({
 Deno.test({
   name:
     "locale の確かめ: bash が 0・1・3 の他で終われば、終了コードと信号を出して投げる",
-  // 下の BASH_ENV の順を測ったのは Linux の bash だけ。macOS の bash で測れば外す
-  ignore: Deno.build.os !== "linux",
+  // BASH_ENV の順は Linux の bash でだけ測った (canon: facts/shell/bash-env-read-by-noninteractive-bash の「測っていないもの」)。他の OS では probeRange の投げる経路を検査しないまま通る
+  // 外せる条件: macOS の /bin/bash 3.2 で ignore 無しに回して通ったとき。通らなければ、結果を canon に足してから書き直す
+  ignore: !linux,
   fn: async () => {
     // 非対話の bash は -c の文字列より先に BASH_ENV のファイルを回す (canon: facts/shell/bash-env-read-by-noninteractive-bash)
     await withTempDir(async (dir) => {
@@ -1188,7 +1190,6 @@ Deno.test({
 
 /** wideLocale を使う子の環境の差分。Linux では dir に locale を作る。 */
 async function wideRangeLocale(dir: string): Promise<Record<string, string>> {
-  const linux = Deno.build.os === "linux";
   const env: Record<string, string> = linux
     ? { LOCPATH: dir, LC_ALL: wideLocale }
     : { LC_ALL: wideLocale };
