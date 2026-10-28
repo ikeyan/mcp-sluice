@@ -31,13 +31,16 @@
  * - exec が待つものと、その上限:
  *   - 先頭の終わり: 段の実行そのものを待つ。中断では終了の経路の emptyGroup の SIGKILL で終わる。
  *   - emptyGroup: SIGTERM の後、先頭の終わりと出力の pipe が閉じるのを graceMs まで待つ。SIGKILL の後の先頭の回収は、SIGKILL を捕まえられないので返る。
- *   - 出力の pipe: emptyGroup の後、graceMs まで待つ。閉じなければ読み端を cancel し (読めた分が返る。canon: facts/deno/command-spawn の「出力の pipe を持ったまま残る子孫と、読み端の cancel」)、その子を「pipe が閉じない」の失敗にする。
+ *   - 出力の pipe: emptyGroup の後、graceMs まで待つ。待ちの終わり方ごとの扱い:
+ *     - 閉じる: 読めた出力を返す。
+ *     - 読みが reject する (読み端が error になる): exec はその例外を投げ、段はその文言 (stack trace) で落ちる。
+ *     - graceMs を過ぎる: 読み端を cancel し (読めた分が返る。canon: facts/deno/command-spawn の「出力の pipe を持ったまま残る子孫と、読み端の cancel」)、その子を「pipe が閉じない」の失敗にする。
  * - pipe の書き端を持ちうるもの:
  *   - 先頭: 終われば閉じる。
  *   - グループの中の子孫: emptyGroup が止める。
  *   - グループを抜けた子孫: 止めない。
  * - 状態 (groups):
- *   - 対象: exec が起動した子のプロセスグループ。起動から、emptyGroup が成功するか、空にできない失敗を出すまで記録する。記録は exec が戻ったか (returned) を持つ。
+ *   - 対象: exec が起動した子のプロセスグループ。起動から、本流が消すか finish が exit するまで記録する (下の「終了」)。記録は exec が戻ったか (returned) を持つ。
  *   - 鍵: pgid (子の pid)。
  *   - 等しいとみなす条件: 同じ exec の呼び出し。
  *
@@ -48,19 +51,19 @@
  *     - 段より前の失敗。
  *     - 段の後。
  *   - 中断 (SIGHUP・SIGINT・SIGTERM)。
- * - 後始末の記録は groups と stageTmps (上と下の「状態」)。どちらも、後始末が成功すれば消え、持ち主 (exec・withStageTmp) が戻ると returned を立てる。残った記録の失敗は、次のどちらかが出す:
+ * - 後始末の記録は groups と stageTmps (上と下の「状態」)。どちらも、持ち主 (exec・withStageTmp) が戻ると returned を立てる。後始末 (グループを空にする、段の一時ディレクトリを消す) は記録ごとに 1 回だけ走り、後から呼んでも同じ結果を返す。後始末の失敗は、次のどちらかが出す:
  *   - 本流: 段より前の失敗か段の結果を出した直後に、同じ同期の区間で、returned の記録を消す (持ち主の失敗は、結果の文言として出ている)。returned でない記録 (段が待たずに戻ったときの、まだ走っている exec など) は残す。
- *   - finish: 残る記録を全部後始末して、その失敗を理由と手で直す方法つきで stderr に出してから exit する。
+ *   - finish: 残る記録の後始末を全部待ち、その失敗を理由と手で直す方法つきで stderr に出してから exit する。
  *     1. 記録しているグループを同時に空にする。
  *     2. 段の一時ディレクトリが残っていれば消す。失敗するのは、消せないものがあるとき (グループを抜けた子孫が書き続けているなど)。
  * - 記録の時点ごとの、失敗 (グループを空にできない、段の一時ディレクトリを消せない) の報告:
  *
  *   | 記録の時点 | 出す側 | 回数 |
  *   | --- | --- | --- |
- *   | 持ち主が戻る前に中断が来る | finish (持ち主と同じ emptyGroup・同じ消去の結果を待つ。持ち主の結果は本流が出さない) | 1 |
+ *   | 持ち主が戻る前に中断が来る | finish (持ち主と同じ emptyGroup・同じ消去の結果を待つ) | 1 |
  *   | 持ち主が戻った後、本流が出す前に中断が来る | finish (記録が残る) | 1 |
  *   | 持ち主が戻った後、本流が出した | 本流 (finish の前に記録は消えている) | 1 |
- *   | 本流が出したときに、持ち主が戻っていない | finish (記録が残る。持ち主の結果は本流が出さない) | 1 |
+ *   | 本流が出したときに、持ち主が戻っていない | finish (記録が残る) | 1 |
  *
  * - 終了コードは最初の finish の呼び出しのもの。中断なら 128 + シグナルの番号 (下の signals)。
  * - 後の呼び出し (2 回目以降のシグナル、中断の後の本流) は何もせず、最初の経路の exit を待つ。
@@ -79,7 +82,7 @@
  *   - 段の初めに作る。作れなければ、理由を出して段を落とす。
  *   - 段の後に消せなければ、段の結果 (exec の例外ならその文言) に、消せないことと手で消すことを足して段を落とす。文言は終了の経路と同じ。
  * - 状態 (stageTmps):
- *   - 対象: このプロセスが作った段の一時ディレクトリ。作ってから、消せるか、本流か finish がその消去の失敗を出すまで記録する。記録は段の名前と、withStageTmp が戻ったか (returned) を持つ。
+ *   - 対象: このプロセスが作った段の一時ディレクトリ。作ってから、本流が消すか finish が exit するまで記録する (上の「終了」)。記録は段の名前と、withStageTmp が戻ったか (returned) を持つ。
  *   - 鍵: 一時ディレクトリのパス。
  *   - 等しいとみなす条件: 同じパス (makeTempDir が作るたびに違うパスを返す)。
  * - deno test の段のものを外せる条件: deno test が SIGTERM で finally を回し、SIGINT でも test の後始末を終えてから終わるようになったとき。
@@ -179,13 +182,34 @@
  *   - 未使用と報告するキーの集合は、全部を同時に除いても deno の解決が変わらないもの。
  *     - 比べるもの: git が知る .ts のそれぞれを根にした `deno info --json` (canon: facts/deno/info-json-dependencies) の、graph の各 module (相対 import で辿った先を含む) の error と dependencies (解決先と、解決の error)。.ts のパスごとに比べる。
  *     - 写し: deno.json の imports と scopes だけを書いたもの (下の「定義域」)。段の一時ディレクトリに置き、--config で渡す。
- *     - 選び方: 全部のキーを持つ写しの解決を基準にする。キーを名前 (UTF-16 の符号単位) の順に 1 つずつ、それまでに除いたものと一緒に除いた写しを試し、解決が基準と同じなら除いたままにする。互いに代わりになるキー (`a/` と `a/b/` など) は、先に試したほうだけを報告する。
- *     - deno info を同時に起動する数は infoLimit まで。写しは 1 つずつ試す。
+ *       - 写しを deno.json と別の場所に置くのは、deno info に imports だけを差し替える flag が無いことへの回避策。
+ *       - 外せる条件: deno info が、deno.json の imports を差し替える flag を持ったとき。
+ *       - 外すと消すもの: uncopiedKeys・unhandled の判定・relativeKey・pathValue・placeBound と、下の「定義域」の最上位のキーと imports・scopes の形の 2 項。
+ *     - 選び方:
+ *       1. 全部のキーを持つ写しの解決を基準にする。
+ *       2. キーを名前 (UTF-16 の符号単位) の順に 1 つずつ試す。試す写しは、それまでに除いたキーと、試すキーを除いたもの。
+ *       3. 試した写しの解決が基準と同じなら、試したキーを除いたままにする。
+ *       - 互いに代わりになるキー (`a/` と `a/b/` など) は、先に試したほうだけを報告する。
+ *     - deno を起動する数は (キーの数 + 1) × .ts の数。同時に起動するのは infoLimit まで。写しは 1 つずつ試すので、待ちは (キーの数 + 1) 回分の、.ts を infoLimit ずつ並べた時間になる。
  *   - 定義域。外れれば、理由を出して落ちる:
- *     - deno.json の最上位のキーは、imports・scopes と uncopiedKeys (写さなくても deno info の解決が変わらないと測ったもの) だけ。workspace・links・importMap・name・unstable・compilerOptions などは、写さないと解決が変わる (canon: facts/deno/info-config-other-location の「写さないキー」)。
+ *     - deno.json の最上位のキーは、imports・scopes と uncopiedKeys だけ。
+ *       - uncopiedKeys: 写さなくても deno info の解決が変わらないと測ったキー (canon: facts/deno/info-config-other-location の「写さないキー」)。
+ *         - 根拠は、canon の表の測った値だけ。他の値 (nodeModulesDir の "manual" など) は測っていない。
+ *         - deno の版を上げるときと、測っていない値を使うときは、canon の手順で測り直す。
+ *       - 他のキーはキーごと落とす。写さないと解決が変わると測ったもの (同じ canon):
+ *         - workspace
+ *         - links
+ *         - importMap
+ *         - name
+ *         - unstable の sloppy-imports
+ *         - compilerOptions の types。compilerOptions の他の値 (strict など) は測った範囲で変わらないが、キーごと落とす。
  *     - imports と scopes が、写しの場所で解決が変わる形を持たない:
  *       - `./`・`../` で始まるキー (scopes のキーを含む): 写しの場所から解決される (canon: facts/deno/info-config-other-location)。
- *       - パスの形の値 (`./`・`../`・`/`・`file:` で始まる): 値の先を治める deno.json (リポのファイルならリポの deno.json) を deno が自動で link し、その imports が写しの差に関わらず当たる (canon: facts/deno/info-config-other-location の「自動の link」)。
+ *       - パスの形の値: 値の先を治める deno.json (リポのファイルならリポの deno.json) を deno が自動で link し、その imports が写しの差に関わらず当たる (canon: facts/deno/info-config-other-location の「自動の link」)。パスの形は、次で始まる値:
+ *         - `./`
+ *         - `../`
+ *         - `/`
+ *         - `file:`
  *   - 指定子に入る構文:
  *     - 静的 import (`import x from "a"`・`import "a"`・`import { type W } from "a"`)。
  *     - `export … from "a"`。
@@ -200,10 +224,15 @@
  *   - deno info --json の形 (modules[].dependencies・modules[].error) は canon の実測。この段の試験が固定し、deno の版を上げたら測り直す。
  *   - deno info は、ネットワークに出ず、deno.lock を読み書きしないフラグで回す (canon: facts/deno/info-json-dependencies)。
  *   - 落ちる (未使用の判定をしない) とき:
- *     - deno.json の最上位か imports がオブジェクトでない。
+ *     - deno.json の最上位か、imports か、scopes (在れば) がオブジェクトでない。
  *     - 上の定義域の外。
  *     - deno info が非 0 で終わるか、出力が JSON として読めない。
- *     - 写しでの graph の、file: の module に error がある (ファイルが無い、構文が壊れている、import 先のファイルが無い。deno info は exit 0。canon: facts/deno/info-json-dependencies)。npm: などの file: でない module の error (--no-npm で取らないもの) は見ない。
+ *     - 写しでの graph の、file: の module に error がある。deno info は exit 0 で、error を module に載せる (canon: facts/deno/info-json-dependencies)。
+ *       - error の例:
+ *         - ファイルが無い。
+ *         - 構文が壊れている。
+ *         - import 先のファイルが無い。
+ *       - npm: などの file: でない module の error (--no-npm で取らないもの) は見ない。
  *     - どれかで落ちれば、残りの写しは試さない。
  *   - 数える参照は .ts の import の指定子だけ。
  */
@@ -415,20 +444,17 @@ async function exec(
   outputs.catch(() => {});
   let emptied: Promise<void> | undefined;
   // 終了の経路と exec の finally の両方が呼ぶ。グループに kill を 2 度送らないよう、1 つの emptyGroup を共有する
-  const empty = () =>
-    emptied ??= emptyGroup(child, outputs).then(() => {
-      groups.delete(child.pid);
-    });
+  const empty = () => emptied ??= emptyGroup(child, outputs);
   const record = { empty, returned: false };
   groups.set(child.pid, record);
   try {
     const { code } = await child.status;
     await empty();
-    // グループの外に残った子孫が pipe を持っていれば閉じないので、上限を置く
-    const closed = await settlesWithin(outputs);
-    if (!closed) await Promise.all(readers.map((r) => r.cancel()));
+    // グループの外に残った子孫が pipe を持っていれば閉じないので、上限を置く。読みの reject でも決着し、下の await outputs が投げる
+    const settled = await settlesWithin(outputs);
+    if (!settled) await Promise.all(readers.map((r) => r.cancel()));
     const [out, err] = await outputs;
-    return closed ? { code, out, err } : {
+    return settled ? { code, out, err } : {
       code: 1,
       out,
       err: Buffer.concat([
@@ -555,7 +581,7 @@ async function gitFiles(): Promise<{ files: string[]; problems: Problems }> {
   const accept = (
     name: Uint8Array,
     reason: string | undefined,
-    { executable }: { executable: boolean },
+    { executable = false }: { executable?: boolean } = {},
   ) => {
     if (reason === undefined) {
       try {
@@ -596,7 +622,6 @@ async function gitFiles(): Promise<{ files: string[]; problems: Problems }> {
       accept(
         tab < 0 ? entry : entry.subarray(tab + 1),
         "git ls-files -s -t の項目の形でない。git の版を確かめる",
-        { executable: false },
       );
       continue;
     }
@@ -618,7 +643,7 @@ async function gitFiles(): Promise<{ files: string[]; problems: Problems }> {
     );
   }
   for (const name of splitNul(others.out)) {
-    accept(name, undefined, { executable: false });
+    accept(name, undefined);
   }
   return {
     files,
@@ -719,9 +744,13 @@ const preProblems = [...listing.problems, ...probes.flat()];
 const setWritableTmpdir = "書けるディレクトリを TMPDIR に設定する";
 if (ts.length && !tmpdir?.startsWith("/")) {
   preProblems.push(
-    `TMPDIR (${
-      tmpdir ?? "未設定"
-    }) が / で始まらず、段の一時ディレクトリを作る場所が無い。絶対パスの、${setWritableTmpdir}`,
+    `${
+      tmpdir === undefined
+        ? "TMPDIR が未設定"
+        : tmpdir === ""
+        ? "TMPDIR が空"
+        : `TMPDIR (${tmpdir}) が / で始まらない`
+    }。絶対パスの、${setWritableTmpdir}`,
   );
 }
 if (preProblems.length) await failBeforeSteps(preProblems);
@@ -743,10 +772,7 @@ async function withStageTmp(
     );
   }
   let removal: Promise<void> | undefined;
-  const remove = () =>
-    removal ??= Deno.remove(path, { recursive: true }).then(() => {
-      stageTmps.delete(path);
-    });
+  const remove = () => removal ??= Deno.remove(path, { recursive: true });
   // 終了の経路が作りかけを見落とさないよう、作ってから記録するまで await を挟まない
   const record = { stage, remove, returned: false };
   stageTmps.set(path, record);
@@ -825,8 +851,9 @@ const resolutionOf = (modules: InfoModule[]) =>
       .map((m) => [m.specifier, m.error ?? null, m.dependencies ?? []]),
   );
 
-/** 写さなくても deno info の解決が変わらないと測った、deno.json の最上位のキー (canon: facts/deno/info-config-other-location の「写さないキー」)。 */
+/** 写さなくても deno info の解決が変わらなかった、deno.json の最上位のキー。根拠は canon の表で測った値だけ (上の「定義域」。canon: facts/deno/info-config-other-location の「写さないキー」)。 */
 const uncopiedKeys = [
+  "$schema",
   "bench",
   "exclude",
   "fmt",
@@ -846,6 +873,12 @@ const relativePath = /^\.\.?\//;
 const relativeKey = (k: string) => relativePath.test(k);
 const pathValue = (v: unknown) =>
   typeof v === "string" && (relativePath.test(v) || /^(?:\/|file:)/.test(v));
+/**
+ * deno info を同時に起動する数の上限 (上の「deno.json の imports の各キー」)。
+ * - 8 は、このリポの .ts (2026-10-28 に 5 件) を 1 回で全部並べられる数。
+ * - 同時に動く子 1 つにつき、このプロセスは fd を 3 つ持つ (canon: facts/deno/spawn-piped-child-fds)。8 なら 24 個で、run-checks_test.ts は開ける fd の数が 128 でも判定できることを確かめる。
+ * - 上げる条件: .ts が増えて、この段の待ちが目立つとき。開ける fd の数の上限 (ulimit -n) の中で上げる。
+ */
 const infoLimit = 8;
 
 const importsStage = "deno.json の imports";
@@ -859,11 +892,18 @@ async function importKeys(): Promise<Run> {
       }`,
     );
   }
-  const { imports = {} } = config;
+  const { imports = {}, scopes = {} } = config;
   if (!isObject(imports)) {
     return fail(
       `deno.json: imports がオブジェクトでない。指定子から依存への対応のオブジェクトにする — ${
         JSON.stringify(imports)
+      }`,
+    );
+  }
+  if (!isObject(scopes)) {
+    return fail(
+      `deno.json: scopes がオブジェクトでない。scope ごとの、指定子から依存への対応のオブジェクトにする — ${
+        JSON.stringify(scopes)
       }`,
     );
   }
@@ -872,12 +912,11 @@ async function importKeys(): Promise<Run> {
   );
   if (unhandled.length) {
     return fail(
-      `deno.json: 最上位に、imports の未使用の判定が扱わないキー (${
+      `deno.json: 最上位に ${
         unhandled.join("・")
-      }) がある。そのキーを消すか、run-checks.ts の先頭の「deno.json の imports の各キー」の定義域を広げる`,
+      } があると、imports の各キーが使われているかを確かめられない。そのキーを消すか、run-checks.ts をそのキーを扱えるように直す`,
     );
   }
-  const scopes = isObject(config.scopes) ? config.scopes : {};
   const placeBound = [
     ...Object.keys(scopes).filter(relativeKey).map((k) => `scopes の "${k}"`),
     ...[imports, ...Object.values(scopes)]
@@ -887,7 +926,7 @@ async function importKeys(): Promise<Run> {
   ];
   if (placeBound.length) {
     return fail(
-      `deno.json: imports・scopes に、未使用を判定できない形 (./・../ で始まるキー、./・../・/・file: で始まる値) がある。ローカルのファイルは相対 import で読み、キーは bare な名前にする:\n${
+      `deno.json: imports・scopes に次のキーか値があると、imports の各キーが使われているかを確かめられない。ローカルのファイルは相対 import で読み、キーは bare な名前にする:\n${
         placeBound.map((p) => `- ${p}`).join("\n")
       }`,
     );
@@ -905,7 +944,7 @@ async function importKeys(): Promise<Run> {
         copy,
         JSON.stringify({
           imports: Object.fromEntries(kept.map((k) => [k, imports[k]])),
-          ...("scopes" in config ? { scopes: config.scopes } : {}),
+          scopes,
         }),
       );
       const runs = await settleLimited(
@@ -931,9 +970,7 @@ async function importKeys(): Promise<Run> {
           ({ modules } = JSON.parse(dec.decode(r.out)));
         } catch (e) {
           problems.push(
-            `${f}: deno info の出力を JSON として読めない。deno の版を確かめる — ${
-              messageOf(e)
-            }`,
+            `${f}: deno info の出力を JSON として読めない — ${messageOf(e)}`,
           );
           return;
         }
@@ -973,7 +1010,7 @@ async function importKeys(): Promise<Run> {
 const unusedOf = (keys: string[]) =>
   fail(
     keys.map((key) =>
-      `deno.json: imports の "${key}" は使われていない (報告したキーを全部除いても、どの .ts の import の解決も変わらない)。使うか deno.json から消す`
+      `deno.json: imports の "${key}" は使われていない (この出力に並ぶ未使用のキーを全部一緒に除いても、どの .ts の import の解決も変わらない)。使うか deno.json から消す`
     ).join("\n"),
   );
 
