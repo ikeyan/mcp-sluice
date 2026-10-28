@@ -42,18 +42,23 @@
 
 - clone したら、まず `./verify.sh` を 1 回回す。pre-push の hook (`PUSH_OK=1` の判定) は、このとき入る。
 - 単一検証コマンドは `./verify.sh`。CI も同じものを回す。含む検査:
+  - deno の版: `scripts/run-checks.ts` の先頭の範囲 (2.9.x で x が 7 以上) に入ること。
   - `shellcheck`: このリポが持つ shell。agent-sync が置いたもの (`.agent-sync/generated` に載り、中身が記録した id と同じもの) は上流が検査するので除く。
-  - `deno fmt --check`・`deno lint`・`deno check`: git が知る `.ts`。`deno lint` は `no-unused-vars` だけ (recommended 全体にすると、deno 2.x の更新で規則が増えて CI が落ちうる)。
-  - `deno test`: git が知る `*_test.ts`。
-  - `scripts/check-json-md.ts`: git が知る `.json` の構文と、`.md` のリポ内リンク。
+  - `deno fmt --check`・`deno lint`・`deno check`: git が知る `.ts`。`deno lint` は `no-unused-vars` だけ (recommended は deno の版で規則が増え、コードを変えていない CI が落ちうる)。
+  - `deno test`: git が知る `*_test.ts`。test は TMPDIR の下に fixture を作り、`verify.sh`・`scripts/run-checks.ts`・`scripts/check-json-md.ts` を子として回す。
+  - `scripts/check-json-md.ts`: git が知る `.json` の構文と、`.md` のリポ内リンク (生の HTML の `href`・`src` を含む)。
   - `deno.json` の `imports`: 各キーが、git が知る `.ts` のどれかの import 指定子から使われていること (`deno lint` が見ない、未使用の依存を埋める。このリポの `.ts` が export を持つようになったら、未使用の export・module の検査を足す)。
-- `./verify.sh` は common git dir の `hooks` の pre-push をその場で揃える (CI は `VERIFY_READONLY=1` で直さず落とす):
-  - 無ければ `hooks/pre-push` を写す。
-  - `hooks/pre-push` と違えば、上書きせず落ちて置き換えのコマンドを示す。
+- `./verify.sh` は common git dir の `hooks` の pre-push を、`VERIFY_READONLY` によらず次のように扱う (写す先は作業ツリーの外):
+  - 無い (壊れた symlink を含む): `hooks/pre-push` を写す。
+  - `hooks/pre-push` と同じ実行可能なファイル: 何もしない。
+  - それ以外: 触らずに落ち、置き換えのコマンドを示す。
 - `./verify.sh` は `core.hooksPath` が hook をよそへ向けていれば落ちる (設定は書かない)。
+- `VERIFY_READONLY` は未設定・空か `1` だけを受け、他の値なら `./verify.sh` が落ちる。CI は `1` を渡す。`./verify.sh` はどちらでも作業ツリーを書き換えない。
+- `./verify.sh` は `git rev-parse --local-env-vars` の変数 (`GIT_DIR` など) を消してから動くので、自分のあるリポだけを検査する。
+- `./verify.sh` を SIGHUP・SIGINT・SIGTERM で止めると、検査の段の子孫を止め、`deno test` の一時ディレクトリを消してから終わる。
 - 必要なもの:
   - `shellcheck` (版は `scripts/run-checks.ts` の `shellcheckVersion` だけ。違えば `./verify.sh` が落ちる)
-  - `deno` (2.x)
+  - `deno` (2.9.x で x が 7 以上。CI は 2.9.8)
   - `git` (2.31 以降)
 - `deno.json` は `"lock": true` で、依存は完全な版で固定する。`minimumDependencyAge` は `P3D` (公開から 3 日未満の版を解決しない。deno の unstable の設定)。`./verify.sh` は `--frozen-lockfile` で回し、`deno.lock` が `deno.json` と食い違えば書き換えず落ちる (直すのは `deno install --frozen=false`)。
 
