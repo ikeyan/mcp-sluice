@@ -1,0 +1,9 @@
+{
+  "extraKnownMarketplaces": {
+    "ikeyan": { "source": { "source": "github", "repo": "ikeyan/agent-files" } }
+  },
+  "enabledPlugins": {
+    "ikeyan-skills@ikeyan": true,
+    "superpowers@claude-plugins-official": true
+  }
+}

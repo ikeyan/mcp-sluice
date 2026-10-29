@@ -1,0 +1,4 @@
+description: このリポが使う ikeyan/agent-files の部品
+catalog:
+  agent-files:
+    source: https://github.com/ikeyan/agent-files.git#37f35201f5319d7a6750ae8fb274804adf2812d4

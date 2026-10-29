@@ -1,0 +1,33 @@
+name: verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    # 下の shellcheck の手順を外せる条件を、この image の同梱の版で決めるので固定する
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          # scripts/run-checks.ts の denoVersions が受ける版にする (上げ方は同じファイルの先頭の「版」)
+          deno-version: "2.9.8"
+      # runner image の shellcheck は版が違い、指摘の出方が違う (canon: facts/shellcheck/sc2015-version-difference)。
+      # 外せる条件: ubuntu-24.04 の同梱の shellcheck が scripts/run-checks.ts の shellcheckVersion と同じ版になったとき (canon: facts/github-actions/ubuntu-2404-runner-bundled-tools)。
+      - env:
+          # scripts/run-checks.ts の shellcheckVersion と同じ値にする
+          SHELLCHECK_VERSION: "0.11.0"
+        run: |
+          archive=$RUNNER_TEMP/shellcheck.tar.xz
+          extracted=$RUNNER_TEMP/shellcheck-v$SHELLCHECK_VERSION
+          curl -fsSLo "$archive" "https://github.com/koalaman/shellcheck/releases/download/v$SHELLCHECK_VERSION/shellcheck-v$SHELLCHECK_VERSION.linux.x86_64.tar.xz"
+          echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  $archive" | sha256sum -c -
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          sudo install -m 755 "$extracted/shellcheck" /usr/local/bin/shellcheck
+      - run: ./verify.sh

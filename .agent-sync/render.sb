@@ -1,0 +1,17 @@
+;; sync.sh が macOS で archetect の描画 1 回にかける Seatbelt の profile。描画は上流の archetype のコードの実行で、archetect は Lua を隔離しない (canon: facts/archetect/lua-not-sandboxed)。
+;; 許すのは、system.sb (システムの実行時に要るもの)、archetect の実行ファイルの exec、archetect の keg と非システムの dylib の読み取り、入力の写し・取得した上流・設定の読み取り、OUT への書き込みだけ。ネットワークと fork の規則は無いので、どちらも拒まれる。
+;; 引数 (sandbox-exec -D): BIN、KEG、DS、SRC、CONF、OUT。sync.sh が BIN の非システムの dylib ごとに読み取りの規則を 1 行ずつ末尾に足す。
+(version 1)
+(deny default)
+(import "system.sb")
+
+(allow process-exec (literal (param "BIN")))
+;; 任意のパスの stat (パスの辿りと正規化に要る)。名前・大きさ・時刻は見えるが、中身とディレクトリの一覧は見えない。
+(allow file-read-metadata)
+(allow file-read* file-map-executable (subpath (param "KEG")))
+(allow file-read*
+  (subpath (param "DS"))
+  (subpath (param "SRC"))
+  (subpath (param "CONF"))
+  (subpath (param "OUT")))
+(allow file-write* (subpath (param "OUT")))

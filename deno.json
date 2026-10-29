@@ -1,0 +1,10 @@
+{
+  "lock": { "frozen": true },
+  "minimumDependencyAge": "P3D",
+  "imports": {
+    "fast-check": "npm:fast-check@4.10.2",
+    "github-slugger": "npm:github-slugger@2.0.0",
+    "markdown-it": "npm:markdown-it@15.0.2",
+    "parse5": "npm:parse5@8.0.1"
+  }
+}
