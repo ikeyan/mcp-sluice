@@ -32,6 +32,9 @@
 - `3ef0a0e`: Codex の指摘 2 件を直した。
   - `sub` が文字列でない・無いトークンと、`groups` の形が違うトークンを 401 にする。利用者の鍵が (`iss`, `sub`) なので、`sub` の無いトークンは別の利用者を同じ利用者にする。
   - `public_url` も `https:` (loopback の `http:` は可) に限る。クライアントが Bearer を、ブラウザが authorization code を送る先なので。
+- `24ebf52`: Codex の指摘 2 件を直した。
+  - ブラウザのページの redirect URI を `public_url` の origin から作り、loopback の `http:` でも登録できるようにした。
+  - ChatGPT が事前登録の client_id を受けるかは未確認なので、ゲートウェイを AS にする方式を退ける判断を、実測 1 の結果に掛けた。
 - 採らなかった指摘: `gateway__resume` の表と 6.3 節の再開の時点 (レビュアー自身が「2 通りに読める」とした)。新しい基準で数えない。
 
 ## 残っていること
