@@ -435,7 +435,7 @@ gateway:                            # ゲートウェイ自身のツールにも
      - メモリ: 実行ごとに WASM の module を作り、その `WebAssembly.Memory` に `maximum` を付ける (variant の `wasmMemory`)。`setMemoryLimit` は文字列や TypedArray の合計を止めない (16 MiB の設定で 1〜2 GB まで伸びた)。`maximum` は module 単位なので、module を実行の間で共有しない (canon: facts/quickjs-emscripten/runtime-limits)。
      - スタック: `setMaxStackSize` を必ず置き、ホストの V8 のスタックの閾値より十分小さくする。置かないと、深い再帰がスクリプトの例外でなく、ホストの `RangeError` になる (同じ canon)。
      - CPU の時間: `evalCode` と `executePendingJobs` の中にいた時間だけを足す。壁時計で数えると、ツールの承認待ちや子の応答待ちも数える (同じ canon)。
-     - 実行全体の壁時計の時間 (承認待ちを除き、子の応答待ちを含む): await の待ちの間は interrupt handler が呼ばれず CPU も使わないので、応答しない子を待つ実行は CPU の時間では止まらない (同じ canon)。この上限を超えたら、待ちを捨てて実行を終える。
+     - 実行全体の壁時計の時間 (承認待ちを除き、子の応答待ちを含む。時計が止まるのは、待っているものが承認だけの間。承認待ちと子の応答待ちが重なる間は進む): await の待ちの間は interrupt handler が呼ばれず CPU も使わないので、応答しない子を待つ実行は CPU の時間では止まらない (同じ canon)。この上限を超えたら、待ちを捨てて実行を終える。
      - ツール呼び出しの数と同時数
      - log と結果の大きさ
    - 走っているスクリプトを止めるのは、interrupt handler だけ。`Worker.terminate()` は、走っている同期の処理 (QuickJS のループを含む) を止めない (canon: facts/deno/worker-terminate-does-not-stop-sync-code)。そのため、橋渡しのホストの関数は、どれも同期で待たない (待ちは Promise で返す)。
