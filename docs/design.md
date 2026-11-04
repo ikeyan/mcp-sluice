@@ -401,7 +401,7 @@ gateway:                            # ゲートウェイ自身のツールにも
      - `.d.ts` は実行ごとに、その時点の一覧と policy (利用者の groups と設定) から作り、保持しない。
    - typescript は 6.x に固定する。7.0.2 (2026-10-28 の npm の dist-tag latest) の package は `transpileModule` を持たない (npm の typescript@7.0.2 の tarball、2026-10-28。canon: facts/typescript/v7-package-lacks-transpile-module)。外せる条件: 7.x の API が、仮想のファイルシステムでの型検査と JS への変換を提供したとき。
 2. TS を JS に変換する (同じ compiler で)。
-3. 実行: QuickJS-WASM (quickjs-emscripten) で、実行ごとに新しい context を作り、worker thread で回す。
+3. 実行: QuickJS-WASM (quickjs-emscripten) で、実行ごとに新しい module・runtime・context を作り、worker thread で回す。
    - 実行の基盤の比較 (物差し: 何もしないときに IO を持つか、閉じるのに要る手当て、依存の状態):
 
      | 候補 | 何もしないときの IO | 閉じるのに要る手当て | 採否 |
@@ -419,9 +419,7 @@ gateway:                            # ゲートウェイ自身のツールにも
        - `npm:` のモジュールが、ネットワークの許可なしに取れる。
      - `deno.permissions: "none"` の Worker では、2 つ目と 3 つ目が同じく通り、`localStorage` は定義されない (同じ canon)。
      - QuickJS-WASM (quickjs-emscripten 0.32.0) の新しい context では、同じ試験がどれも通らない。`fetch`・fs の API も定義されず、前の context の `globalThis` への書き込みは残らない (canon: facts/quickjs-emscripten/no-host-io-by-default)。
-     - 測っていないもの:
-       - `jsr:` と `https:` の指定子の import。
-       - worker の中の QuickJS。上の QuickJS の試験は main thread で測った (11 節の実測 2 で測る)。
+     - worker の中の QuickJS でも、同じ試験と `jsr:`・`https:` の指定子の import がどれも通らない (2026-11-04、同じ canon)。
 
      出典 (2026-10-28):
      - QuickJS-WASM: https://github.com/justjake/quickjs-emscripten の README
@@ -432,11 +430,12 @@ gateway:                            # ゲートウェイ自身のツールにも
      - Dynamic Worker: https://github.com/cloudflare/agents/tree/main/packages/codemode の README
    - 非同期の橋渡しは、`newPromise` と `executePendingJobs` で行う (`Promise.all` で並行に呼べる)。
    - 上限 (値は実装で計測して決め、設定には出さない):
-     - メモリ
-     - スタック
-     - CPU の時間
+     - メモリ: 実行ごとに WASM の module を作り、その `WebAssembly.Memory` に `maximum` を付ける (variant の `wasmMemory`)。`setMemoryLimit` は文字列や TypedArray の合計を止めない (16 MiB の設定で 1〜2 GB まで伸びた)。`maximum` は module 単位なので、module を実行の間で共有しない (canon: facts/quickjs-emscripten/runtime-limits)。
+     - スタック: `setMaxStackSize` を必ず置き、ホストの V8 のスタックの閾値より十分小さくする。置かないと、深い再帰がスクリプトの例外でなく、ホストの `RangeError` になる (同じ canon)。
+     - CPU の時間: `evalCode` と `executePendingJobs` の中にいた時間だけを足す。壁時計で数えると、ツールの承認待ちや子の応答待ちも数える (同じ canon)。
      - ツール呼び出しの数と同時数
      - log と結果の大きさ
+   - 走っているスクリプトを止めるのは、interrupt handler だけ。`Worker.terminate()` は、走っている同期の処理 (QuickJS のループを含む) を止めない (canon: facts/deno/worker-terminate-does-not-stop-sync-code)。そのため、橋渡しのホストの関数は、どれも同期で待たない (待ちは Promise で返す)。
 4. ツール呼び出しの橋渡し: サンドボックスから来たものは、全部信頼しない入力として扱う。ゲートウェイ自身のツール (`gateway__run_code` など) の呼び出しは拒否する。入れ子の実行 (新しい worker と新しい上限) を作らせないため。
    1. 引数を JSON として検証する。
    2. policy を判定する。
@@ -576,11 +575,7 @@ README にセキュリティモデルを書く (0 節と 3.3 節・6.2 節・7 �
       - redirect の regex の通り方 (ChatGPT の redirect URI と、事前登録の client_id を受けるかを含む)
       - `aud` の値
       - 各クライアントが `profile` を要求し、access token に `groups` が入ること
-   2. QuickJS-WASM を Deno の worker で動かす。確かめること:
-      - 非同期の橋渡し
-      - interrupt
-      - メモリの上限
-      - worker の中で、7.2 節 3 の IO の試験が通らないこと
+   2. QuickJS-WASM を Deno の worker で動かす。済み (2026-11-04、quickjs-emscripten 0.32.0、deno 2.9.8): 結果は 7.2 節 3 と canon (facts/quickjs-emscripten/runtime-limits、facts/deno/worker-terminate-does-not-stop-sync-code)。
    3. elicitation: Claude Code で 2025 系と 2026 系。claude.ai で、結果に URL を返す経路。
 2. 中継と allow/deny と認証 (MVP)
 3. 利用者の操作 (承認: elicitation・URL・`gateway__resume`)。試験に、グループから外した利用者の、外す前と後に発行されたトークンでの再開 (6.3 節) を含める。
