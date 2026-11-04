@@ -111,6 +111,7 @@ authentik 2026.8.5 と main のソースで確認した (https://github.com/goau
     | claude.ai | `https://claude\.ai/api/mcp/auth_callback` |
     | Claude Code | `http://(localhost\|127\.0\.0\.1):\d+/callback` |
     | Codex | 上と同じ形で、末尾に `/<id>` が付くことがある (未確認。実測で決める) |
+    | ChatGPT | 未確認。事前登録の client_id を受けるかも含め、実測で決める |
     | mcp-sluice 自身 (ブラウザのページ) | `https://<公開ホスト>/auth/callback` |
 
   - scope: `openid profile email offline_access`
@@ -171,7 +172,7 @@ servers:
       - { tools: ["get_*", "list_*", "search_*"], decision: allow }
   fs:
     transport: { type: stdio, command: /usr/local/bin/fs-mcp, args: [--root, /data] }
-    env: { }                        # SDK の既定の変数に重ねて、子へ渡す env (下)
+    env: { API_KEY: FS_API_KEY }    # 子での名前: ゲートウェイの環境変数の名前 (下)
     rules:
       - { tools: "write_*", decision: ask }
       - { tools: "*", decision: allow }
@@ -186,7 +187,10 @@ gateway:                            # ゲートウェイ自身のツールにも
     - 理由: 平文でホストの外へ出さない (0 節)。HTTP の子へは資格情報 (Bearer・ヘッダ) を載せて送り、issuer からは JWKS を取る。
     - loopback の判定: URL を parse した `hostname` が、`127.0.0.1`・`[::1]`・`localhost` のどれかと等しい。
   - 署名の鍵の環境変数 `MCP_SLUICE_SIGNING_KEY` (9 節) が、無いか、9 節の値の形に外れる。
-- stdio の子の環境は、SDK の既定の変数 (`HOME`・`LOGNAME`・`PATH`・`SHELL`・`TERM`・`USER`。Windows では別の 18 個) に、`env` に書いたものを重ねたものになる。同じ名前なら `env` の値を使う。SDK の stdio transport は、渡した `env` を既定の変数に重ね、既定の変数を外す形を持たない (canon: facts/mcp-typescript-sdk/stdio-default-env)。既定の変数は、0 節で信頼するホストの環境の値。
+- 子への資格情報は、どれも値でなくゲートウェイの環境変数の名前で書く (9 節):
+  - HTTP の子の `auth`: `bearer_env` (Bearer にする環境変数の名前) か、`headers_env` (ヘッダの名前から環境変数の名前への対応)。
+  - stdio の子の `env`: 子での名前から、ゲートウェイの環境変数の名前への対応。
+- stdio の子の環境は、SDK の既定の変数 (`HOME`・`LOGNAME`・`PATH`・`SHELL`・`TERM`・`USER`。Windows では別の 18 個) に、`env` で渡すものを重ねたものになる。同じ名前なら `env` で渡す値を使う。SDK の stdio transport は、渡した `env` を既定の変数に重ね、既定の変数を外す形を持たない (canon: facts/mcp-typescript-sdk/stdio-default-env)。既定の変数は、0 節で信頼するホストの環境の値。
 
 ### 4.2 名前
 
@@ -562,7 +566,7 @@ README にセキュリティモデルを書く (0 節と 3.3 節・6.2 節・7 �
 1. 実測 (spike):
    1. authentik と各クライアントの OAuth。3.2 節の方式で足りるかが、ここで決まる。確かめること:
       - メタデータの経路 (RFC 8414 の URL に届くか、OIDC discovery に落ちるか。3.1 節)
-      - redirect の regex の通り方
+      - redirect の regex の通り方 (ChatGPT の redirect URI と、事前登録の client_id を受けるかを含む)
       - `aud` の値
       - 各クライアントが `profile` を要求し、access token に `groups` が入ること
    2. QuickJS-WASM を Deno の worker で動かす。確かめること:
