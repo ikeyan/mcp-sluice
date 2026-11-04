@@ -112,7 +112,7 @@ authentik 2026.8.5 と main のソースで確認した (https://github.com/goau
     | Claude Code | `http://(localhost\|127\.0\.0\.1):\d+/callback` |
     | Codex | 上と同じ形で、末尾に `/<id>` が付くことがある (未確認。実測で決める) |
     | ChatGPT | 未確認。事前登録の client_id を受けるかも含め、実測で決める |
-    | mcp-sluice 自身 (ブラウザのページ) | `https://<公開ホスト>/auth/callback` |
+    | mcp-sluice 自身 (ブラウザのページ) | `<public_url の origin>/auth/callback` (loopback で `http:` の `public_url` なら `http:`) |
 
   - scope: `openid profile email offline_access`
   - 誰が使えるかは、application に結ぶ policy で決める。
@@ -141,8 +141,10 @@ authentik 2026.8.5 と main のソースで確認した (https://github.com/goau
   - loopback の任意のポートの redirect URI を登録できる。
   - access token に `groups` の claim が入る。
 - 退けた方式: ゲートウェイ自身を OAuth の AS にし、ログインだけ IdP に任せる。
-  - 退けた理由: トークンの発行・保存・失効を自前で抱えることになる。対象のクライアントは、どれも事前登録の client_id を受ける。
-  - ただし、クライアントが authentik のメタデータ (RFC 8414 か OIDC discovery。3.1 節) に届かなければ、この方式が要る。メタデータを代わりに出すだけでは済まない (クライアントは `issuer` と discovery の URL の一致を検査する)。実測で決める。
+  - 退けた理由: トークンの発行・保存・失効を自前で抱えることになる。対象のクライアントのうち、claude.ai・Claude Code・Codex は事前登録の client_id を受ける。
+  - ただし、次のどちらかなら、この方式が要る。実測 1 (11 節) で決める:
+    - ChatGPT が事前登録の client_id を受けない (3.2 節の表で未確認)。
+    - クライアントが authentik のメタデータ (RFC 8414 か OIDC discovery。3.1 節) に届かない。メタデータを代わりに出すだけでは済まない (クライアントは `issuer` と discovery の URL の一致を検査する)。
 
 ### 3.3 子サーバーへの資格情報
 
