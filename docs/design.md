@@ -84,7 +84,7 @@ mcp-sluice は、複数の子 MCP サーバーを 1 つのエンドポイント�
 
 ### 3.1 authentik でできること・できないこと
 
-authentik 2026.8.5 と main のソースで確認した (https://github.com/goauthentik/authentik の `authentik/providers/oauth2/` と `blueprints/system/providers-oauth2.yaml`、2026-10-28)。
+authentik 2026.8.5 と main のソースで確認した (https://github.com/goauthentik/authentik の `authentik/providers/oauth2/` と `blueprints/system/providers-oauth2.yaml`、2026-10-28)。2026-11-04 に 2026.8.5 を docker で立てて実測した (11 節の実測 1。canon: facts/authentik/oauth2-metadata-routes、facts/authentik/oauth2-provider-tokens)。
 
 | 機能 | 状態 | 影響 |
 | --- | --- | --- |
@@ -92,18 +92,20 @@ authentik 2026.8.5 と main のソースで確認した (https://github.com/goau
 | Client ID Metadata Documents (CIMD) | 無し | 使えない |
 | RFC 8707 `resource` | 読まない | `aud` をゲートウェイに向けられない |
 | `aud` | provider の client_id | client_id で検証する |
-| RFC 8414 のメタデータ | 有り。`/.well-known/oauth-authorization-server/application/o/<slug>/` (`urls_root.py`) が、OIDC discovery (`/application/o/<slug>/.well-known/openid-configuration`) と同じ view で返す | クライアントが作る RFC 8414 の URL が末尾の `/` まで一致して届くか、届かなければ OIDC discovery に落ちるかは未確認 (11 節の実測 1) |
+| RFC 8414 のメタデータ | 有り。`/.well-known/oauth-authorization-server/application/o/<slug>/` (`urls_root.py`) が、OIDC discovery (`/application/o/<slug>/.well-known/openid-configuration`) と同じ view で返す。ただし末尾の `/` が必須で、無い URL は 404 (実測) | issuer の末尾の `/` を除いて作る RFC 8414 の URL は 404 になる。MCP の仕様の順 (RFC 8414 → OIDC の path insertion → OIDC の path append) で試すクライアントは、3 つ目の OIDC discovery に届く (MCP TS SDK 1.32.2 で確かめた。canon: facts/mcp-typescript-sdk/as-metadata-discovery-order)。RFC 8414 の URL しか試さないクライアントは届かない |
 | redirect URI | strict か regex (`fullmatch`) | loopback の任意のポートを regex で通せる |
 | `groups` | 既定の `profile` の scope mapping に入る。access token にも入る (`include_claims_in_id_token` の既定は true) | policy にそのまま使える |
 | `sub` | 既定は `hashed_user_id` (authentik の設置ごとに違う) | 利用者の鍵は (`iss`, `sub`) にする |
-| refresh token | `offline_access` のときだけ出る。既定で rotation する | claude.ai の要件 (公開クライアントの rotation) を満たす |
+| refresh token | `offline_access` のときだけ出る。既定で rotation する。古い token の再利用は `invalid_grant` になるが、新しい系列は失効しない (実測) | claude.ai の要件 (公開クライアントの rotation) を満たす。refresh で `groups` は作り直される (実測)ので、グループの変化は access token の寿命 (既定 1 時間) のうちに効く |
 | 署名 | 署名鍵を設定すれば非対称で、JWKS を公開する | 非対称の署名鍵を必ず設定する |
+| token endpoint の認証 | メタデータの `token_endpoint_auth_methods_supported` は `client_secret_post`・`client_secret_basic` だけで `none` が無い。public クライアントは secret 無しで token を取れた (実測) | メタデータを厳密に読むクライアントが `none` を選べるかは未確認 (11 節の実測 1) |
 
 ### 3.2 方式: 事前登録した公開クライアント 1 つ
 
 - authentik に作るもの:
   - application と OAuth2 provider を 1 組作る。
   - client type は public、署名鍵は非対称にする。
+  - grant type に `authorization_code` と `refresh_token` を入れる。API や blueprint で作ると既定は空で、authorize が `invalid_request` になる (実測。管理画面の既定は別の一覧を選ぶ)。
   - redirect URI (regex) を登録する。
 
     | クライアント | redirect URI |
@@ -125,7 +127,7 @@ authentik 2026.8.5 と main のソースで確認した (https://github.com/goau
   - JWT は次を検証する (署名と期限の検証は JOSE のライブラリに任せる):
     - JWKS での署名
     - `iss`
-    - `exp`・`nbf`
+    - `exp` (authentik の token は `nbf` を持たない。持つ IdP では `nbf` も検証する)
     - `aud` == 設定の client_id
     - `sub` が空でない文字列で、`groups` が文字列の配列 (claim が無ければ空の配列) であること。外れれば 401。利用者の同一性 (4.4 節) は (`iss`, `sub`) なので、`sub` の無いトークンを通すと別の利用者が同じ利用者になる。
   - authentik は `resource` を読まないので、`aud` は client_id になる。
@@ -350,7 +352,7 @@ gateway:                            # ゲートウェイ自身のツールにも
     - 他: 実行する。
   - 再開した worker が以後に呼ぶツールの判定も、同じ `groups` を使う。
   - 理由: 中断の前の承認が、グループから外された利用者の呼び出しを通さないため。
-  - グループの変化が効くのは、変化の後に発行されたトークンで再開したときからと見込む。変化の前に発行されたトークンは、前の `groups` を持つ。未確認 (11 節の 3 の試験で確かめる)。遅れは access token の寿命で決まる。
+  - グループの変化が効くのは、変化の後に発行されたトークンで再開したときからと見込む。変化の前に発行されたトークンは、前の `groups` を持つ。authentik では refresh で `groups` が作り直されることを実測した (canon: facts/authentik/oauth2-provider-tokens)。再開での効き方は 11 節の 3 の試験で確かめる。遅れは access token の寿命で決まる。
   - 退けた案:
     - 記録したときの判定を固定する: グループから外された利用者の承認が通る。
     - 再開ごとに IdP に問い合わせる: 通信が増え、IdP の応答の契約に依存する。
@@ -570,11 +572,13 @@ README にセキュリティモデルを書く (0 節と 3.3 節・6.2 節・7 �
 ## 11. 作る順番
 
 1. 実測 (spike):
-   1. authentik と各クライアントの OAuth。3.2 節の方式で足りるかが、ここで決まる。確かめること:
-      - メタデータの経路 (RFC 8414 の URL に届くか、OIDC discovery に落ちるか。3.1 節)
-      - redirect の regex の通り方 (ChatGPT の redirect URI と、事前登録の client_id を受けるかを含む)
-      - `aud` の値
-      - 各クライアントが `profile` を要求し、access token に `groups` が入ること
+   1. authentik と各クライアントの OAuth。3.2 節の方式で足りるかが、ここで決まる。
+      - authentik の側は済み (2026-11-04、2026.8.5): メタデータの経路、loopback の redirect の regex、`aud`、`profile` での `groups`、`resource` の無視、refresh。結果は 3.1 節と canon (facts/authentik/oauth2-metadata-routes、facts/authentik/oauth2-provider-tokens)。
+      - 残り (実物のクライアントが要る):
+        - claude.ai・ChatGPT・Codex・Claude Code が、どのメタデータの URL を試すか (RFC 8414 の URL だけなら届かない。3.1 節)。
+        - 各クライアントが `profile` を要求すること。
+        - redirect URI の実際の形 (Codex の末尾、ChatGPT の URI と、事前登録の client_id を受けるか)。
+        - `token_endpoint_auth_methods_supported` に `none` が無いメタデータで、token endpoint に secret 無しで来ること。
    2. QuickJS-WASM を Deno の worker で動かす。済み (2026-11-04、quickjs-emscripten 0.32.0、deno 2.9.8): 結果は 7.2 節 3 と canon (facts/quickjs-emscripten/runtime-limits、facts/deno/worker-terminate-does-not-stop-sync-code)。
    3. elicitation: Claude Code で 2025 系と 2026 系。claude.ai で、結果に URL を返す経路。
 2. 中継と allow/deny と認証 (MVP)
