@@ -127,6 +127,7 @@ authentik 2026.8.5 と main のソースで確認した (https://github.com/goau
     - `iss`
     - `exp`・`nbf`
     - `aud` == 設定の client_id
+    - `sub` が空でない文字列で、`groups` が文字列の配列 (claim が無ければ空の配列) であること。外れれば 401。利用者の同一性 (4.4 節) は (`iss`, `sub`) なので、`sub` の無いトークンを通すと別の利用者が同じ利用者になる。
   - authentik は `resource` を読まないので、`aud` は client_id になる。
 - ブラウザのページ (`/i/<id>`):
   - 同じ client で authorization code + PKCE のログインをし、セッションの cookie を発行する。
@@ -183,8 +184,8 @@ gateway:                            # ゲートウェイ自身のツールにも
 
 - 起動時の検査で、次のどれかに当たれば起動を失敗させる:
   - どの階層でも、JSON Schema に無いキーがある (`additionalProperties: false`)。rule の `groups` を綴り誤ると (例: `group`)、`groups` が無い規則として全員に効くため。
-  - `auth.issuer` か HTTP の子の `url` が `https:` でない。ただし、loopback の `http:` は許す。
-    - 理由: 平文でホストの外へ出さない (0 節)。HTTP の子へは資格情報 (Bearer・ヘッダ) を載せて送り、issuer からは JWKS を取る。
+  - `auth.issuer`・`auth.public_url`・HTTP の子の `url` のどれかが `https:` でない。ただし、loopback の `http:` は許す。
+    - 理由: 平文でホストの外へ出さない (0 節)。HTTP の子へは資格情報 (Bearer・ヘッダ) を載せて送り、issuer からは JWKS を取る。`public_url` へはクライアントが Bearer を、ブラウザが authorization code (`/auth/callback`) を送る。
     - loopback の判定: URL を parse した `hostname` が、`127.0.0.1`・`[::1]`・`localhost` のどれかと等しい。
   - 署名の鍵の環境変数 `MCP_SLUICE_SIGNING_KEY` (9 節) が、無いか、9 節の値の形に外れる。
 - 子への資格情報は、どれも値でなくゲートウェイの環境変数の名前で書く (9 節):
