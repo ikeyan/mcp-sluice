@@ -105,7 +105,7 @@ authentik 2026.8.5 と main のソースで確認した (https://github.com/goau
 - authentik に作るもの:
   - application と OAuth2 provider を 1 組作る。
   - client type は public、署名鍵は非対称にする。
-  - grant type に `authorization_code` と `refresh_token` を入れる。API や blueprint で作ると既定は空で、authorize が `invalid_request` になる (実測。管理画面の既定は別の一覧を選ぶ)。
+  - grant type に `authorization_code` と `refresh_token` を入れる。API で作ると既定は空で、authorize が `invalid_request` になる (実測)。blueprint で作る経路は測っていない。管理画面の既定は別の一覧を選ぶ (ソースの `OAuth2ProviderFormForm.ts` の `defaultGrantTypes`)。
   - redirect URI (regex) を登録する。
 
     | クライアント | redirect URI |
@@ -435,9 +435,11 @@ gateway:                            # ゲートウェイ自身のツールにも
      - メモリ: 実行ごとに WASM の module を作り、その `WebAssembly.Memory` に `maximum` を付ける (variant の `wasmMemory`)。`setMemoryLimit` は文字列や TypedArray の合計を止めない (16 MiB の設定で 1〜2 GB まで伸びた)。`maximum` は module 単位なので、module を実行の間で共有しない (canon: facts/quickjs-emscripten/runtime-limits)。
      - スタック: `setMaxStackSize` を必ず置き、ホストの V8 のスタックの閾値より十分小さくする。置かないと、深い再帰がスクリプトの例外でなく、ホストの `RangeError` になる (同じ canon)。
      - CPU の時間: `evalCode` と `executePendingJobs` の中にいた時間だけを足す。壁時計で数えると、ツールの承認待ちや子の応答待ちも数える (同じ canon)。
+     - 実行全体の壁時計の時間 (承認待ちを除き、子の応答待ちを含む): await の待ちの間は interrupt handler が呼ばれず CPU も使わないので、応答しない子を待つ実行は CPU の時間では止まらない (同じ canon)。この上限を超えたら、待ちを捨てて実行を終える。
      - ツール呼び出しの数と同時数
      - log と結果の大きさ
    - 走っているスクリプトを止めるのは、interrupt handler だけ。`Worker.terminate()` は、走っている同期の処理 (QuickJS のループを含む) を止めない (canon: facts/deno/worker-terminate-does-not-stop-sync-code)。そのため、橋渡しのホストの関数は、どれも同期で待たない (待ちは Promise で返す)。
+     - interrupt handler が効かない場合 (QuickJS の中の長い native 処理など。測っていない) の止め手は未決。プロセスの終了しか無いので、実行の基盤を子プロセスに置くかを、Code Mode の実装 (11 節の 4) で決める。
 4. ツール呼び出しの橋渡し: サンドボックスから来たものは、全部信頼しない入力として扱う。ゲートウェイ自身のツール (`gateway__run_code` など) の呼び出しは拒否する。入れ子の実行 (新しい worker と新しい上限) を作らせないため。
    1. 引数を JSON として検証する。
    2. policy を判定する。
