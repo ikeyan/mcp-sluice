@@ -4,7 +4,7 @@
     "npm:fast-check@4.10.2": "4.10.2",
     "npm:github-slugger@2.0.0": "2.0.0",
     "npm:markdown-it@15.0.2": "15.0.2",
-    "npm:parse5@8.0.1": "8.0.1"
+    "npm:parse5@8.1.0": "8.1.0"
   },
   "npm": {
     "argparse@3.0.4": {
@@ -12,6 +12,9 @@
     },
     "entities@8.1.0": {
       "integrity": "sha512-kxL7msIffSuh9aaFAMD7rxAIuTRMAHMeBtgHW2yUdWw732ZNh4MehkF2gdjvtdmikkaIP9bFDDJOPlsvm7avrA=="
+    },
+    "entities@9.0.0": {
+      "integrity": "sha512-oJFNDJg3kTPwAD1cNn2+WmUq4wFoo09npc3Ydf1D7ED4smRiWrsKnaLxykrTWgyGEcusc87P5dxlAleol9kpkg=="
     },
     "fast-check@4.10.2": {
       "integrity": "sha512-iK2f+YrcmoeGqk6fA0ea2bptcu/itMIm4NfEozq6N25+aG6h7s5HZbB/k1aV7b5w5sFLMCbbtRUsTVR+BgC3xw==",
@@ -32,7 +35,7 @@
       "integrity": "sha512-q4IGxMv56jCqT4OCRCADBoDP3LO4MhmTXjFbphHPXs4g3j9Xg5RDnxqN8IF/3vIWEU+VCnUq+7JUg/cfy2E6Qw==",
       "dependencies": [
         "argparse",
-        "entities",
+        "entities@8.1.0",
         "linkify-it",
         "mdurl",
         "punycode.js",
@@ -43,10 +46,10 @@
     "mdurl@2.1.0": {
       "integrity": "sha512-1+HBaOx0zi/dQWht8rNv9MYf9qqpqL/kxI0hXImU6Y547zM6Sni8BQibt7ifgMcYtQg41ao3Ivd6cnSM86inpg=="
     },
-    "parse5@8.0.1": {
-      "integrity": "sha512-z1e/HMG90obSGeidlli3hj7cbocou0/wa5HacvI3ASx34PecNjNQeaHNo5WIZpWofN9kgkqV1q5YvXe3F0FoPw==",
+    "parse5@8.1.0": {
+      "integrity": "sha512-sq3qBFpee5jeocbFbO48VHlGr8sT7mbXS0vxlKN6sottBtJzrOG3998sr0llSZcQAGgfpdmEYAIZE0P9z0dE8w==",
       "dependencies": [
-        "entities"
+        "entities@9.0.0"
       ]
     },
     "punycode.js@2.3.1": {
@@ -64,7 +67,7 @@
       "npm:fast-check@4.10.2",
       "npm:github-slugger@2.0.0",
       "npm:markdown-it@15.0.2",
-      "npm:parse5@8.0.1"
+      "npm:parse5@8.1.0"
     ]
   }
 }
