@@ -117,9 +117,10 @@ authentik 2026.8.5 と main のソースで確認した (https://github.com/goau
   - 誰が使えるかは、application に結ぶ policy で決める。
 - ゲートウェイの役割 (resource server):
   - `/.well-known/oauth-protected-resource` (RFC 9728) を出す。
-    - `resource` = 公開 URL
+    - `resource` = 設定の `public_url` (MCP の endpoint の完全な URL。利用者がクライアントに入れる URL)
     - `authorization_servers` = [issuer]
-  - 未認証には 401 と `WWW-Authenticate: Bearer resource_metadata="…"` を返す。claude.ai は 401 でしか認証を始めない (`claude.com/docs/connectors/building/authentication` の Serve discovery metadata。200 に付けた `WWW-Authenticate` は無視されると書いてある。2026-10-28)。
+    - `scopes_supported` = 上の scope
+  - 未認証には 401 と `WWW-Authenticate: Bearer resource_metadata="…", scope="openid profile email offline_access"` を返す。`groups` は `profile` の scope で access token に入る (3.1 節) ので、クライアントに `profile` を求めさせる。claude.ai は `WWW-Authenticate` の `scope` を、無ければ `scopes_supported` を要求する (`claude.com/docs/connectors/building/authentication` の PKCE and requested scopes。2026-11-04)。claude.ai は 401 でしか認証を始めない (`claude.com/docs/connectors/building/authentication` の Serve discovery metadata。200 に付けた `WWW-Authenticate` は無視されると書いてある。2026-10-28)。
   - JWT は次を検証する (署名と期限の検証は JOSE のライブラリに任せる):
     - JWKS での署名
     - `iss`
@@ -128,7 +129,9 @@ authentik 2026.8.5 と main のソースで確認した (https://github.com/goau
   - authentik は `resource` を読まないので、`aud` は client_id になる。
 - ブラウザのページ (`/i/<id>`):
   - 同じ client で authorization code + PKCE のログインをし、セッションの cookie を発行する。
-- 設定は 2 つの値だけにする: `issuer` と `client_id`。
+- 設定は 3 つの値だけにする: `issuer`・`client_id`・`public_url`。
+  - `public_url` が要るのは、TLS を前段の reverse proxy が終端する (9 節) ので、要求の Host と scheme から公開の URL を決められないため。claude.ai は `resource` が利用者の入れた URL とパスまで一致することを求める (同じ docs の Serve discovery metadata)。
+  - `resource_metadata` の URL と、ブラウザのページの redirect URI (`/auth/callback`) は、`public_url` の origin から作る。
 - authentik 以外の IdP でも同じ形で動くと見込む。未確認。その IdP で次を確かめる (authentik で確かめた内容は 3.1 節の表):
   - クライアントがメタデータ (RFC 8414 か OIDC discovery) に届く。
   - access token が JWT で、JWKS で署名を検証できる。
@@ -155,6 +158,7 @@ authentik 2026.8.5 と main のソースで確認した (https://github.com/goau
 auth:
   issuer: https://auth.example.com/application/o/mcp-sluice/
   client_id: mcp-sluice
+  public_url: https://mcp.example.com/mcp
 default: ask                        # どの規則にも当たらないとき
 servers:
   github:
@@ -560,6 +564,7 @@ README にセキュリティモデルを書く (0 節と 3.3 節・6.2 節・7 �
       - メタデータの経路 (RFC 8414 の URL に届くか、OIDC discovery に落ちるか。3.1 節)
       - redirect の regex の通り方
       - `aud` の値
+      - 各クライアントが `profile` を要求し、access token に `groups` が入ること
    2. QuickJS-WASM を Deno の worker で動かす。確かめること:
       - 非同期の橋渡し
       - interrupt
