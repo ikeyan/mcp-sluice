@@ -111,19 +111,23 @@ authentik 2026.8.5 と main のソースで確認した (https://github.com/goau
     | クライアント | redirect URI |
     | --- | --- |
     | claude.ai | `https://claude\.ai/api/mcp/auth_callback` |
-    | Claude Code | `http://(localhost\|127\.0\.0\.1):\d+/callback` |
-    | Codex | 上と同じ形で、末尾に `/<id>` が付くことがある (未確認。実測で決める) |
+    | Claude Code | `http://(localhost\|127\.0\.0\.1):\d+/callback` (2.1.318 は `localhost` を使う。実測) |
+    | Codex | `http://127\.0\.0\.1:\d+/callback/[A-Za-z0-9_-]{12}`。末尾の id は MCP の URL から決まる 12 文字。AS のメタデータが `authorization_response_iss_parameter_supported` を出さないと必ず付く (Codex 0.166.0 を、authentik 2026.8.5 のソースに合わせた偽の AS で実測)。authentik がこれを出さないことはソースの読みで、実物では測っていない |
     | ChatGPT | 未確認。事前登録の client_id を受けるかも含め、実測で決める |
     | mcp-sluice 自身 (ブラウザのページ) | `<public_url の origin>/auth/callback` (loopback で `http:` の `public_url` なら `http:`) |
 
   - scope: `openid profile email offline_access`
   - 誰が使えるかは、application に結ぶ policy で決める。
 - ゲートウェイの役割 (resource server):
-  - `/.well-known/oauth-protected-resource` (RFC 9728) を出す。
+  - protected resource metadata (RFC 9728) を、根の `/.well-known/oauth-protected-resource` と、`public_url` の path を挿んだ `/.well-known/oauth-protected-resource/<path>` の両方で出す。Claude Code の `claude mcp login` は path の形を先に取り、401 から始まる経路は `WWW-Authenticate` の `resource_metadata` の URL だけを取る (2.1.318 で実測)。
     - `resource` = 設定の `public_url` (MCP の endpoint の完全な URL。利用者がクライアントに入れる URL)
     - `authorization_servers` = [issuer]
     - `scopes_supported` = 上の scope
-  - 未認証には 401 と `WWW-Authenticate: Bearer resource_metadata="…", scope="openid profile email offline_access"` を返す。`groups` は `profile` の scope で access token に入る (3.1 節) ので、クライアントに `profile` を求めさせる。claude.ai は `WWW-Authenticate` の `scope` を、無ければ `scopes_supported` を要求する (`claude.com/docs/connectors/building/authentication` の PKCE and requested scopes。2026-11-04)。claude.ai は 401 でしか認証を始めない (`claude.com/docs/connectors/building/authentication` の Serve discovery metadata。200 に付けた `WWW-Authenticate` は無視されると書いてある。2026-10-28)。
+  - 未認証には 401 と `WWW-Authenticate: Bearer resource_metadata="…", scope="openid profile email offline_access"` を返す。`groups` は `profile` の scope で access token に入る (3.1 節) ので、クライアントに `profile` を求めさせる。クライアントによって scope の出どころが違うので、両方に同じ値を置く:
+    - claude.ai: `WWW-Authenticate` の `scope`、無ければ `scopes_supported` (`claude.com/docs/connectors/building/authentication` の PKCE and requested scopes。2026-11-04)。
+    - Claude Code 2.1.318: PRM に `scopes_supported` があるとき、`WWW-Authenticate` の `scope` は使わない (実測。`scopes_supported` が無いときは測っていない)。
+    - Codex 0.166.0: `WWW-Authenticate` の `scope` を優先し、`offline_access` を足す (実測)。
+  - claude.ai は 401 でしか認証を始めない (`claude.com/docs/connectors/building/authentication` の Serve discovery metadata。200 に付けた `WWW-Authenticate` は無視されると書いてある。2026-10-28)。
   - JWT は次を検証する (署名と期限の検証は JOSE のライブラリに任せる):
     - JWKS での署名
     - `iss`
@@ -277,14 +281,14 @@ gateway:                            # ゲートウェイ自身のツールにも
 
 | クライアントの能力 | 承認 |
 | --- | --- |
-| elicitation の form と url | form で聞く |
+| elicitation の form と url | form で聞く。Claude Code の `claude -p` と Codex の `codex exec` は form と url を宣言しつつ、elicitation に即座に `cancel` で答える (Claude Code 2.1.318 で実測、Codex はソース) ので、非対話の実行では ask が `cancelled` になる |
 | elicitation の form だけ | form で聞く |
 | elicitation の url だけ | 結果に URL を返す (下) |
 | elicitation 無し (claude.ai・ChatGPT と見込む) | 結果に URL を返す (下) |
 
 - elicitation で聞く場合:
   - 2025 系: その場で `elicitation/create` を送って待つ。
-    - SDK の server の `elicitInput` で送る。`elicitInput` は `RequestOptions` の `timeout` を受け、渡さなければ 60000 ミリ秒で拒否する。待つ上限は、期限 (6.3 節) 以下の固定値にして `timeout` で渡す。過ぎたら `cancelled` (6.3 節)。
+    - SDK の server の `elicitInput` で送る。`elicitInput` は `RequestOptions` の `timeout` を受け、渡さなければ 60000 ミリ秒で拒否する。待つ上限は、期限 (6.3 節) 以下の固定値にして `timeout` で渡す。過ぎたら `cancelled` (6.3 節)。期限の後もクライアントの問いの画面は残り、後から答えが届く (Claude Code 2.1.318 で実測) ので、終わった要求への答えは捨てる。
     - `elicitInput` は 2.4.0 の型定義で `@deprecated` で、doc は 2026-07-28 の要求では throw すると書く (npm の `@modelcontextprotocol/server` 2.4.0 の tarball の `dist/*.d.mts`、2026-10-28)。SDK の版を上げるたびに、残っているかを確かめる。
   - 2026 系: `input_required` を返し、`requestState` に要求 id と、その署名だけを入れる。
     - 署名する理由: 仕様は、`requestState` を攻撃者が操る入力として扱い、認可・資源の取得・業務の論理のどれかに効くなら完全性を守って、検証に外れたものを拒否するよう求める。完全性の保護を省いてよいのは、改ざんで起きうる最悪が要求の失敗のときだけ (https://github.com/modelcontextprotocol/modelcontextprotocol の `docs/specification/2026-07-28/basic/patterns/mrtr.mdx` の Server Requirements (Basic Workflow)、2026-10-28)。
@@ -576,13 +580,10 @@ README にセキュリティモデルを書く (0 節と 3.3 節・6.2 節・7 �
 1. 実測 (spike):
    1. authentik と各クライアントの OAuth。3.2 節の方式で足りるかが、ここで決まる。
       - authentik の側は済み (2026-11-04、2026.8.5): メタデータの経路、loopback の redirect の regex、`aud`、`profile` での `groups`、`resource` の無視、refresh。結果は 3.1 節と canon (facts/authentik/oauth2-metadata-routes、facts/authentik/oauth2-provider-tokens)。
-      - 残り (実物のクライアントが要る):
-        - claude.ai・ChatGPT・Codex・Claude Code が、どのメタデータの URL を試すか (RFC 8414 の URL だけなら届かない。3.1 節)。
-        - 各クライアントが `profile` を要求すること。
-        - redirect URI の実際の形 (Codex の末尾、ChatGPT の URI と、事前登録の client_id を受けるか)。
-        - `token_endpoint_auth_methods_supported` に `none` が無いメタデータで、token endpoint に secret 無しで来ること。
+      - Claude Code 2.1.318 と Codex 0.166.0 は済み (2026-11-05、authentik と同じ形の偽の AS で): どちらも OIDC の path append に届き、事前登録の client_id を受け、`profile` を要求し、secret 無しで token endpoint に来た。結果は 3.2 節と canon (facts/claude-code/mcp-oauth-client-behavior、facts/codex/mcp-oauth-and-elicitation)。
+      - 残り (claude.ai と ChatGPT。この環境からは測れない): どのメタデータの URL を試すか、`profile` を要求するか、redirect URI の形 (ChatGPT は事前登録の client_id を受けるかも)、secret 無しで token endpoint に来るか。
    2. QuickJS-WASM を Deno の worker で動かす。済み (2026-11-04、quickjs-emscripten 0.32.0、deno 2.9.8): 結果は 7.2 節 3 と canon (facts/quickjs-emscripten/runtime-limits、facts/deno/worker-terminate-does-not-stop-sync-code)。
-   3. elicitation: Claude Code で 2025 系と 2026 系。claude.ai で、結果に URL を返す経路。
+   3. elicitation: Claude Code の 2025 系と 2026 系は済み。Codex は app-server でモデルを通さずに測った (2026 系は既定で off の feature を有効にして)。TUI・モデル経由・`codex exec` の cancel はソースでだけ確かめた (2026-11-05。結果は 6.2 節と canon facts/claude-code/mcp-elicitation-behavior・facts/codex/mcp-oauth-and-elicitation)。残りは claude.ai で結果に URL を返す経路と、Codex をモデル経由で動かしたとき。
 2. 中継と allow/deny と認証 (MVP)
 3. 利用者の操作 (承認: elicitation・URL・`gateway__resume`)。試験に、グループから外した利用者の、外す前と後に発行されたトークンでの再開 (6.3 節) を含める。
 4. Code Mode (型検査、QuickJS)
