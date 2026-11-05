@@ -112,7 +112,7 @@ authentik 2026.8.5 と main のソースで確認した (https://github.com/goau
     | --- | --- |
     | claude.ai | `https://claude\.ai/api/mcp/auth_callback` |
     | Claude Code | `http://(localhost\|127\.0\.0\.1):\d+/callback` (2.1.318 は `localhost` を使う。実測) |
-    | Codex | `http://127\.0\.0\.1:\d+/callback/[A-Za-z0-9_-]{12}`。末尾の id は MCP の URL から決まる 12 文字。AS のメタデータが `authorization_response_iss_parameter_supported` を出さないと必ず付き、authentik は出さない (0.166.0 で実測) |
+    | Codex | `http://127\.0\.0\.1:\d+/callback/[A-Za-z0-9_-]{12}`。末尾の id は MCP の URL から決まる 12 文字。AS のメタデータが `authorization_response_iss_parameter_supported` を出さないと必ず付く (Codex 0.166.0 を、authentik 2026.8.5 のソースに合わせた偽の AS で実測)。authentik がこれを出さないことはソースの読みで、実物では測っていない |
     | ChatGPT | 未確認。事前登録の client_id を受けるかも含め、実測で決める |
     | mcp-sluice 自身 (ブラウザのページ) | `<public_url の origin>/auth/callback` (loopback で `http:` の `public_url` なら `http:`) |
 
@@ -125,7 +125,7 @@ authentik 2026.8.5 と main のソースで確認した (https://github.com/goau
     - `scopes_supported` = 上の scope
   - 未認証には 401 と `WWW-Authenticate: Bearer resource_metadata="…", scope="openid profile email offline_access"` を返す。`groups` は `profile` の scope で access token に入る (3.1 節) ので、クライアントに `profile` を求めさせる。クライアントによって scope の出どころが違うので、両方に同じ値を置く:
     - claude.ai: `WWW-Authenticate` の `scope`、無ければ `scopes_supported` (`claude.com/docs/connectors/building/authentication` の PKCE and requested scopes。2026-11-04)。
-    - Claude Code 2.1.318: `scopes_supported` だけを使い、`WWW-Authenticate` の `scope` は使わない (実測)。
+    - Claude Code 2.1.318: PRM に `scopes_supported` があるとき、`WWW-Authenticate` の `scope` は使わない (実測。`scopes_supported` が無いときは測っていない)。
     - Codex 0.166.0: `WWW-Authenticate` の `scope` を優先し、`offline_access` を足す (実測)。
   - claude.ai は 401 でしか認証を始めない (`claude.com/docs/connectors/building/authentication` の Serve discovery metadata。200 に付けた `WWW-Authenticate` は無視されると書いてある。2026-10-28)。
   - JWT は次を検証する (署名と期限の検証は JOSE のライブラリに任せる):
@@ -583,7 +583,7 @@ README にセキュリティモデルを書く (0 節と 3.3 節・6.2 節・7 �
       - Claude Code 2.1.318 と Codex 0.166.0 は済み (2026-11-05、authentik と同じ形の偽の AS で): どちらも OIDC の path append に届き、事前登録の client_id を受け、`profile` を要求し、secret 無しで token endpoint に来た。結果は 3.2 節と canon (facts/claude-code/mcp-oauth-client-behavior、facts/codex/mcp-oauth-and-elicitation)。
       - 残り (claude.ai と ChatGPT。この環境からは測れない): どのメタデータの URL を試すか、`profile` を要求するか、redirect URI の形 (ChatGPT は事前登録の client_id を受けるかも)、secret 無しで token endpoint に来るか。
    2. QuickJS-WASM を Deno の worker で動かす。済み (2026-11-04、quickjs-emscripten 0.32.0、deno 2.9.8): 結果は 7.2 節 3 と canon (facts/quickjs-emscripten/runtime-limits、facts/deno/worker-terminate-does-not-stop-sync-code)。
-   3. elicitation: Claude Code と Codex の 2025 系と 2026 系は済み (2026-11-05。結果は 6.2 節と canon facts/claude-code/mcp-elicitation-behavior)。残りは claude.ai で、結果に URL を返す経路。
+   3. elicitation: Claude Code の 2025 系と 2026 系は済み。Codex は app-server でモデルを通さずに測った (2026 系は既定で off の feature を有効にして)。TUI・モデル経由・`codex exec` の cancel はソースでだけ確かめた (2026-11-05。結果は 6.2 節と canon facts/claude-code/mcp-elicitation-behavior・facts/codex/mcp-oauth-and-elicitation)。残りは claude.ai で結果に URL を返す経路と、Codex をモデル経由で動かしたとき。
 2. 中継と allow/deny と認証 (MVP)
 3. 利用者の操作 (承認: elicitation・URL・`gateway__resume`)。試験に、グループから外した利用者の、外す前と後に発行されたトークンでの再開 (6.3 節) を含める。
 4. Code Mode (型検査、QuickJS)
