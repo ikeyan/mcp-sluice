@@ -28,6 +28,7 @@
   - protected resource metadata を、根と path を挿んだ形の両方で出す。
   - 非対話の実行 (`claude -p`・`codex exec`) では、elicitation が即座に `cancel` になることを書いた。
   - 2025 系で期限の後に届いた答えを捨てる。
+- `eb97a56`: レビューの指摘 3 件を直した。実測と書いた記述のうち、測った範囲より強いもの (Codex の elicitation、authentik が `authorization_response_iss_parameter_supported` を出さないこと、Claude Code の scope の「だけ」) を、測った範囲に限った。
 
 ## 残っていること
 
