@@ -17,7 +17,7 @@
 ## 良かったこと
 
 - 3.2 節の方式 (事前登録した公開クライアント 1 つ) が、Claude Code と Codex で通ることを確かめられた。どちらも OIDC の path append に届き、事前登録の client_id を受け、`profile` を要求し、secret 無しで token endpoint に来た。
-- scope の出どころを、`WWW-Authenticate` と `scopes_supported` に違う値を置いて測ったので、クライアントごとの違い (Claude Code は `scopes_supported` だけ、Codex は header を優先) が分かった。
+- scope の出どころを、`WWW-Authenticate` と `scopes_supported` に違う値を置いて測ったので、クライアントごとの違い (Claude Code は `scopes_supported` があればそれを使い header を使わない、Codex は header を優先。Claude Code で `scopes_supported` が無いときは測っていない) が分かった。
 - 利用者の設定 (`~/.claude`・`~/.codex`) を変えずに、`CLAUDE_CONFIG_DIR`・`CODEX_HOME` で使い捨ての置き場に向けて測れた。
 
 ## 直したこと
