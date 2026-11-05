@@ -84,7 +84,7 @@ mcp-sluice は、複数の子 MCP サーバーを 1 つのエンドポイント�
 
 ### 3.1 authentik でできること・できないこと
 
-authentik 2026.8.5 と main のソースで確認した (https://github.com/goauthentik/authentik の `authentik/providers/oauth2/` と `blueprints/system/providers-oauth2.yaml`、2026-10-28)。
+authentik 2026.8.5 と main のソースで確認した (https://github.com/goauthentik/authentik の `authentik/providers/oauth2/` と `blueprints/system/providers-oauth2.yaml`、2026-10-28)。2026-11-04 に 2026.8.5 を docker で立てて実測した (11 節の実測 1。canon: facts/authentik/oauth2-metadata-routes、facts/authentik/oauth2-provider-tokens)。
 
 | 機能 | 状態 | 影響 |
 | --- | --- | --- |
@@ -92,18 +92,20 @@ authentik 2026.8.5 と main のソースで確認した (https://github.com/goau
 | Client ID Metadata Documents (CIMD) | 無し | 使えない |
 | RFC 8707 `resource` | 読まない | `aud` をゲートウェイに向けられない |
 | `aud` | provider の client_id | client_id で検証する |
-| RFC 8414 のメタデータ | 有り。`/.well-known/oauth-authorization-server/application/o/<slug>/` (`urls_root.py`) が、OIDC discovery (`/application/o/<slug>/.well-known/openid-configuration`) と同じ view で返す | クライアントが作る RFC 8414 の URL が末尾の `/` まで一致して届くか、届かなければ OIDC discovery に落ちるかは未確認 (11 節の実測 1) |
+| RFC 8414 のメタデータ | 有り。`/.well-known/oauth-authorization-server/application/o/<slug>/` (`urls_root.py`) が、OIDC discovery (`/application/o/<slug>/.well-known/openid-configuration`) と同じ view で返す。ただし末尾の `/` が必須で、無い URL は 404 (実測) | issuer の末尾の `/` を除いて作る RFC 8414 の URL は 404 になる。MCP の仕様の順 (RFC 8414 → OIDC の path insertion → OIDC の path append) で試すクライアントは、3 つ目の OIDC discovery に届く (MCP TS SDK 1.32.2 で確かめた。canon: facts/mcp-typescript-sdk/as-metadata-discovery-order)。RFC 8414 の URL しか試さないクライアントは届かない |
 | redirect URI | strict か regex (`fullmatch`) | loopback の任意のポートを regex で通せる |
 | `groups` | 既定の `profile` の scope mapping に入る。access token にも入る (`include_claims_in_id_token` の既定は true) | policy にそのまま使える |
 | `sub` | 既定は `hashed_user_id` (authentik の設置ごとに違う) | 利用者の鍵は (`iss`, `sub`) にする |
-| refresh token | `offline_access` のときだけ出る。既定で rotation する | claude.ai の要件 (公開クライアントの rotation) を満たす |
+| refresh token | `offline_access` のときだけ出る。既定で rotation する。古い token の再利用は `invalid_grant` になるが、新しい系列は失効しない (実測) | claude.ai の要件 (公開クライアントの rotation) を満たす。refresh で `groups` は作り直される (実測)ので、グループの変化は access token の寿命 (既定 1 時間) のうちに効く |
 | 署名 | 署名鍵を設定すれば非対称で、JWKS を公開する | 非対称の署名鍵を必ず設定する |
+| token endpoint の認証 | メタデータの `token_endpoint_auth_methods_supported` は `client_secret_post`・`client_secret_basic` だけで `none` が無い。public クライアントは secret 無しで token を取れた (実測) | メタデータを厳密に読むクライアントが `none` を選べるかは未確認 (11 節の実測 1) |
 
 ### 3.2 方式: 事前登録した公開クライアント 1 つ
 
 - authentik に作るもの:
   - application と OAuth2 provider を 1 組作る。
   - client type は public、署名鍵は非対称にする。
+  - grant type に `authorization_code` と `refresh_token` を入れる。API で作ると既定は空で、authorize が `invalid_request` になる (実測)。blueprint で作る経路は測っていない。管理画面の既定は別の一覧を選ぶ (ソースの `OAuth2ProviderFormForm.ts` の `defaultGrantTypes`)。
   - redirect URI (regex) を登録する。
 
     | クライアント | redirect URI |
@@ -125,7 +127,7 @@ authentik 2026.8.5 と main のソースで確認した (https://github.com/goau
   - JWT は次を検証する (署名と期限の検証は JOSE のライブラリに任せる):
     - JWKS での署名
     - `iss`
-    - `exp`・`nbf`
+    - `exp` (authentik の token は `nbf` を持たない。持つ IdP では `nbf` も検証する)
     - `aud` == 設定の client_id
     - `sub` が空でない文字列で、`groups` が文字列の配列 (claim が無ければ空の配列) であること。外れれば 401。利用者の同一性 (4.4 節) は (`iss`, `sub`) なので、`sub` の無いトークンを通すと別の利用者が同じ利用者になる。
   - authentik は `resource` を読まないので、`aud` は client_id になる。
@@ -350,7 +352,7 @@ gateway:                            # ゲートウェイ自身のツールにも
     - 他: 実行する。
   - 再開した worker が以後に呼ぶツールの判定も、同じ `groups` を使う。
   - 理由: 中断の前の承認が、グループから外された利用者の呼び出しを通さないため。
-  - グループの変化が効くのは、変化の後に発行されたトークンで再開したときからと見込む。変化の前に発行されたトークンは、前の `groups` を持つ。未確認 (11 節の 3 の試験で確かめる)。遅れは access token の寿命で決まる。
+  - グループの変化が効くのは、変化の後に発行されたトークンで再開したときからと見込む。変化の前に発行されたトークンは、前の `groups` を持つ。authentik では refresh で `groups` が作り直されることを実測した (canon: facts/authentik/oauth2-provider-tokens)。再開での効き方は 11 節の 3 の試験で確かめる。遅れは access token の寿命で決まる。
   - 退けた案:
     - 記録したときの判定を固定する: グループから外された利用者の承認が通る。
     - 再開ごとに IdP に問い合わせる: 通信が増え、IdP の応答の契約に依存する。
@@ -401,7 +403,7 @@ gateway:                            # ゲートウェイ自身のツールにも
      - `.d.ts` は実行ごとに、その時点の一覧と policy (利用者の groups と設定) から作り、保持しない。
    - typescript は 6.x に固定する。7.0.2 (2026-10-28 の npm の dist-tag latest) の package は `transpileModule` を持たない (npm の typescript@7.0.2 の tarball、2026-10-28。canon: facts/typescript/v7-package-lacks-transpile-module)。外せる条件: 7.x の API が、仮想のファイルシステムでの型検査と JS への変換を提供したとき。
 2. TS を JS に変換する (同じ compiler で)。
-3. 実行: QuickJS-WASM (quickjs-emscripten) で、実行ごとに新しい context を作り、worker thread で回す。
+3. 実行: QuickJS-WASM (quickjs-emscripten) で、実行ごとに新しい module・runtime・context を作り、worker thread で回す。
    - 実行の基盤の比較 (物差し: 何もしないときに IO を持つか、閉じるのに要る手当て、依存の状態):
 
      | 候補 | 何もしないときの IO | 閉じるのに要る手当て | 採否 |
@@ -419,9 +421,7 @@ gateway:                            # ゲートウェイ自身のツールにも
        - `npm:` のモジュールが、ネットワークの許可なしに取れる。
      - `deno.permissions: "none"` の Worker では、2 つ目と 3 つ目が同じく通り、`localStorage` は定義されない (同じ canon)。
      - QuickJS-WASM (quickjs-emscripten 0.32.0) の新しい context では、同じ試験がどれも通らない。`fetch`・fs の API も定義されず、前の context の `globalThis` への書き込みは残らない (canon: facts/quickjs-emscripten/no-host-io-by-default)。
-     - 測っていないもの:
-       - `jsr:` と `https:` の指定子の import。
-       - worker の中の QuickJS。上の QuickJS の試験は main thread で測った (11 節の実測 2 で測る)。
+     - worker の中の QuickJS でも、同じ試験と `jsr:`・`https:` の指定子の import がどれも通らない (2026-11-04、同じ canon)。
 
      出典 (2026-10-28):
      - QuickJS-WASM: https://github.com/justjake/quickjs-emscripten の README
@@ -432,11 +432,14 @@ gateway:                            # ゲートウェイ自身のツールにも
      - Dynamic Worker: https://github.com/cloudflare/agents/tree/main/packages/codemode の README
    - 非同期の橋渡しは、`newPromise` と `executePendingJobs` で行う (`Promise.all` で並行に呼べる)。
    - 上限 (値は実装で計測して決め、設定には出さない):
-     - メモリ
-     - スタック
-     - CPU の時間
+     - メモリ: 実行ごとに WASM の module を作り、その `WebAssembly.Memory` に `maximum` を付ける (variant の `wasmMemory`)。`setMemoryLimit` は文字列や TypedArray の合計を止めない (16 MiB の設定で 1〜2 GB まで伸びた)。`maximum` は module 単位なので、module を実行の間で共有しない (canon: facts/quickjs-emscripten/runtime-limits)。
+     - スタック: `setMaxStackSize` を必ず置き、ホストの V8 のスタックの閾値より十分小さくする。置かないと、深い再帰がスクリプトの例外でなく、ホストの `RangeError` になる (同じ canon)。
+     - CPU の時間: `evalCode` と `executePendingJobs` の中にいた時間だけを足す。壁時計で数えると、ツールの承認待ちや子の応答待ちも数える (同じ canon)。
+     - 実行全体の壁時計の時間 (承認待ちを除き、子の応答待ちを含む。時計が止まるのは、待っているものが承認だけの間。承認待ちと子の応答待ちが重なる間は進む): await の待ちの間は interrupt handler が呼ばれず CPU も使わないので、応答しない子を待つ実行は CPU の時間では止まらない (同じ canon)。この上限を超えたら、待ちを捨てて実行を終える。
      - ツール呼び出しの数と同時数
      - log と結果の大きさ
+   - 走っているスクリプトを止めるのは、interrupt handler だけ。`Worker.terminate()` は、走っている同期の処理 (QuickJS のループを含む) を止めない (canon: facts/deno/worker-terminate-does-not-stop-sync-code)。そのため、橋渡しのホストの関数は、どれも同期で待たない (待ちは Promise で返す)。
+     - interrupt handler が効かない場合 (QuickJS の中の長い native 処理など。測っていない) の止め手は未決。プロセスの終了しか無いので、実行の基盤を子プロセスに置くかを、Code Mode の実装 (11 節の 4) で決める。
 4. ツール呼び出しの橋渡し: サンドボックスから来たものは、全部信頼しない入力として扱う。ゲートウェイ自身のツール (`gateway__run_code` など) の呼び出しは拒否する。入れ子の実行 (新しい worker と新しい上限) を作らせないため。
    1. 引数を JSON として検証する。
    2. policy を判定する。
@@ -571,16 +574,14 @@ README にセキュリティモデルを書く (0 節と 3.3 節・6.2 節・7 �
 ## 11. 作る順番
 
 1. 実測 (spike):
-   1. authentik と各クライアントの OAuth。3.2 節の方式で足りるかが、ここで決まる。確かめること:
-      - メタデータの経路 (RFC 8414 の URL に届くか、OIDC discovery に落ちるか。3.1 節)
-      - redirect の regex の通り方 (ChatGPT の redirect URI と、事前登録の client_id を受けるかを含む)
-      - `aud` の値
-      - 各クライアントが `profile` を要求し、access token に `groups` が入ること
-   2. QuickJS-WASM を Deno の worker で動かす。確かめること:
-      - 非同期の橋渡し
-      - interrupt
-      - メモリの上限
-      - worker の中で、7.2 節 3 の IO の試験が通らないこと
+   1. authentik と各クライアントの OAuth。3.2 節の方式で足りるかが、ここで決まる。
+      - authentik の側は済み (2026-11-04、2026.8.5): メタデータの経路、loopback の redirect の regex、`aud`、`profile` での `groups`、`resource` の無視、refresh。結果は 3.1 節と canon (facts/authentik/oauth2-metadata-routes、facts/authentik/oauth2-provider-tokens)。
+      - 残り (実物のクライアントが要る):
+        - claude.ai・ChatGPT・Codex・Claude Code が、どのメタデータの URL を試すか (RFC 8414 の URL だけなら届かない。3.1 節)。
+        - 各クライアントが `profile` を要求すること。
+        - redirect URI の実際の形 (Codex の末尾、ChatGPT の URI と、事前登録の client_id を受けるか)。
+        - `token_endpoint_auth_methods_supported` に `none` が無いメタデータで、token endpoint に secret 無しで来ること。
+   2. QuickJS-WASM を Deno の worker で動かす。済み (2026-11-04、quickjs-emscripten 0.32.0、deno 2.9.8): 結果は 7.2 節 3 と canon (facts/quickjs-emscripten/runtime-limits、facts/deno/worker-terminate-does-not-stop-sync-code)。
    3. elicitation: Claude Code で 2025 系と 2026 系。claude.ai で、結果に URL を返す経路。
 2. 中継と allow/deny と認証 (MVP)
 3. 利用者の操作 (承認: elicitation・URL・`gateway__resume`)。試験に、グループから外した利用者の、外す前と後に発行されたトークンでの再開 (6.3 節) を含める。
